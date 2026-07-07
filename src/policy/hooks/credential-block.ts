@@ -8,10 +8,14 @@ const CREDENTIAL_GLOBS = [
   "**/.env",
   "**/.env.*",
   "**/.aws/**",
+  "**/.ssh/**",
+  "**/.gnupg/**",
   "**/*credential*",
   "**/*secret*",
   "**/id_rsa",
+  "**/id_ed25519",
   "**/*.pem",
+  "**/*.key",
 ];
 
 /**

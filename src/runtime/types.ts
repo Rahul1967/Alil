@@ -75,6 +75,18 @@ export interface ToolCatalogPort {
   list(): Promise<ToolSpec[]>;
 }
 
+/**
+ * Observes the brain's progress within a turn — model turns, tool calls, results, halts.
+ * All callbacks optional; a no-op observer means silent. The REPL uses this for a live
+ * trace; the audit ledger will consume the same events.
+ */
+export interface BrainObserver {
+  onModelTurn?(e: { iteration: number; text?: string; toolCalls: number }): void;
+  onToolCall?(e: { tool: string; args: Record<string, unknown> }): void;
+  onToolResult?(e: { tool: string; outcome: ToolResult["outcome"]; summary: string }): void;
+  onHalt?(e: { reason: string; kind: "guard" | "error" }): void;
+}
+
 /** A monotonic clock, injectable so guard tests are deterministic. */
 export interface Clock {
   now(): number;

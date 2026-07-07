@@ -53,15 +53,37 @@ const approvals: ApprovalPort = {
   },
 };
 
+// Sandbox root: defaults to workspace/, override with ALIL_SANDBOX_ROOT (e.g. /home/user).
+const sandboxRoot = process.env.ALIL_SANDBOX_ROOT ?? "workspace";
 const tools = new ToolRegistry();
 const boundary = new PolicyBoundary({
   rules: new YamlRuleSource("config/policy.yaml"),
   tools,
   hooks: [credentialBlock],
-  executor: new Executor({ sandbox: new Sandbox("workspace") }),
+  executor: new Executor({ sandbox: new Sandbox(sandboxRoot) }),
   approvals,
   grants: new GrantStore(),
 });
+
+// Live trace of what happens inside a turn: model thinking, tool calls, and outcomes.
+const OUTCOME_MARK = { ok: "✓", error: "✗", denied: "⛔" } as const;
+const observer = {
+  onModelTurn(e: { iteration: number; text?: string; toolCalls: number }) {
+    if (e.toolCalls > 0) {
+      console.log(`  · thinking (turn ${e.iteration}) → ${e.toolCalls} tool call${e.toolCalls > 1 ? "s" : ""}`);
+    }
+  },
+  onToolCall(e: { tool: string; args: Record<string, unknown> }) {
+    const args = JSON.stringify(e.args);
+    console.log(`  → ${e.tool} ${args.length > 120 ? args.slice(0, 120) + "…" : args}`);
+  },
+  onToolResult(e: { tool: string; outcome: "ok" | "error" | "denied"; summary: string }) {
+    console.log(`    ${OUTCOME_MARK[e.outcome]} ${e.outcome}: ${e.summary}`);
+  },
+  onHalt(e: { reason: string; kind: "guard" | "error" }) {
+    console.log(`  ⏹ halted (${e.kind}): ${e.reason}`);
+  },
+};
 
 const ports: BrainPorts = {
   memory: { recall: async () => [] },
@@ -70,9 +92,10 @@ const ports: BrainPorts = {
   tools: new RegistryToolCatalog(DEFAULT_TOOLS),
   // Persona from workspace/SOUL.md (falls back to base-only if absent).
   prompt: new PromptAssembler(new FilePersonaSource()),
-  // Real policy boundary: reads under workspace/ execute; writes are gated (ask → denied
-  // until the approvals section); credential paths hard-blocked.
+  // Real policy boundary: reads run; writes/high-risk gated by approval; credentials blocked.
   actions: boundary,
+  // Live trace of tool calls and outcomes.
+  observer,
 };
 
 const brain = new Brain({ modelId, guards: DEFAULT_GUARDS }, registry, ports);
@@ -81,7 +104,11 @@ let closed = false;
 rl.on("close", () => {
   closed = true;
 });
-console.log(`Alil dev REPL — model: ${modelId}\nType a message (/exit to quit).\n`);
+console.log(
+  `Alil dev REPL — model: ${modelId}\n` +
+    `filesystem root: ${sandboxRoot}  (reads auto · writes need approval · credentials blocked)\n` +
+    `Type a message (/exit to quit).\n`,
+);
 
 for (;;) {
   let text: string;

@@ -7,6 +7,7 @@ import type {
   MemoryPort,
   SkillPort,
   ToolCatalogPort,
+  BrainObserver,
   Clock,
 } from "./types.ts";
 import { systemClock } from "./types.ts";
@@ -24,6 +25,7 @@ export interface BrainPorts {
   skills: SkillPort;
   tools: ToolCatalogPort;
   prompt: PromptPort;
+  observer?: BrainObserver;
 }
 
 /**
@@ -53,6 +55,7 @@ export class Brain {
   async run(input: BrainInput): Promise<BrainTurn> {
     const { spec, provider } = this.#registry.resolve(this.#config.modelId);
     const guards = new Guards(this.#config.guards, this.#clock);
+    const observer = this.#ports.observer;
 
     const systemPrompt = await this.#ports.prompt.system();
     const recalled = await this.#ports.memory.recall(input.message.text);
@@ -71,6 +74,7 @@ export class Brain {
     for (;;) {
       const gate = guards.check();
       if (gate.halt) {
+        observer?.onHalt?.({ reason: gate.reason ?? "guard", kind: "guard" });
         return {
           ...(lastAssistantText !== undefined ? { assistantText: lastAssistantText } : {}),
           proposedActions,
@@ -95,6 +99,7 @@ export class Brain {
       } catch (err) {
         // Terminal here: retry/backoff is a later section (BEST_PRACTICES §8). Fail closed.
         const msg = err instanceof ProviderError ? err.message : String(err);
+        observer?.onHalt?.({ reason: `provider error: ${msg}`, kind: "error" });
         return {
           ...(lastAssistantText !== undefined ? { assistantText: lastAssistantText } : {}),
           proposedActions,
@@ -108,6 +113,12 @@ export class Brain {
       guards.recordUsage(response.usage, spec);
       if (response.text !== undefined) lastAssistantText = response.text;
       guards.recordToolSignatures(response.toolCalls.map(signatureOf));
+
+      observer?.onModelTurn?.({
+        iteration: guards.iterations,
+        ...(response.text !== undefined ? { text: response.text } : {}),
+        toolCalls: response.toolCalls.length,
+      });
 
       // Append the assistant turn (text and/or tool calls) to the conversation.
       messages.push({
@@ -132,8 +143,10 @@ export class Brain {
       for (const call of response.toolCalls) {
         const proposed: ProposedAction = { action: toActionContract(call) };
         proposedActions.push(proposed);
+        observer?.onToolCall?.({ tool: call.tool, args: call.args });
         const result = await this.#ports.actions.submit(proposed);
         results.push(result);
+        observer?.onToolResult?.({ tool: call.tool, outcome: result.outcome, summary: result.summary });
         messages.push({
           role: "tool",
           toolCallId: call.id,
