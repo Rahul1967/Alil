@@ -4,3 +4,6 @@ dist/
 *.log
 workspace/sessions/
 workspace/logs/
+
+# Claude Code local settings + temp files
+.claude/
