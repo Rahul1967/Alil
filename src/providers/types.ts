@@ -25,8 +25,11 @@ export interface ModelSpec {
 // ─── Normalized message + tool shapes (provider-agnostic) ───
 export interface ChatMessage {
   role: "user" | "assistant" | "tool";
-  content: string;
-  /** For role "tool": which action this result answers. */
+  /** Text content. Optional for assistant turns that only carry tool calls. */
+  content?: string;
+  /** For role "assistant": tool calls the model made this turn. */
+  toolCalls?: ModelToolCall[];
+  /** For role "tool": which tool call this result answers. */
   toolCallId?: string;
 }
 

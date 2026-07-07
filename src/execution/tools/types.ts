@@ -21,6 +21,8 @@ export interface ToolRunResult {
  */
 export interface ToolImpl<T = Record<string, unknown>> {
   readonly name: string;
+  readonly description: string; // advertised to the model
+  readonly parameters: Record<string, unknown>; // JSON schema for args, advertised to the model
   readonly effect: Effect;
   readonly risk: Risk;
   readonly reversible: boolean;

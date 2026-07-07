@@ -6,13 +6,14 @@ import type {
   ActionSink,
   MemoryPort,
   SkillPort,
+  ToolCatalogPort,
   Clock,
 } from "./types.ts";
 import { systemClock } from "./types.ts";
 import { Guards } from "./guards.ts";
-import { assemble } from "./context-assembler.ts";
+import { initialMessages } from "./context-assembler.ts";
 import type { ProviderRegistry } from "../providers/registry.ts";
-import type { ModelToolCall } from "../providers/types.ts";
+import type { ModelToolCall, ModelInvocation } from "../providers/types.ts";
 import { ProviderError } from "../providers/types.ts";
 import type { ActionContract, ToolResult } from "../core/types.ts";
 import type { PromptPort } from "../prompts/types.ts";
@@ -21,6 +22,7 @@ export interface BrainPorts {
   actions: ActionSink;
   memory: MemoryPort;
   skills: SkillPort;
+  tools: ToolCatalogPort;
   prompt: PromptPort;
 }
 
@@ -55,13 +57,16 @@ export class Brain {
     const systemPrompt = await this.#ports.prompt.system();
     const recalled = await this.#ports.memory.recall(input.message.text);
     const skills = await this.#ports.skills.eligible(input);
+    const tools = await this.#ports.tools.list();
 
     const proposedActions: ProposedAction[] = [];
     const results: ToolResult[] = [];
     let lastAssistantText: string | undefined;
 
-    // Results produced in the previous iteration, fed back as observations.
-    let pendingResults: ToolResult[] = [];
+    // The growing conversation. Seeded once; each iteration appends the assistant turn
+    // (with any tool calls) and the tool results, so the provider sees a valid
+    // user → assistant(tool_use) → tool(result) alternation.
+    const messages = initialMessages({ input, recalled, skills });
 
     for (;;) {
       const gate = guards.check();
@@ -76,17 +81,13 @@ export class Brain {
         };
       }
 
-      const invocation = assemble({
-        modelId: this.#config.modelId,
-        systemPrompt,
-        input,
-        recalled,
-        skills,
-        priorResults: pendingResults,
-        ...(this.#config.temperature !== undefined
-          ? { temperature: this.#config.temperature }
-          : {}),
-      });
+      const invocation: ModelInvocation = {
+        model: this.#config.modelId,
+        system: systemPrompt,
+        messages,
+        ...(tools.length > 0 ? { tools } : {}),
+        ...(this.#config.temperature !== undefined ? { temperature: this.#config.temperature } : {}),
+      };
 
       let response;
       try {
@@ -106,9 +107,14 @@ export class Brain {
 
       guards.recordUsage(response.usage, spec);
       if (response.text !== undefined) lastAssistantText = response.text;
-
-      // Record signatures (empty string on no-tool turns) for stall detection.
       guards.recordToolSignatures(response.toolCalls.map(signatureOf));
+
+      // Append the assistant turn (text and/or tool calls) to the conversation.
+      messages.push({
+        role: "assistant",
+        ...(response.text !== undefined ? { content: response.text } : {}),
+        ...(response.toolCalls.length > 0 ? { toolCalls: response.toolCalls } : {}),
+      });
 
       if (response.toolCalls.length === 0) {
         // Model produced a final answer — the turn is complete.
@@ -121,16 +127,18 @@ export class Brain {
         };
       }
 
-      // Hand each proposed action to the boundary. The brain does not execute or judge.
-      pendingResults = [];
+      // Hand each proposed action to the boundary, then feed the result back as a tool turn.
+      // The brain does not execute or judge; a denied action is observed, never retried.
       for (const call of response.toolCalls) {
         const proposed: ProposedAction = { action: toActionContract(call) };
         proposedActions.push(proposed);
         const result = await this.#ports.actions.submit(proposed);
         results.push(result);
-        pendingResults.push(result);
-        // A denied action is appended as an observation and NOT retried
-        // (BEST_PRACTICES §8). The model may choose a different course next iteration.
+        messages.push({
+          role: "tool",
+          toolCallId: call.id,
+          content: toolResultContent(result),
+        });
       }
     }
   }
@@ -138,6 +146,19 @@ export class Brain {
 
 function signatureOf(call: ModelToolCall): string {
   return `${call.tool}(${stableStringify(call.args)})`;
+}
+
+/**
+ * What the model sees back from a tool. On success, the payload (data) is what matters —
+ * the summary alone (e.g. "read 63 chars") would starve the model of the actual content.
+ * On denial/error, the reason is what the model needs.
+ */
+function toolResultContent(result: ToolResult): string {
+  if (result.outcome === "ok") {
+    if (result.data === undefined) return result.summary;
+    return typeof result.data === "string" ? result.data : JSON.stringify(result.data);
+  }
+  return `[${result.outcome}] ${result.summary}`;
 }
 
 /**

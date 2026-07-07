@@ -7,6 +7,15 @@ interface FsReadArgs {
 
 export const fsRead: ToolImpl<FsReadArgs> = {
   name: "fs.read",
+  description: "Read a UTF-8 text file from the workspace. Returns the file contents.",
+  parameters: {
+    type: "object",
+    properties: {
+      path: { type: "string", description: "Path relative to the workspace root." },
+    },
+    required: ["path"],
+    additionalProperties: false,
+  },
   effect: "read",
   risk: "low",
   reversible: true,

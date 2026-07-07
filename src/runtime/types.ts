@@ -6,6 +6,7 @@ import type {
   SkillRef,
   TranscriptLine,
 } from "../core/types.ts";
+import type { ToolSpec } from "../providers/types.ts";
 
 // ─── Brain I/O ───
 export interface BrainInput {
@@ -67,6 +68,11 @@ export interface MemoryPort {
 
 export interface SkillPort {
   eligible(input: BrainInput): Promise<SkillRef[]>;
+}
+
+/** Lists the tools available to advertise to the model. Decouples the brain from the registry. */
+export interface ToolCatalogPort {
+  list(): Promise<ToolSpec[]>;
 }
 
 /** A monotonic clock, injectable so guard tests are deterministic. */

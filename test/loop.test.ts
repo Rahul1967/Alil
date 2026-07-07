@@ -43,6 +43,7 @@ function ports(sink: (a: ProposedAction) => Promise<ToolResult>): {
     ports: {
       memory: { recall: async () => [] },
       skills: { eligible: async () => [] },
+      tools: { list: async () => [] },
       prompt: { system: async () => "You are Alil." },
       actions: {
         submit: async (a) => {

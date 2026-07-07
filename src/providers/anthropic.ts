@@ -7,6 +7,7 @@ import type {
   StopReason,
 } from "./types.ts";
 import { ProviderError } from "./types.ts";
+import { sanitizeToolName, buildNameMap, canonicalName } from "./tool-names.ts";
 
 const MESSAGES_URL = "https://api.anthropic.com/v1/messages";
 const API_VERSION = "2023-06-01";
@@ -41,7 +42,7 @@ export class AnthropicProvider implements Provider {
       ...(inv.tools && inv.tools.length > 0
         ? {
             tools: inv.tools.map((t) => ({
-              name: t.name,
+              name: sanitizeToolName(t.name),
               description: t.description,
               input_schema: t.parameters,
             })),
@@ -82,7 +83,7 @@ export class AnthropicProvider implements Provider {
     }
 
     const json = (await res.json()) as AnthropicResponse;
-    return mapResponse(json);
+    return mapResponse(json, buildNameMap(inv.tools));
   }
 }
 
@@ -98,15 +99,19 @@ function toAnthropicMessages(inv: ModelInvocation): AnthropicMsg[] {
       return {
         role: "user",
         content: [
-          {
-            type: "tool_result",
-            tool_use_id: m.toolCallId ?? "",
-            content: m.content,
-          },
+          { type: "tool_result", tool_use_id: m.toolCallId ?? "", content: m.content ?? "" },
         ],
       };
     }
-    return { role: m.role, content: m.content };
+    if (m.role === "assistant") {
+      const blocks: unknown[] = [];
+      if (m.content) blocks.push({ type: "text", text: m.content });
+      for (const tc of m.toolCalls ?? []) {
+        blocks.push({ type: "tool_use", id: tc.id, name: sanitizeToolName(tc.tool), input: tc.args });
+      }
+      return { role: "assistant", content: blocks };
+    }
+    return { role: "user", content: m.content ?? "" };
   });
 }
 
@@ -120,7 +125,7 @@ interface AnthropicResponse {
   usage?: { input_tokens?: number; output_tokens?: number };
 }
 
-function mapResponse(json: AnthropicResponse): ModelResponse {
+function mapResponse(json: AnthropicResponse, names: Map<string, string>): ModelResponse {
   let text: string | undefined;
   const toolCalls: ModelToolCall[] = [];
 
@@ -128,7 +133,7 @@ function mapResponse(json: AnthropicResponse): ModelResponse {
     if (block.type === "text") {
       text = (text ?? "") + block.text;
     } else if (block.type === "tool_use") {
-      toolCalls.push({ id: block.id, tool: block.name, args: block.input ?? {} });
+      toolCalls.push({ id: block.id, tool: canonicalName(names, block.name), args: block.input ?? {} });
     }
   }
 

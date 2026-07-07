@@ -9,6 +9,16 @@ interface FsWriteArgs {
 
 export const fsWrite: ToolImpl<FsWriteArgs> = {
   name: "fs.write",
+  description: "Write a UTF-8 text file in the workspace, creating parent directories. Overwrites if it exists.",
+  parameters: {
+    type: "object",
+    properties: {
+      path: { type: "string", description: "Path relative to the workspace root." },
+      content: { type: "string", description: "Full file contents to write." },
+    },
+    required: ["path", "content"],
+    additionalProperties: false,
+  },
   effect: "write",
   risk: "medium",
   reversible: false,

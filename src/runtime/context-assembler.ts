@@ -1,36 +1,24 @@
 import type { BrainInput } from "./types.ts";
-import type { Fragment, SkillRef, ToolResult } from "../core/types.ts";
-import type { ChatMessage, ModelInvocation } from "../providers/types.ts";
+import type { Fragment, SkillRef } from "../core/types.ts";
+import type { ChatMessage } from "../providers/types.ts";
 
 /**
- * Builds the ModelInvocation for a turn. Threads provenance through and — critically —
- * delimits untrusted/ingested content from instructions (BEST_PRACTICES §4), so injected
- * text lands in an information position, never an instruction position.
+ * Builds the INITIAL conversation for a turn: recalled memory + eligible skills as context,
+ * then the inbound user message. The loop grows this list across iterations (appending
+ * assistant tool-use turns and tool results), so this only seeds it.
+ *
+ * Threads provenance through and fences non-operator content as untrusted
+ * (BEST_PRACTICES §4), so injected text lands in an information position, not an
+ * instruction position.
  */
-export function assemble(params: {
-  modelId: string;
-  systemPrompt: string;
+export function initialMessages(params: {
   input: BrainInput;
   recalled: Fragment[];
   skills: SkillRef[];
-  priorResults: ToolResult[];
-  temperature?: number;
-  maxOutputTokens?: number;
-}): ModelInvocation {
-  const {
-    modelId,
-    systemPrompt,
-    input,
-    recalled,
-    skills,
-    priorResults,
-    temperature,
-    maxOutputTokens,
-  } = params;
-
+}): ChatMessage[] {
+  const { input, recalled, skills } = params;
   const messages: ChatMessage[] = [];
 
-  // Recalled memory + eligible skills go in as context, each labelled by trust class.
   const contextBlocks: string[] = [];
   for (const f of recalled) {
     contextBlocks.push(
@@ -45,30 +33,12 @@ export function assemble(params: {
     messages.push({ role: "user", content: contextBlocks.join("\n\n") });
   }
 
-  // The inbound message. If it is not from the operator, fence it as untrusted data.
   const p = input.message.provenance;
   const trusted = p.origin === "operator" || p.origin === "system";
-  const userContent = trusted
-    ? input.message.text
-    : untrustedFence(input.message.text, p.origin);
-  messages.push({ role: "user", content: userContent });
+  const content = trusted ? input.message.text : untrustedFence(input.message.text, p.origin);
+  messages.push({ role: "user", content });
 
-  // Results from actions the boundary already executed this turn.
-  for (const r of priorResults) {
-    messages.push({
-      role: "tool",
-      toolCallId: r.actionId,
-      content: `[${r.outcome}] ${r.summary}`,
-    });
-  }
-
-  return {
-    model: modelId,
-    system: systemPrompt,
-    messages,
-    ...(temperature !== undefined ? { temperature } : {}),
-    ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
-  };
+  return messages;
 }
 
 function untrustedFence(text: string, origin: string): string {

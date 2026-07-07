@@ -17,6 +17,7 @@ import type {
   StopReason,
 } from "./types.ts";
 import { ProviderError } from "./types.ts";
+import { sanitizeToolName, buildNameMap, canonicalName } from "./tool-names.ts";
 
 /**
  * AWS Bedrock provider — uses the unified Converse API via @aws-sdk/client-bedrock-runtime.
@@ -63,7 +64,7 @@ export class BedrockProvider implements Provider {
     } catch (err) {
       throw classifyError(err);
     }
-    return mapResponse(out);
+    return mapResponse(out, buildNameMap(inv.tools));
   }
 }
 
@@ -74,16 +75,21 @@ function toBedrockMessages(inv: ModelInvocation): BedrockMessage[] {
       return {
         role: "user",
         content: [
-          {
-            toolResult: {
-              toolUseId: m.toolCallId ?? "",
-              content: [{ text: m.content }],
-            },
-          },
+          { toolResult: { toolUseId: m.toolCallId ?? "", content: [{ text: m.content ?? "" }] } },
         ],
       };
     }
-    return { role: m.role, content: [{ text: m.content }] };
+    if (m.role === "assistant") {
+      const content: ContentBlock[] = [];
+      if (m.content) content.push({ text: m.content });
+      for (const tc of m.toolCalls ?? []) {
+        content.push({
+          toolUse: { toolUseId: tc.id, name: sanitizeToolName(tc.tool), input: tc.args as never },
+        });
+      }
+      return { role: "assistant", content };
+    }
+    return { role: "user", content: [{ text: m.content ?? "" }] };
   });
 }
 
@@ -91,7 +97,7 @@ function toBedrockTools(inv: ModelInvocation): BedrockTool[] {
   return (inv.tools ?? []).map(
     (t): BedrockTool => ({
       toolSpec: {
-        name: t.name,
+        name: sanitizeToolName(t.name),
         description: t.description,
         // Bedrock types json as DocumentType; our tool params are a JSON-schema object.
         inputSchema: { json: t.parameters as unknown as never },
@@ -101,7 +107,7 @@ function toBedrockTools(inv: ModelInvocation): BedrockTool[] {
 }
 
 // ─── response mapping ───
-function mapResponse(out: ConverseCommandOutput): ModelResponse {
+function mapResponse(out: ConverseCommandOutput, names: Map<string, string>): ModelResponse {
   const blocks: ContentBlock[] = out.output?.message?.content ?? [];
   let text: string | undefined;
   const toolCalls: ModelToolCall[] = [];
@@ -112,7 +118,7 @@ function mapResponse(out: ConverseCommandOutput): ModelResponse {
     } else if ("toolUse" in block && block.toolUse) {
       toolCalls.push({
         id: block.toolUse.toolUseId ?? "",
-        tool: block.toolUse.name ?? "",
+        tool: canonicalName(names, block.toolUse.name ?? ""),
         args: (block.toolUse.input as Record<string, unknown>) ?? {},
       });
     }

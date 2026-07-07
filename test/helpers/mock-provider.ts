@@ -37,7 +37,9 @@ export class MockProvider implements Provider {
   }
 
   async invoke(inv: ModelInvocation, _spec: ModelSpec): Promise<ModelResponse> {
-    this.received.push(inv);
+    // Snapshot: the loop mutates the messages array across iterations, so capture the
+    // state as it was at this call.
+    this.received.push(structuredClone(inv));
     const next = this.#queue.shift();
     if (!next) {
       return {
