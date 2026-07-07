@@ -31,3 +31,18 @@ test("base prompt retains the safety-critical instructions", () => {
   assert.match(BASE_SYSTEM_PROMPT, /no standing authority/i);
   assert.match(BASE_SYSTEM_PROMPT, /do not execute anything yourself|do not execute/i);
 });
+
+test("base prompt tells the model to search proactively", () => {
+  assert.match(BASE_SYSTEM_PROMPT, /web\.search/);
+  assert.match(BASE_SYSTEM_PROMPT, /don't ask permission to look something up/i);
+});
+
+test("env context injects a fixed date into the prompt", async () => {
+  const fixed = new Date("2026-07-07T12:00:00Z");
+  const sys = await new PromptAssembler(new StaticPersonaSource(null), {
+    env: { now: () => fixed },
+  }).system();
+  assert.ok(sys.startsWith(BASE_SYSTEM_PROMPT));
+  assert.match(sys, /## Environment/);
+  assert.match(sys, /Today's date is .*2026/);
+});

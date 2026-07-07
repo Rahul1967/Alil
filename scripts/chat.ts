@@ -90,8 +90,8 @@ const ports: BrainPorts = {
   skills: { eligible: async () => [] },
   // Advertise the same tools the boundary governs.
   tools: new RegistryToolCatalog(DEFAULT_TOOLS),
-  // Persona from workspace/SOUL.md (falls back to base-only if absent).
-  prompt: new PromptAssembler(new FilePersonaSource()),
+  // Persona from workspace/SOUL.md (falls back to base-only if absent); inject the date.
+  prompt: new PromptAssembler(new FilePersonaSource(), { env: { now: () => new Date() } }),
   // Real policy boundary: reads run; writes/high-risk gated by approval; credentials blocked.
   actions: boundary,
   // Live trace of tool calls and outcomes.

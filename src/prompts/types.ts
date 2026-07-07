@@ -16,3 +16,11 @@ export interface PromptPort {
 export interface PersonaSource {
   load(): Promise<string | null>;
 }
+
+/**
+ * Supplies dynamic runtime facts injected into the system prompt (currently the date, so
+ * the model can reason about "today"/"yesterday"). Injectable so tests stay deterministic.
+ */
+export interface EnvContext {
+  now(): Date;
+}
