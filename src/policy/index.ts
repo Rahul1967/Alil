@@ -20,3 +20,12 @@ export type {
 } from "./rules.ts";
 export { credentialBlock } from "./hooks/credential-block.ts";
 export type { GuardHook } from "./hooks/types.ts";
+export { GrantStore, captureBinding, verifyBinding } from "./approval/index.ts";
+export type {
+  ApprovalPort,
+  ApprovalRequest,
+  ApprovalDecision,
+  Grant,
+  GrantScope,
+  ExecutionBinding,
+} from "./approval/index.ts";

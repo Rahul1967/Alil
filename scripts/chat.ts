@@ -1,12 +1,12 @@
 /**
- * Interactive dev REPL for the brain. Wires the Bedrock provider with stub ports
- * (auto-deny ActionSink, empty memory/skills) so you can converse with the loop.
+ * Interactive dev REPL for the brain. Wires the Bedrock provider, the real policy
+ * boundary (fs.read/fs.write, credential blocks), and operator approval over the REPL.
  *
  * Run:  node --experimental-strip-types --env-file=.env scripts/chat.ts
  * Exit: Ctrl-C, or type /exit
  *
- * Note: no tools are advertised yet (the policy boundary/tool registry are later
- * sections), so this exercises pure reasoning — the model answers, it does not act.
+ * Reads under workspace/ run automatically; writes/high-risk actions prompt for approval
+ * ([y] once, [g] grant a short reusable scope, [n] deny). Credential paths are blocked.
  */
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
@@ -15,7 +15,8 @@ import type { BrainPorts } from "../src/runtime/loop.ts";
 import { DEFAULT_GUARDS } from "../src/runtime/types.ts";
 import { ProviderRegistry, BedrockProvider } from "../src/providers/index.ts";
 import { PromptAssembler, FilePersonaSource } from "../src/prompts/index.ts";
-import { PolicyBoundary, YamlRuleSource, credentialBlock } from "../src/policy/index.ts";
+import { PolicyBoundary, YamlRuleSource, credentialBlock, GrantStore } from "../src/policy/index.ts";
+import type { ApprovalPort, ApprovalRequest, ApprovalDecision } from "../src/policy/index.ts";
 import { ToolRegistry, Executor, Sandbox, RegistryToolCatalog, DEFAULT_TOOLS } from "../src/execution/index.ts";
 import type { BrainInput } from "../src/runtime/types.ts";
 
@@ -23,12 +24,43 @@ const modelId = process.env.BEDROCK_MODEL_ID ?? "us.anthropic.claude-sonnet-4-5-
 
 const registry = new ProviderRegistry().register(new BedrockProvider());
 
+const rl = createInterface({ input: stdin, output: stdout });
+
+// Operator approval over the REPL. Fail-closed: unclear/empty answer ⇒ deny.
+const approvals: ApprovalPort = {
+  async request(req: ApprovalRequest): Promise<ApprovalDecision> {
+    const a = req.action;
+    const argsPreview = JSON.stringify(a.args).slice(0, 200);
+    console.log(
+      `\n  ⚠ approval needed: ${a.tool} (${a.effect}/${a.risk})\n` +
+        `    args: ${argsPreview}\n` +
+        `    reason: ${req.reason}`,
+    );
+    let ans: string;
+    try {
+      ans = (await rl.question("    [y] once  [g] grant 10×/30m  [n] deny › ")).trim().toLowerCase();
+    } catch {
+      return { approved: false, reason: "no input" };
+    }
+    if (ans === "y") return { approved: true };
+    if (ans === "g") {
+      return {
+        approved: true,
+        scope: { tool: a.tool, maxUses: 10, ttlMs: 30 * 60_000, task: "repl-session" },
+      };
+    }
+    return { approved: false, reason: "operator declined" };
+  },
+};
+
 const tools = new ToolRegistry();
 const boundary = new PolicyBoundary({
   rules: new YamlRuleSource("config/policy.yaml"),
   tools,
   hooks: [credentialBlock],
   executor: new Executor({ sandbox: new Sandbox("workspace") }),
+  approvals,
+  grants: new GrantStore(),
 });
 
 const ports: BrainPorts = {
@@ -45,7 +77,6 @@ const ports: BrainPorts = {
 
 const brain = new Brain({ modelId, guards: DEFAULT_GUARDS }, registry, ports);
 
-const rl = createInterface({ input: stdin, output: stdout });
 let closed = false;
 rl.on("close", () => {
   closed = true;
