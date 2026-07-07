@@ -1,0 +1,18 @@
+{
+  "name": "alil",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A JARVIS-class assistant harness with structural guardrails and HITL approval.",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test test/**/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.1080.0"
+  }
+}

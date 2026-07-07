@@ -1,0 +1,331 @@
+<title>Alil Harness — Design Doc</title>
+<style>
+  :root {
+    --paper: #FAFAF7;
+    --ink: #1C2127;
+    --ink-soft: #4A5259;
+    --ink-faint: #8B9299;
+    --line: #E3E2DC;
+    --panel: #F1F0EB;
+    --accent: #0E7C86;
+    --accent-soft: #E0EEEF;
+    --allow: #2E7D4F;
+    --allow-bg: #E4F0E8;
+    --ask: #B07C10;
+    --ask-bg: #F6EEDA;
+    --deny: #B3382C;
+    --deny-bg: #F5E4E1;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #14181D; --ink: #E8EAEC; --ink-soft: #A8B0B8; --ink-faint: #6E767E;
+      --line: #2A3138; --panel: #1B2127; --accent: #4FB3BC; --accent-soft: #16333A;
+      --allow: #6CC08F; --allow-bg: #17301F; --ask: #D9A93E; --ask-bg: #33290F;
+      --deny: #E07A6E; --deny-bg: #371B17;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #14181D; --ink: #E8EAEC; --ink-soft: #A8B0B8; --ink-faint: #6E767E;
+    --line: #2A3138; --panel: #1B2127; --accent: #4FB3BC; --accent-soft: #16333A;
+    --allow: #6CC08F; --allow-bg: #17301F; --ask: #D9A93E; --ask-bg: #33290F;
+    --deny: #E07A6E; --deny-bg: #371B17;
+  }
+  :root[data-theme="light"] {
+    --paper: #FAFAF7; --ink: #1C2127; --ink-soft: #4A5259; --ink-faint: #8B9299;
+    --line: #E3E2DC; --panel: #F1F0EB; --accent: #0E7C86; --accent-soft: #E0EEEF;
+    --allow: #2E7D4F; --allow-bg: #E4F0E8; --ask: #B07C10; --ask-bg: #F6EEDA;
+    --deny: #B3382C; --deny-bg: #F5E4E1;
+  }
+  body {
+    background: var(--paper); color: var(--ink);
+    font-family: var(--sans); font-size: 16px; line-height: 1.65;
+    margin: 0; padding: 0 20px 96px;
+  }
+  main { max-width: 74ch; margin: 0 auto; }
+  .wide { max-width: 62rem; margin-left: auto; margin-right: auto; }
+  code, .mono { font-family: var(--mono); font-size: 0.86em; }
+  code { background: var(--panel); border: 1px solid var(--line); border-radius: 3px; padding: 1px 5px; }
+  h1 { font-size: 2.1rem; font-weight: 750; letter-spacing: -0.02em; line-height: 1.15; text-wrap: balance; margin: 0 0 8px; }
+  h2 { font-size: 1.35rem; font-weight: 700; letter-spacing: -0.01em; margin: 0 0 16px; text-wrap: balance; }
+  h3 { font-size: 1.02rem; font-weight: 700; margin: 28px 0 8px; }
+  p { margin: 0 0 14px; }
+  section { border-top: 1px solid var(--line); margin-top: 56px; padding-top: 28px; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--accent); margin: 0 0 10px; font-weight: 600;
+  }
+  header { padding: 64px 0 40px; }
+  .meta { display: flex; flex-wrap: wrap; gap: 8px 24px; margin-top: 18px;
+    font-family: var(--mono); font-size: 0.76rem; color: var(--ink-faint); }
+  .meta b { color: var(--ink-soft); font-weight: 600; }
+  .lede { font-size: 1.12rem; color: var(--ink-soft); text-wrap: balance; margin-top: 14px; }
+
+  .tenets { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin: 20px 0; padding: 0; list-style: none; }
+  .tenets li { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px; }
+  .tenets .t { font-weight: 700; display: block; margin-bottom: 4px; }
+  .tenets .s { font-size: 0.88rem; color: var(--ink-soft); }
+
+  /* Architecture diagram */
+  .diagram { overflow-x: auto; margin: 24px 0; }
+  .diagram-inner { min-width: 720px; display: grid; gap: 10px; }
+  .layer { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px 14px; background: var(--panel); }
+  .layer > .lbl { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 10px; display: flex; justify-content: space-between; gap: 12px; }
+  .layer > .lbl .trust { color: var(--ink-faint); }
+  .boxes { display: grid; gap: 10px; }
+  .cols-4 { grid-template-columns: repeat(4, 1fr); }
+  .cols-3 { grid-template-columns: repeat(3, 1fr); }
+  .cols-2 { grid-template-columns: repeat(2, 1fr); }
+  .box { background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; font-size: 0.85rem; }
+  .box .n { font-family: var(--mono); font-weight: 600; font-size: 0.8rem; display: block; margin-bottom: 3px; }
+  .box .d { color: var(--ink-soft); font-size: 0.8rem; line-height: 1.45; }
+  .core { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+  .flow { text-align: center; font-family: var(--mono); font-size: 0.72rem; color: var(--ink-faint); padding: 2px 0; }
+  .boundary { border: 2px dashed var(--deny); border-radius: 8px; padding: 12px 14px 14px; background: transparent; }
+  .boundary > .lbl { color: var(--deny); font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 10px; font-weight: 700; }
+
+  /* Pipeline steps */
+  .pipe { list-style: none; margin: 20px 0; padding: 0; counter-reset: step; }
+  .pipe li { display: grid; grid-template-columns: 44px 1fr; gap: 14px; padding: 14px 0; border-top: 1px solid var(--line); counter-increment: step; }
+  .pipe li:first-child { border-top: none; }
+  .pipe li::before { content: counter(step); font-family: var(--mono); font-weight: 700; font-size: 1.05rem; color: var(--accent); text-align: right; padding-top: 1px; }
+  .pipe .n { font-weight: 700; }
+  .pipe .d { color: var(--ink-soft); font-size: 0.92rem; margin-top: 2px; }
+
+  .verdicts { display: flex; gap: 8px; flex-wrap: wrap; margin: 16px 0; }
+  .pill { font-family: var(--mono); font-size: 0.76rem; font-weight: 700; border-radius: 99px; padding: 3px 12px; border: 1px solid; }
+  .pill.allow { color: var(--allow); background: var(--allow-bg); border-color: var(--allow); }
+  .pill.ask { color: var(--ask); background: var(--ask-bg); border-color: var(--ask); }
+  .pill.deny { color: var(--deny); background: var(--deny-bg); border-color: var(--deny); }
+  .pill.defer { color: var(--ink-soft); background: var(--panel); border-color: var(--ink-faint); }
+
+  table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+  .tablewrap { overflow-x: auto; margin: 20px 0; border: 1px solid var(--line); border-radius: 8px; }
+  th { text-align: left; font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-faint); padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel); white-space: nowrap; }
+  td { padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  td:first-child { font-weight: 600; white-space: nowrap; }
+  .sev { font-family: var(--mono); font-size: 0.72rem; font-weight: 700; white-space: nowrap; }
+  .sev.deny { color: var(--deny); }
+  .sev.ask { color: var(--ask); }
+
+  .callout { border-left: 3px solid var(--accent); background: var(--accent-soft); border-radius: 0 6px 6px 0; padding: 14px 18px; margin: 20px 0; font-size: 0.95rem; }
+  .callout b { color: var(--accent); }
+  ul.plain { padding-left: 1.2em; margin: 0 0 14px; }
+  ul.plain li { margin-bottom: 6px; }
+  .src { font-size: 0.8rem; color: var(--ink-faint); }
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  footer { margin-top: 72px; border-top: 1px solid var(--line); padding-top: 20px; font-size: 0.8rem; color: var(--ink-faint); }
+</style>
+
+<main>
+<header>
+  <p class="eyebrow">Design document · v0.1 draft</p>
+  <h1>Alil — a JARVIS-class assistant harness with structural guardrails</h1>
+  <p class="lede">A personal AI assistant runtime where the model decides <em>what</em> to do and the harness decides <em>whether and how</em> it happens. Responsible-AI enforcement and human-in-the-loop approval are core runtime infrastructure — not prompts, not plugins.</p>
+  <div class="meta">
+    <span><b>Status</b> Draft for review</span>
+    <span><b>Date</b> 2026-07-07</span>
+    <span><b>Basis</b> 24 sources, 23 adversarially verified claims</span>
+  </div>
+</header>
+
+<section>
+  <p class="eyebrow">01 · Goals</p>
+  <h2>What we're building and why it's different</h2>
+  <p>Every serious harness surveyed — OpenClaw, Claude Agent SDK, OpenHarness, SemaClaw, Hermit — converges on the same skeleton: a streaming agent loop, a tool registry, lifecycle hooks, memory, and channel adapters. The differentiation is not the loop. It is what SemaClaw calls <em>harness engineering</em>: the infrastructure that turns an unconstrained model into a controllable, auditable system. The verified security literature shows every incumbent fails there in specific, repeatable ways. Alil's design goals are those failures, inverted.</p>
+  <ul class="tenets">
+    <li><span class="t">Structural, not conventional</span><span class="s">Guardrails enforced in code below the model's reach. Prompt-level policy is advisory; the policy engine is law.</span></li>
+    <li><span class="t">Core owns approvals</span><span class="s">Policy and approval decisions live in the runtime core. Pluggable executors, skills, and channels can request — never decide.</span></li>
+    <li><span class="t">HITL without fatigue</span><span class="s">Risk-tiered, differentiated approval prompts. Users approve plans and grant scoped, expiring authority — not an endless stream of identical dialogs.</span></li>
+    <li><span class="t">Fail closed</span><span class="s">No UI to ask? Default deny. Approved file changed? Deny. Unsigned skill? Deny. Ambiguity resolves to the safe side.</span></li>
+  </ul>
+</section>
+
+<section class="wide">
+  <p class="eyebrow">02 · Architecture</p>
+  <h2>System overview</h2>
+  <p style="max-width:74ch">Four trust zones. Untrusted content enters at the top; privileged execution sits at the bottom behind a single policy boundary. The design deliberately rejects OpenClaw's per-layer, per-call-site trust checks in favor of one unified enforcement point every side effect must cross.</p>
+
+  <div class="diagram"><div class="diagram-inner">
+
+    <div class="layer">
+      <div class="lbl"><span>Channels — multi-platform I/O</span><span class="trust">trust: untrusted input</span></div>
+      <div class="boxes cols-4">
+        <div class="box"><span class="n">chat adapters</span><span class="d">Telegram · Slack · Discord · WhatsApp</span></div>
+        <div class="box"><span class="n">voice</span><span class="d">STT/TTS pipeline</span></div>
+        <div class="box"><span class="n">email / calendar</span><span class="d">ingested content = untrusted</span></div>
+        <div class="box"><span class="n">approval clients</span><span class="d">control UI · mobile — operator identity verified</span></div>
+      </div>
+    </div>
+
+    <div class="flow">▼ &nbsp; all inbound content tagged with provenance (channel, sender, trust class) &nbsp; ▼</div>
+
+    <div class="layer">
+      <div class="lbl"><span>Gateway — control plane</span><span class="trust">trust: system</span></div>
+      <div class="boxes cols-4">
+        <div class="box"><span class="n">session router</span><span class="d">identity ↔ session mapping across channels</span></div>
+        <div class="box core"><span class="n">ApprovalManager</span><span class="d">serializes pending approvals; binds each grant to an immutable action payload</span></div>
+        <div class="box core"><span class="n">audit ledger</span><span class="d">append-only log: every decision, who/what approved, provenance chain</span></div>
+        <div class="box"><span class="n">scheduler</span><span class="d">heartbeat, cron routines, background tasks</span></div>
+      </div>
+    </div>
+
+    <div class="flow">▼</div>
+
+    <div class="layer">
+      <div class="lbl"><span>Agent runtime — the loop</span><span class="trust">trust: model output = untrusted intent</span></div>
+      <div class="boxes cols-4">
+        <div class="box"><span class="n">agent loop</span><span class="d">assemble context → reason → act → observe; iteration cap, timeout, budget guard, stall detection</span></div>
+        <div class="box"><span class="n">context assembler</span><span class="d">memory recall, skill injection, compaction — every fragment carries its provenance tag</span></div>
+        <div class="box"><span class="n">subagents</span><span class="d">scoped delegation, narrower tool sets; never inherit elevated modes</span></div>
+        <div class="box"><span class="n">memory</span><span class="d">markdown-canonical state in git + vector index; human-inspectable</span></div>
+      </div>
+    </div>
+
+    <div class="flow">▼ &nbsp; every tool call crosses exactly one gate &nbsp; ▼</div>
+
+    <div class="boundary">
+      <div class="lbl">Policy boundary — single enforcement point</div>
+      <div class="boxes cols-3">
+        <div class="box core"><span class="n">policy engine</span><span class="d">hooks → deny → ask → mode → allow → human callback (§03)</span></div>
+        <div class="box core"><span class="n">semantic action model</span><span class="d">typed action contracts, not lexical shell parsing; unparseable = ask</span></div>
+        <div class="box core"><span class="n">provenance check</span><span class="d">actions traced to injected untrusted content get escalated (§04, context manipulation)</span></div>
+      </div>
+    </div>
+
+    <div class="flow">▼ &nbsp; approved actions only, payload bound at approval time &nbsp; ▼</div>
+
+    <div class="layer">
+      <div class="lbl"><span>Execution — privileged, isolated</span><span class="trust">trust: privileged, sandboxed by default</span></div>
+      <div class="boxes cols-3">
+        <div class="box"><span class="n">tool executor</span><span class="d">typed input validation on every tool; idempotency keys on side effects</span></div>
+        <div class="box"><span class="n">sandbox</span><span class="d">container/workspace jail, default-on; TOCTOU-checked paths</span></div>
+        <div class="box"><span class="n">skill runtime</span><span class="d">signed skills only; capability manifest enforced; content sanitized before model ingestion</span></div>
+      </div>
+    </div>
+
+  </div></div>
+
+  <p style="max-width:74ch">Two structural choices matter most. First, the <b>policy boundary is singular</b> — channels, skills, subagents, and executors all funnel through it, so a fix at the boundary fixes every path (the verified OpenClaw analysis showed per-call-site enforcement makes cross-layer attacks "systematically resistant to layer-local remediation"). Second, the <b>ApprovalManager lives in the gateway, not the agent runtime</b> — approvals are resolved by verified operator clients over a separate channel the model cannot write to.</p>
+</section>
+
+<section>
+  <p class="eyebrow">03 · Permission &amp; HITL specification</p>
+  <h2>The approval pipeline</h2>
+  <p>Every tool call is evaluated in a fixed order. This is a genuine sequence — earlier stages short-circuit later ones, and the ordering encodes the safety philosophy: hard blocks first, human judgment last.</p>
+
+  <ol class="pipe">
+    <li><div><span class="n mono">guard hooks</span><div class="d">Deterministic pre-execution code: credential-path blocks, outbound-content scanning, audit taps. Run on <em>every</em> call — including in permissive modes. A <code>deny</code> here is final.</div></div></li>
+    <li><div><span class="n mono">deny rules</span><div class="d">Declarative hard blocks (paths, commands, hosts). Cannot be loosened at runtime by any mode, approval, or skill — config can only be tightened, never relaxed, by later layers.</div></div></li>
+    <li><div><span class="n mono">ask rules</span><div class="d">Declarative escalations: actions that always require a human regardless of mode (payments, bulk sends, deletes, new outbound destinations).</div></div></li>
+    <li><div><span class="n mono">session mode</span><div class="d">The default posture: <code>plan</code> (no writes) · <code>default</code> (ask on write/execute) · <code>trusted</code> (allowlist runs silently) · <code>auto</code> (sandbox-only). Modes may loosen as trust builds, but never past deny/ask rules.</div></div></li>
+    <li><div><span class="n mono">allow rules</span><div class="d">The allowlist — expressed as typed action contracts (tool + argument constraints), <em>not</em> lexical command strings. Anything the semantic model can't classify falls through to step 6.</div></div></li>
+    <li><div><span class="n mono">human approval</span><div class="d">The backstop. The gateway broadcasts a differentiated, risk-tiered approval request to operator clients; the grant binds the exact action payload. No UI reachable → default deny.</div></div></li>
+  </ol>
+
+  <p>Verdict precedence when multiple sources answer:</p>
+  <div class="verdicts">
+    <span class="pill deny">deny</span>
+    <span class="pill defer">defer</span>
+    <span class="pill ask">ask</span>
+    <span class="pill allow">allow</span>
+  </div>
+  <p class="src">Strictest wins. A single <code>deny</code> blocks the action regardless of every other signal — the pattern verified in both the Claude Agent SDK and OpenClaw exec-approvals.</p>
+
+  <h3>Approval binding (TOCTOU defense)</h3>
+  <p>A grant is bound to a canonical execution context — working directory, exact arguments, environment, pinned executable hash. If anything bound changes between approval and execution, the run is denied and re-requested. The human approves <em>this action</em>, not a description of one.</p>
+
+  <h3>Scoped, expiring authority</h3>
+  <p>The verified consent-fatigue research shows two failure modes: users approving reflexively because prompts are frequent and identical, and one-time grants silently becoming standing authorization. Alil's grants are therefore <b>task-scoped artifacts with explicit expiry</b>: "send up to 20 emails for this newsletter task, valid 2 hours" — never "can send email." Approval prompts are risk-tiered (visual severity, plain-language consequence statement) so a payment never looks like a file read. For multi-step work, the human approves the <em>plan</em> once; execution below it stays bounded by the plan's declared scope.</p>
+
+  <div class="callout"><b>Non-negotiable:</b> approval logic lives only in the pipeline above. Nothing model-adjacent — skills, subagents, pluggable executors, prompt content — can grant, widen, or bypass authority. Executors execute; the core decides.</div>
+</section>
+
+<section class="wide">
+  <p class="eyebrow">04 · Threat model</p>
+  <h2>Verified failure modes and their mitigations</h2>
+  <p style="max-width:74ch">Each row is a documented, adversarially verified failure in a shipping harness — and the Alil design element that answers it.</p>
+
+  <div class="tablewrap"><table>
+    <thead><tr><th>Threat</th><th>Evidence</th><th>Class</th><th>Alil mitigation</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Lexical allowlist bypass</td>
+        <td>OpenClaw's exec allowlist assumes command identity is recoverable by parsing — defeated by line continuation, busybox multiplexing, GNU long-option abbreviation (arXiv 2603.27517, 3-0)</td>
+        <td><span class="sev deny">structural</span></td>
+        <td>Semantic action contracts instead of shell-string matching; unclassifiable commands fall through to human approval; sandbox limits blast radius when classification is wrong</td>
+      </tr>
+      <tr>
+        <td>Context manipulation</td>
+        <td>Prompt injection operates <em>above</em> the policy layer — the engine sees a legitimate tool call with no visibility into adversarial intent (3-0)</td>
+        <td><span class="sev deny">structural</span></td>
+        <td>Provenance tagging on all context fragments; actions traceable to untrusted-content influence are escalated to <code>ask</code> even if otherwise allowlisted; outbound-content guard hook scans for exfiltration patterns</td>
+      </tr>
+      <tr>
+        <td>Malicious skills</td>
+        <td>ClawHub skills run at operator trust, no signing, no sandbox; a two-stage dropper executed entirely in LLM context, bypassing the exec pipeline (2-1); ClawHavoc placed 1,100+ malicious skills</td>
+        <td><span class="sev deny">supply chain</span></td>
+        <td>Signed skills with capability manifests; skill content sanitized before entering model context; skill-originated tool calls carry skill provenance through the policy boundary</td>
+      </tr>
+      <tr>
+        <td>Approval-time drift</td>
+        <td>Approved commands modified before execution; TOCTOU flaws in path validation let sessions escape workspace boundaries</td>
+        <td><span class="sev deny">integrity</span></td>
+        <td>Grants bind canonical context (argv, env, cwd, executable hash); bound-file change ⇒ deny (pattern verified in OpenClaw, adopted)</td>
+      </tr>
+      <tr>
+        <td>Consent fatigue</td>
+        <td>Frequent, undifferentiated prompts train reflexive approval; one-time grants misread as standing authority (verified)</td>
+        <td><span class="sev ask">human factors</span></td>
+        <td>Risk-tiered prompt design; plan-level approval with bounded execution; task-scoped grants with expiry; grant ledger visible to the user</td>
+      </tr>
+      <tr>
+        <td>Exfiltration via outbound content</td>
+        <td>Link-preview injection exfiltrated data on Telegram/Discord with zero user interaction — no HITL gating on <em>output</em></td>
+        <td><span class="sev deny">egress</span></td>
+        <td>Outbound messages are tool calls like any other: URL/destination allowlisting, new-destination escalation, egress guard hook on every channel adapter</td>
+      </tr>
+      <tr>
+        <td>Subagent privilege inheritance</td>
+        <td>In the Claude SDK, subagents inherit <code>bypassPermissions</code> from the parent and it cannot be overridden — full autonomous access by inheritance</td>
+        <td><span class="sev ask">escalation</span></td>
+        <td>Subagents never inherit elevated modes; each gets an explicit, narrower tool grant; elevation requires a fresh human approval</td>
+      </tr>
+      <tr>
+        <td>Headless bypass</td>
+        <td>Harnesses with no reachable approval UI either block forever or silently auto-approve</td>
+        <td><span class="sev deny">availability</span></td>
+        <td>Ask-fallback defaults to <code>deny</code> (fail closed); deferred approvals queue in the gateway and resume the run when an operator answers</td>
+      </tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section>
+  <p class="eyebrow">05 · Memory, skills, state</p>
+  <h2>Inspectable by construction</h2>
+  <p>Alil adopts the files-as-canonical-state pattern verified in Hermit and OpenClaw: agent memory, persona, routines, and grant history are plain markdown in a git repository. Transparency is a Responsible-AI feature — the user can read, diff, and revert everything the assistant believes and everything it has been permitted to do. A vector index sits beside the files for recall, never as the source of truth.</p>
+  <ul class="plain">
+    <li><code>MEMORY.md</code> + dated logs — long-term facts and episodic history, git-versioned.</li>
+    <li><code>GRANTS.md</code> — the human-readable mirror of the audit ledger: every active and expired authority, with scope and expiry.</li>
+    <li><code>skills/*/SKILL.md</code> — the de-facto ecosystem standard format, but installation requires a signature and a capability manifest; content is sanitized before model ingestion.</li>
+  </ul>
+  <p class="src">Open question carried from research: the surveyed harnesses' memory architectures are thinly documented (the one taxonomy claim was refuted 1-2). Memory lifecycle design — what gets written, compacted, and forgotten, and who approves memory writes that change future behavior — needs its own design round.</p>
+</section>
+
+<section>
+  <p class="eyebrow">06 · Build plan</p>
+  <h2>Phasing</h2>
+  <p><b>Phase 1 — core loop and boundary.</b> Agent loop on the Claude Agent SDK (reuse the proven loop; don't rewrite tool execution), single policy boundary with the six-stage pipeline, guard hooks, sandbox-by-default executor, append-only audit ledger. One channel (Telegram or Slack) plus the approval client.</p>
+  <p><b>Phase 2 — HITL depth.</b> Approval binding with context hashing, task-scoped expiring grants, risk-tiered prompt UI, plan-approval flow, deferred/async approvals across sessions.</p>
+  <p><b>Phase 3 — ecosystem, carefully.</b> Signed skill format and manifest enforcement, provenance tagging end-to-end, egress guard, scheduler/routines, additional channels.</p>
+  <p><b>Explicit non-goals for v1:</b> a public skill registry (the verified supply-chain record says don't ship one until signing and sandboxing exist), voice, and any <code>full</code>/unrestricted execution mode — Alil ships without one.</p>
+</section>
+
+<footer>
+  <p>Sources: OpenClaw exec-approvals &amp; harness-plugin docs · Claude Agent SDK permissions/hooks docs · arXiv 2603.27517 (OpenClaw security analysis) · arXiv 2604.11548 (SemaClaw) · HKUDS/OpenHarness · hermit-ai.com · CrowdStrike, IBM X-Force, Backslash, CNCERT analyses. 23 claims adversarially verified (3-vote), 2 refuted and excluded. Deep-research run wf_8f86dc94-b17, 2026-07-07.</p>
+</footer>
+</main>
