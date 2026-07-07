@@ -15,25 +15,31 @@ import type { BrainPorts } from "../src/runtime/loop.ts";
 import { DEFAULT_GUARDS } from "../src/runtime/types.ts";
 import { ProviderRegistry, BedrockProvider } from "../src/providers/index.ts";
 import { PromptAssembler, FilePersonaSource } from "../src/prompts/index.ts";
+import { PolicyBoundary, YamlRuleSource, credentialBlock } from "../src/policy/index.ts";
+import { ToolRegistry, Executor, Sandbox } from "../src/execution/index.ts";
 import type { BrainInput } from "../src/runtime/types.ts";
 
 const modelId = process.env.BEDROCK_MODEL_ID ?? "us.anthropic.claude-sonnet-4-5-20250929-v1:0";
 
 const registry = new ProviderRegistry().register(new BedrockProvider());
 
+const tools = new ToolRegistry();
+const boundary = new PolicyBoundary({
+  rules: new YamlRuleSource("config/policy.yaml"),
+  tools,
+  hooks: [credentialBlock],
+  executor: new Executor({ sandbox: new Sandbox("workspace") }),
+});
+
 const ports: BrainPorts = {
   memory: { recall: async () => [] },
   skills: { eligible: async () => [] },
   // Persona from workspace/SOUL.md (falls back to base-only if absent).
   prompt: new PromptAssembler(new FilePersonaSource()),
-  // Fail-closed stub until the policy boundary exists.
-  actions: {
-    submit: async (a) => ({
-      actionId: a.action.id,
-      outcome: "denied",
-      summary: "no policy boundary wired yet (dev REPL)",
-    }),
-  },
+  // Real policy boundary. NOTE: tools are not yet advertised to the model
+  // (next slice), so it won't propose tool calls here — but any it did would
+  // be classified, judged, and executed/denied for real.
+  actions: boundary,
 };
 
 const brain = new Brain({ modelId, guards: DEFAULT_GUARDS }, registry, ports);

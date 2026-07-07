@@ -1,0 +1,37 @@
+# Alil policy — declarative rules for the boundary. Reviewed like code.
+# Pipeline order: hooks -> deny -> ask -> mode -> allow -> human.
+# Precedence when multiple apply: deny > defer > ask > allow. Config can only tighten.
+# Paths are matched against a tool's `path` arg, relative to the workspace jail.
+
+mode: default # ask on write/execute; read allowed
+
+rules:
+  # ── deny (hard blocks; also enforced in code by the credential-block hook) ──
+  - kind: deny
+    match: { pathGlob: "**/.env" }
+    note: "never read/write .env files"
+  - kind: deny
+    match: { pathGlob: "**/.aws/**" }
+    note: "never touch AWS credential files"
+  - kind: deny
+    match: { pathGlob: "**/*credential*" }
+    note: "never touch credential-named files"
+  - kind: deny
+    match: { pathGlob: "**/*secret*" }
+    note: "never touch secret-named files"
+
+  # ── ask (always require a human, regardless of mode) ──
+  - kind: ask
+    match: { effect: write }
+    note: "confirm before writing files"
+  - kind: ask
+    match: { effect: execute }
+    note: "confirm before executing commands"
+  - kind: ask
+    match: { minRisk: high }
+    note: "confirm high/critical-risk actions"
+
+  # ── allow (allowlist for otherwise-gated actions) ──
+  - kind: allow
+    match: { tool: fs.read }
+    note: "reading within the workspace jail is safe"
