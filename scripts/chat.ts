@@ -17,7 +17,7 @@ import { ProviderRegistry, BedrockProvider } from "../src/providers/index.ts";
 import { PromptAssembler, FilePersonaSource } from "../src/prompts/index.ts";
 import { PolicyBoundary, YamlRuleSource, credentialBlock, GrantStore } from "../src/policy/index.ts";
 import type { ApprovalPort, ApprovalRequest, ApprovalDecision } from "../src/policy/index.ts";
-import { ToolRegistry, Executor, Sandbox, RegistryToolCatalog, DEFAULT_TOOLS } from "../src/execution/index.ts";
+import { ToolRegistry, Executor, Sandbox, ReadTracker, RegistryToolCatalog, DEFAULT_TOOLS } from "../src/execution/index.ts";
 import type { BrainInput } from "../src/runtime/types.ts";
 
 const modelId = process.env.BEDROCK_MODEL_ID ?? "us.anthropic.claude-sonnet-4-5-20250929-v1:0";
@@ -60,7 +60,7 @@ const boundary = new PolicyBoundary({
   rules: new YamlRuleSource("config/policy.yaml"),
   tools,
   hooks: [credentialBlock],
-  executor: new Executor({ sandbox: new Sandbox(sandboxRoot) }),
+  executor: new Executor({ sandbox: new Sandbox(sandboxRoot), reads: new ReadTracker() }),
   approvals,
   grants: new GrantStore(),
 });

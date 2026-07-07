@@ -1,8 +1,11 @@
 import type { Effect, Risk } from "../../core/types.ts";
 import type { Sandbox } from "../sandbox.ts";
+import type { ReadTracker } from "../read-tracker.ts";
 
 export interface ToolContext {
   sandbox: Sandbox;
+  /** Optional read-before-edit tracker. When present, fs.edit/fs.write enforce it. */
+  reads?: ReadTracker;
 }
 
 export type ValidateResult<T> =

@@ -1,7 +1,13 @@
 import type { AnyTool } from "./types.ts";
 import { fsRead } from "./fs-read.ts";
 import { fsList } from "./fs-list.ts";
+import { fsGlob } from "./fs-glob.ts";
+import { fsGrep } from "./fs-grep.ts";
+import { fsEdit } from "./fs-edit.ts";
 import { fsWrite } from "./fs-write.ts";
+import { shell } from "./shell.ts";
+import { webFetch } from "./web-fetch.ts";
+import { webSearch } from "./web-search.ts";
 
 /** name → tool. Adding a tool = one entry here (plus its file). */
 export class ToolRegistry {
@@ -20,4 +26,14 @@ export class ToolRegistry {
   }
 }
 
-export const DEFAULT_TOOLS: AnyTool[] = [fsRead, fsList, fsWrite];
+export const DEFAULT_TOOLS: AnyTool[] = [
+  fsRead,
+  fsList,
+  fsGlob,
+  fsGrep,
+  fsEdit,
+  fsWrite,
+  shell,
+  webFetch,
+  webSearch,
+];

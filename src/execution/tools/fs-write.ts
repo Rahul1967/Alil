@@ -1,4 +1,4 @@
-import { writeFile, mkdir } from "node:fs/promises";
+import { writeFile, mkdir, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { ToolImpl, ToolContext, ValidateResult, ToolRunResult } from "./types.ts";
 
@@ -37,8 +37,24 @@ export const fsWrite: ToolImpl<FsWriteArgs> = {
 
   async run(args: FsWriteArgs, ctx: ToolContext): Promise<ToolRunResult> {
     const full = ctx.sandbox.resolve(args.path);
+
+    // Read-before-write for EXISTING files: overwriting blind is how work gets clobbered.
+    // A brand-new file has nothing to read, so it's allowed straight through.
+    if (ctx.reads) {
+      const existing = await readFile(full, "utf8").catch(() => undefined);
+      if (existing !== undefined) {
+        if (!ctx.reads.hasSeen(full)) {
+          throw new Error(`${args.path} already exists; fs.read it before overwriting (or use fs.edit)`);
+        }
+        if (!ctx.reads.matches(full, existing)) {
+          throw new Error(`${args.path} changed on disk since it was read; fs.read it again before overwriting`);
+        }
+      }
+    }
+
     await mkdir(dirname(full), { recursive: true });
     await writeFile(full, args.content, "utf8");
+    ctx.reads?.record(full, args.content); // reflect the new content for a follow-up edit
     return { summary: `wrote ${args.content.length} chars to ${args.path}` };
   },
 };

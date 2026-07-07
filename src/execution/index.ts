@@ -1,4 +1,5 @@
 export { Sandbox, SandboxEscape } from "./sandbox.ts";
+export { ReadTracker } from "./read-tracker.ts";
 export { Executor } from "./executor.ts";
 export { ToolRegistry, DEFAULT_TOOLS } from "./tools/registry.ts";
 export { RegistryToolCatalog } from "./tools/catalog.ts";

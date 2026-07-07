@@ -64,6 +64,8 @@ export const fsRead: ToolImpl<FsReadArgs> = {
   async run(args: FsReadArgs, ctx: ToolContext): Promise<ToolRunResult> {
     const full = ctx.sandbox.resolve(args.path);
     const content = await readFile(full, "utf8");
+    // Remember the exact content seen so fs.edit/fs.write can enforce read-before-edit.
+    ctx.reads?.record(full, content);
     const paging = args.offset !== undefined || args.limit !== undefined;
 
     // Explicit paging: return just the requested line window.

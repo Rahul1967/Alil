@@ -30,6 +30,9 @@ rules:
   - kind: ask
     match: { minRisk: high }
     note: "confirm high/critical-risk actions"
+  - kind: ask
+    match: { effect: network }
+    note: "confirm network egress (web.fetch/web.search)"
 
   # ── allow (allowlist for otherwise-gated actions) ──
   - kind: allow
@@ -38,3 +41,9 @@ rules:
   - kind: allow
     match: { tool: fs.list }
     note: "listing directories within the workspace jail is safe"
+  - kind: allow
+    match: { tool: fs.glob }
+    note: "finding files by name within the jail is safe"
+  - kind: allow
+    match: { tool: fs.grep }
+    note: "searching file contents within the jail is safe"
