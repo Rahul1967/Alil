@@ -35,9 +35,7 @@ export const CATALOG: readonly ModelSpec[] = [
   },
 
   // ─── Bedrock (Converse API, IAM auth) ───
-  // TODO(model-id): confirm the exact Bedrock model / inference-profile id from the
-  // invoking env. Bedrock ids look like "anthropic.claude-..." or a cross-region
-  // inference profile like "us.anthropic.claude-...-v1:0".
+  // Verified live in us-east-1 (cross-region inference profile).
   {
     id: "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
     provider: "bedrock",
