@@ -36,7 +36,6 @@ export interface BrainTurn {
 
 export interface BrainConfig {
   modelId: string;
-  systemPrompt: string;
   guards: GuardLimits;
   temperature?: number;
 }

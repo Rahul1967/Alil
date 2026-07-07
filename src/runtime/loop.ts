@@ -15,11 +15,13 @@ import type { ProviderRegistry } from "../providers/registry.ts";
 import type { ModelToolCall } from "../providers/types.ts";
 import { ProviderError } from "../providers/types.ts";
 import type { ActionContract, ToolResult } from "../core/types.ts";
+import type { PromptPort } from "../prompts/types.ts";
 
 export interface BrainPorts {
   actions: ActionSink;
   memory: MemoryPort;
   skills: SkillPort;
+  prompt: PromptPort;
 }
 
 /**
@@ -50,6 +52,7 @@ export class Brain {
     const { spec, provider } = this.#registry.resolve(this.#config.modelId);
     const guards = new Guards(this.#config.guards, this.#clock);
 
+    const systemPrompt = await this.#ports.prompt.system();
     const recalled = await this.#ports.memory.recall(input.message.text);
     const skills = await this.#ports.skills.eligible(input);
 
@@ -75,7 +78,7 @@ export class Brain {
 
       const invocation = assemble({
         modelId: this.#config.modelId,
-        systemPrompt: this.#config.systemPrompt,
+        systemPrompt,
         input,
         recalled,
         skills,

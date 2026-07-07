@@ -28,7 +28,6 @@ function toolResponse(id: string, tool: string, args: Record<string, unknown>): 
 function config(over: Partial<BrainConfig> = {}): BrainConfig {
   return {
     modelId: "mock-model",
-    systemPrompt: "You are Alil.",
     guards: DEFAULT_GUARDS,
     ...over,
   };
@@ -44,6 +43,7 @@ function ports(sink: (a: ProposedAction) => Promise<ToolResult>): {
     ports: {
       memory: { recall: async () => [] },
       skills: { eligible: async () => [] },
+      prompt: { system: async () => "You are Alil." },
       actions: {
         submit: async (a) => {
           count += 1;
