@@ -40,7 +40,7 @@ test("brain advertises catalog tools to the model", async () => {
 
   const advertised = mock.received[0]?.tools ?? [];
   const names = advertised.map((t) => t.name).sort();
-  assert.deepEqual(names, ["fs.read", "fs.write"]);
+  assert.deepEqual(names, ["fs.list", "fs.read", "fs.write"]);
   const read = advertised.find((t) => t.name === "fs.read");
   assert.equal((read?.parameters as { type?: string }).type, "object");
 });
@@ -119,5 +119,5 @@ test("catalog reflects a custom rule source's world consistently", async () => {
   const src = new StaticRuleSource(cfg);
   assert.equal((await src.load()).mode, "default");
   const catalog = new RegistryToolCatalog();
-  assert.equal((await catalog.list()).length, 2);
+  assert.equal((await catalog.list()).length, 3);
 });

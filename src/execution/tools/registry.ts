@@ -1,5 +1,6 @@
 import type { AnyTool } from "./types.ts";
 import { fsRead } from "./fs-read.ts";
+import { fsList } from "./fs-list.ts";
 import { fsWrite } from "./fs-write.ts";
 
 /** name → tool. Adding a tool = one entry here (plus its file). */
@@ -19,4 +20,4 @@ export class ToolRegistry {
   }
 }
 
-export const DEFAULT_TOOLS: AnyTool[] = [fsRead, fsWrite];
+export const DEFAULT_TOOLS: AnyTool[] = [fsRead, fsList, fsWrite];

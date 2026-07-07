@@ -35,3 +35,6 @@ rules:
   - kind: allow
     match: { tool: fs.read }
     note: "reading within the workspace jail is safe"
+  - kind: allow
+    match: { tool: fs.list }
+    note: "listing directories within the workspace jail is safe"
