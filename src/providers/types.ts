@@ -29,8 +29,18 @@ export interface ChatMessage {
   content?: string;
   /** For role "assistant": tool calls the model made this turn. */
   toolCalls?: ModelToolCall[];
-  /** For role "tool": which tool call this result answers. */
-  toolCallId?: string;
+  /**
+   * For role "tool": every result answering the preceding assistant turn's tool calls.
+   * A turn's results are ONE message, not one message per result — the provider APIs
+   * (Anthropic Messages, Bedrock Converse) require all tool results for a turn to be
+   * delivered together, so the invariant is enforced here rather than per provider.
+   */
+  toolResults?: ToolResultBlock[];
+}
+
+export interface ToolResultBlock {
+  toolCallId: string;
+  content: string;
 }
 
 export interface ToolSpec {

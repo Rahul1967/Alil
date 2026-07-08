@@ -25,6 +25,12 @@ function toolResponse(id: string, tool: string, args: Record<string, unknown>): 
   };
 }
 
+function multiToolResponse(
+  calls: Array<{ id: string; tool: string; args: Record<string, unknown> }>,
+): ModelResponse {
+  return { toolCalls: calls, stopReason: "tool_use", usage: { inputTokens: 10, outputTokens: 5 } };
+}
+
 function config(over: Partial<BrainConfig> = {}): BrainConfig {
   return {
     modelId: "mock-model",
@@ -89,6 +95,33 @@ test("proposes a tool call, receives a result, and continues to completion", asy
   assert.equal(turn.results.length, 1);
   assert.equal(turn.results[0]?.outcome, "ok");
   assert.equal(p.submitCount(), 1);
+});
+
+test("multiple tool calls in one turn are fed back as a single batched tool message", async () => {
+  // Architecture invariant (provider-agnostic): a turn's results are ONE `tool` message
+  // carrying all blocks, so every provider can map it 1:1 and none can split the turn.
+  const mock = new MockProvider().script(
+    multiToolResponse([
+      { id: "act_1", tool: "fs.list", args: {} },
+      { id: "act_2", tool: "fs.grep", args: {} },
+    ]),
+    endResponse("done"),
+  );
+  const reg = new ProviderRegistry().register(mock).registerModel(mockSpec);
+  const p = ports(async (a) => ({ actionId: a.action.id, outcome: "ok", summary: a.action.id }));
+
+  const turn = await new Brain(config(), reg, p.ports).run(operatorInput("look around"));
+
+  assert.equal(turn.stopReason, "complete");
+  assert.equal(p.submitCount(), 2);
+  // The second model call sees exactly one tool message, holding both results in order.
+  const secondCall = mock.received[1]?.messages ?? [];
+  const toolMsgs = secondCall.filter((m) => m.role === "tool");
+  assert.equal(toolMsgs.length, 1);
+  assert.deepEqual(
+    toolMsgs[0]?.toolResults?.map((r) => r.toolCallId),
+    ["act_1", "act_2"],
+  );
 });
 
 test("a denied action is handled and not retried by the loop", async () => {

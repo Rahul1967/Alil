@@ -14,7 +14,7 @@ import { systemClock } from "./types.ts";
 import { Guards } from "./guards.ts";
 import { initialMessages } from "./context-assembler.ts";
 import type { ProviderRegistry } from "../providers/registry.ts";
-import type { ModelToolCall, ModelInvocation } from "../providers/types.ts";
+import type { ModelToolCall, ModelInvocation, ToolResultBlock } from "../providers/types.ts";
 import { ProviderError } from "../providers/types.ts";
 import type { ActionContract, ToolResult } from "../core/types.ts";
 import type { PromptPort } from "../prompts/types.ts";
@@ -138,8 +138,11 @@ export class Brain {
         };
       }
 
-      // Hand each proposed action to the boundary, then feed the result back as a tool turn.
+      // Hand each proposed action to the boundary, collecting the results for this turn.
       // The brain does not execute or judge; a denied action is observed, never retried.
+      // All results for the turn are appended as ONE tool message: the provider APIs
+      // require a turn's tool results to be delivered together.
+      const toolResults: ToolResultBlock[] = [];
       for (const call of response.toolCalls) {
         const proposed: ProposedAction = { action: toActionContract(call) };
         proposedActions.push(proposed);
@@ -147,12 +150,9 @@ export class Brain {
         const result = await this.#ports.actions.submit(proposed);
         results.push(result);
         observer?.onToolResult?.({ tool: call.tool, outcome: result.outcome, summary: result.summary });
-        messages.push({
-          role: "tool",
-          toolCallId: call.id,
-          content: toolResultContent(result),
-        });
+        toolResults.push({ toolCallId: call.id, content: toolResultContent(result) });
       }
+      messages.push({ role: "tool", toolResults });
     }
   }
 }

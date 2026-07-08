@@ -18,7 +18,6 @@ import type {
 } from "./types.ts";
 import { ProviderError } from "./types.ts";
 import { sanitizeToolName, buildNameMap, canonicalName } from "./tool-names.ts";
-import { groupMessages } from "./message-grouping.ts";
 
 /**
  * AWS Bedrock provider — uses the unified Converse API via @aws-sdk/client-bedrock-runtime.
@@ -71,17 +70,16 @@ export class BedrockProvider implements Provider {
 
 // ─── request mapping ───
 function toBedrockMessages(inv: ModelInvocation): BedrockMessage[] {
-  return groupMessages(inv.messages).map((g): BedrockMessage => {
-    if (g.kind === "toolResults") {
-      // All results for the preceding assistant turn go in ONE user message.
+  return inv.messages.map((m): BedrockMessage => {
+    if (m.role === "tool") {
+      // A turn's results are already one message; map its blocks 1:1.
       return {
         role: "user",
-        content: g.results.map((r) => ({
+        content: (m.toolResults ?? []).map((r) => ({
           toolResult: { toolUseId: r.toolCallId, content: [{ text: r.content }] },
         })),
       };
     }
-    const m = g.message;
     if (m.role === "assistant") {
       const content: ContentBlock[] = [];
       if (m.content) content.push({ text: m.content });

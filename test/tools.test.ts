@@ -103,7 +103,7 @@ test("e2e: model calls fs.read → boundary allows → executes; fs.write → as
     // The file CONTENT (not just a summary) must be fed back to the model.
     const secondCall = mock.received[1]?.messages ?? [];
     const toolMsg = secondCall.find((m) => m.role === "tool");
-    assert.equal(toolMsg?.content, "the answer is 42");
+    assert.equal(toolMsg?.toolResults?.[0]?.content, "the answer is 42");
 
     // Write flow: fs.write is gated (ask → stub-denied), file not created.
     const mock2 = new MockProvider().script(

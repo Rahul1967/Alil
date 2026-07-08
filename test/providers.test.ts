@@ -6,8 +6,6 @@ import {
   BedrockProvider,
 } from "../src/providers/index.ts";
 import { MockProvider, mockSpec } from "./helpers/mock-provider.ts";
-import { groupMessages } from "../src/providers/message-grouping.ts";
-import type { ChatMessage } from "../src/providers/types.ts";
 
 test("registry resolves a catalog model to its provider", () => {
   const reg = new ProviderRegistry().register(new AnthropicProvider("test-key"));
@@ -46,29 +44,10 @@ test("model with no registered provider throws", () => {
   assert.throws(() => reg.resolve("claude-fable-5"), /no registered provider/);
 });
 
-test("groupMessages collapses consecutive tool results into one group", () => {
-  const messages: ChatMessage[] = [
-    { role: "user", content: "hi" },
-    { role: "assistant", toolCalls: [
-      { id: "a", tool: "fs.list", args: {} },
-      { id: "b", tool: "fs.grep", args: {} },
-    ] },
-    { role: "tool", toolCallId: "a", content: "listed" },
-    { role: "tool", toolCallId: "b", content: "grepped" },
-  ];
-  const groups = groupMessages(messages);
-  assert.equal(groups.length, 3); // user, assistant, one tool-result group
-  const last = groups[2];
-  assert.equal(last.kind, "toolResults");
-  assert.deepEqual(
-    last.kind === "toolResults" ? last.results.map((r) => r.toolCallId) : [],
-    ["a", "b"],
-  );
-});
-
-test("bedrock maps multiple tool calls to a single user message with all toolResults", async () => {
-  // Regression: two tool calls in one turn must produce ONE user message carrying
-  // both toolResult blocks, or Bedrock rejects with "Expected toolResult blocks ...".
+test("bedrock maps a multi-result tool turn to a single user message with all toolResults", async () => {
+  // Regression: a turn's tool results (one `tool` message carrying many blocks) must map
+  // to ONE user message with all toolResult blocks, or Bedrock rejects the turn with
+  // "Expected toolResult blocks at messages.N.content for the following Ids: ...".
   let captured: any;
   const bedrock = new BedrockProvider({
     send: async (cmd: any) => {
@@ -88,8 +67,10 @@ test("bedrock maps multiple tool calls to a single user message with all toolRes
           { id: "a", tool: "fs.list", args: {} },
           { id: "b", tool: "fs.grep", args: {} },
         ] },
-        { role: "tool", toolCallId: "a", content: "listed" },
-        { role: "tool", toolCallId: "b", content: "grepped" },
+        { role: "tool", toolResults: [
+          { toolCallId: "a", content: "listed" },
+          { toolCallId: "b", content: "grepped" },
+        ] },
       ],
     },
     spec,

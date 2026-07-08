@@ -8,7 +8,6 @@ import type {
 } from "./types.ts";
 import { ProviderError } from "./types.ts";
 import { sanitizeToolName, buildNameMap, canonicalName } from "./tool-names.ts";
-import { groupMessages } from "./message-grouping.ts";
 
 const MESSAGES_URL = "https://api.anthropic.com/v1/messages";
 const API_VERSION = "2023-06-01";
@@ -95,19 +94,18 @@ interface AnthropicMsg {
 }
 
 function toAnthropicMessages(inv: ModelInvocation): AnthropicMsg[] {
-  return groupMessages(inv.messages).map((g): AnthropicMsg => {
-    if (g.kind === "toolResults") {
-      // All results for the preceding assistant turn go in ONE user message.
+  return inv.messages.map((m): AnthropicMsg => {
+    if (m.role === "tool") {
+      // A turn's results are already one message; map its blocks 1:1.
       return {
         role: "user",
-        content: g.results.map((r) => ({
+        content: (m.toolResults ?? []).map((r) => ({
           type: "tool_result",
           tool_use_id: r.toolCallId,
           content: r.content,
         })),
       };
     }
-    const m = g.message;
     if (m.role === "assistant") {
       const blocks: unknown[] = [];
       if (m.content) blocks.push({ type: "text", text: m.content });
