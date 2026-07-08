@@ -48,6 +48,7 @@ export interface GuardLimits {
   maxTokens: number; // cumulative input+output token ceiling
   maxCostUsd: number; // cumulative cost ceiling
   stallWindow: number; // N identical consecutive tool signatures ⇒ stall
+  maxConsecutiveFailures: number; // N tool rounds without any success ⇒ halt (0 disables)
 }
 
 export const DEFAULT_GUARDS: GuardLimits = {
@@ -56,6 +57,7 @@ export const DEFAULT_GUARDS: GuardLimits = {
   maxTokens: 500_000,
   maxCostUsd: 5,
   stallWindow: 3,
+  maxConsecutiveFailures: 3,
 };
 
 // ─── Injected ports (owned by other sections; stubbed this section) ───

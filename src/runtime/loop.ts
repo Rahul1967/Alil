@@ -168,17 +168,21 @@ export class Brain {
       // All results for the turn are appended as ONE tool message: the provider APIs
       // require a turn's tool results to be delivered together.
       const toolResults: ToolResultBlock[] = [];
+      const roundResults: ToolResult[] = [];
       for (const call of response.toolCalls) {
         const proposed: ProposedAction = { action: toActionContract(call) };
         proposedActions.push(proposed);
         observer?.onToolCall?.({ tool: call.tool, args: call.args });
         const result = await this.#ports.actions.submit(proposed);
         results.push(result);
+        roundResults.push(result);
         observer?.onToolResult?.({ tool: call.tool, outcome: result.outcome, summary: result.summary });
         toolResults.push({ toolCallId: call.id, content: toolResultContent(result) });
         // Cancelled mid-batch: stop launching further tools and end the turn cleanly.
         if (signal?.aborted) return aborted();
       }
+      // Feed the round's outcomes to the error budget before the next guard check.
+      guards.recordResults(roundResults);
       messages.push({ role: "tool", toolResults });
     }
   }

@@ -1,6 +1,7 @@
 import type { GuardLimits, Clock } from "./types.ts";
 import { systemClock } from "./types.ts";
 import type { ModelSpec } from "../providers/types.ts";
+import type { ToolResult } from "../core/types.ts";
 
 export interface GuardCheck {
   halt: boolean;
@@ -9,8 +10,9 @@ export interface GuardCheck {
 
 /**
  * Loop guards (BEST_PRACTICES §1 fail-safe): iteration cap, wall-clock timeout,
- * cumulative token + cost ceilings, and stall detection on repeated tool signatures.
- * Any trip is a clean halt, never a crash. Fail-safe: check BEFORE each model call.
+ * cumulative token + cost ceilings, stall detection on repeated tool signatures, and
+ * an error budget on consecutive no-progress rounds. Any trip is a clean halt, never a
+ * crash. Fail-safe: check BEFORE each model call.
  */
 export class Guards {
   readonly #limits: GuardLimits;
@@ -20,6 +22,7 @@ export class Guards {
   #iterations = 0;
   #tokens = 0;
   #costUsd = 0;
+  #failingRounds = 0;
   readonly #recentSignatures: string[] = [];
 
   constructor(limits: GuardLimits, clock: Clock = systemClock) {
@@ -52,6 +55,15 @@ export class Guards {
     if (this.#isStalled()) {
       return { halt: true, reason: `stall (${this.#limits.stallWindow} identical calls)` };
     }
+    if (
+      this.#limits.maxConsecutiveFailures > 0 &&
+      this.#failingRounds >= this.#limits.maxConsecutiveFailures
+    ) {
+      return {
+        halt: true,
+        reason: `error budget (${this.#limits.maxConsecutiveFailures} rounds without progress)`,
+      };
+    }
     return { halt: false };
   }
 
@@ -64,6 +76,19 @@ export class Guards {
     this.#costUsd +=
       (usage.inputTokens / 1_000_000) * spec.pricing.inputPerMTok +
       (usage.outputTokens / 1_000_000) * spec.pricing.outputPerMTok;
+  }
+
+  /**
+   * Record the outcomes of a tool round so the error budget can trip next iteration.
+   * A round that produced at least one `ok` counts as progress and resets the budget;
+   * a round where every result failed (error/denied) advances it. This catches a model
+   * that keeps failing against a goal with *varied* calls — which the identical-signature
+   * stall detector would miss. Empty rounds (no tools run) are ignored.
+   */
+  recordResults(results: ToolResult[]): void {
+    if (results.length === 0) return;
+    const madeProgress = results.some((r) => r.outcome === "ok");
+    this.#failingRounds = madeProgress ? 0 : this.#failingRounds + 1;
   }
 
   /** Record the tool signatures proposed this iteration, for stall detection. */

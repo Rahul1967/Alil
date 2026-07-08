@@ -174,6 +174,26 @@ test("a pre-aborted signal halts before the provider is ever called", async () =
   assert.equal(provider.invoked, false); // never reached the model call
 });
 
+test("the loop halts on the error budget after repeated failing rounds", async () => {
+  // Varied failing calls (distinct signatures) so this is the error budget, not the stall
+  // detector. stallWindow disabled to isolate the behavior under test.
+  const mock = new MockProvider().script(
+    toolResponse("act_1", "fs.read", { path: "/a" }),
+    toolResponse("act_2", "fs.read", { path: "/b" }),
+    toolResponse("act_3", "fs.read", { path: "/c" }),
+    endResponse("should not reach here"),
+  );
+  const reg = new ProviderRegistry().register(mock).registerModel(mockSpec);
+  const p = ports(async (a) => ({ actionId: a.action.id, outcome: "error", summary: "boom" }));
+  const cfg = config({ guards: { ...DEFAULT_GUARDS, stallWindow: 0, maxConsecutiveFailures: 3 } });
+
+  const turn = await new Brain(cfg, reg, p.ports).run(operatorInput("keep failing"));
+
+  assert.equal(turn.stopReason, "guard_halt");
+  assert.match(turn.haltReason ?? "", /error budget/);
+  assert.equal(p.submitCount(), 3); // three failing rounds, then halted before the 4th call
+});
+
 test("a denied action is handled and not retried by the loop", async () => {
   const mock = new MockProvider().script(
     toolResponse("act_1", "payment.charge", { amount: 999 }),
