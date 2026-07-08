@@ -28,7 +28,7 @@ export class AnthropicProvider implements Provider {
     return modelId.startsWith("claude-");
   }
 
-  async invoke(inv: ModelInvocation, spec: ModelSpec): Promise<ModelResponse> {
+  async invoke(inv: ModelInvocation, spec: ModelSpec, signal?: AbortSignal): Promise<ModelResponse> {
     if (!this.#apiKey) {
       throw new ProviderError("ANTHROPIC_API_KEY is not set", false);
     }
@@ -61,8 +61,13 @@ export class AnthropicProvider implements Provider {
           "anthropic-version": API_VERSION,
         },
         body: JSON.stringify(body),
+        ...(signal ? { signal } : {}),
       });
     } catch (err) {
+      // Abort is caller-initiated cancellation — terminal for the turn, never retried.
+      if (signal?.aborted || (err as { name?: string }).name === "AbortError") {
+        throw new ProviderError("anthropic request aborted", false);
+      }
       // Network-level failure (DNS, connection reset) — transient, retryable.
       throw new ProviderError(`network error: ${String(err)}`, true);
     }

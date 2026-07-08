@@ -28,6 +28,11 @@ export interface BrainPorts {
   observer?: BrainObserver;
 }
 
+export interface RunOptions {
+  /** Cancels the turn: the in-flight model call is aborted and the loop stops cleanly. */
+  signal?: AbortSignal;
+}
+
 /**
  * The Brain: our own agent loop. It reasons and PROPOSES actions; it never decides
  * whether an action is allowed and never executes one — every tool call is handed to the
@@ -52,10 +57,25 @@ export class Brain {
     this.#clock = clock;
   }
 
-  async run(input: BrainInput): Promise<BrainTurn> {
+  async run(input: BrainInput, opts: RunOptions = {}): Promise<BrainTurn> {
     const { spec, provider } = this.#registry.resolve(this.#config.modelId);
     const guards = new Guards(this.#config.guards, this.#clock);
     const observer = this.#ports.observer;
+    const signal = opts.signal;
+
+    // Build an "aborted" turn: the loop halted because the caller cancelled. Partial
+    // proposedActions/results (up to the abort point) are preserved for the audit trail.
+    const aborted = (): BrainTurn => {
+      observer?.onHalt?.({ reason: "aborted by caller", kind: "aborted" });
+      return {
+        ...(lastAssistantText !== undefined ? { assistantText: lastAssistantText } : {}),
+        proposedActions,
+        results,
+        stopReason: "aborted",
+        haltReason: "aborted by caller",
+        iterations: guards.iterations,
+      };
+    };
 
     const systemPrompt = await this.#ports.prompt.system();
     const recalled = await this.#ports.memory.recall(input.message.text);
@@ -72,6 +92,8 @@ export class Brain {
     const messages = initialMessages({ input, recalled, skills });
 
     for (;;) {
+      if (signal?.aborted) return aborted();
+
       const gate = guards.check();
       if (gate.halt) {
         observer?.onHalt?.({ reason: gate.reason ?? "guard", kind: "guard" });
@@ -95,8 +117,11 @@ export class Brain {
 
       let response;
       try {
-        response = await provider.invoke(invocation, spec);
+        response = await provider.invoke(invocation, spec, signal);
       } catch (err) {
+        // A caller abort surfaces here as a (non-retryable) provider error; report it as an
+        // aborted turn, not a provider failure.
+        if (signal?.aborted) return aborted();
         // Terminal here: retry/backoff is a later section (BEST_PRACTICES §8). Fail closed.
         const msg = err instanceof ProviderError ? err.message : String(err);
         observer?.onHalt?.({ reason: `provider error: ${msg}`, kind: "error" });
@@ -151,6 +176,8 @@ export class Brain {
         results.push(result);
         observer?.onToolResult?.({ tool: call.tool, outcome: result.outcome, summary: result.summary });
         toolResults.push({ toolCallId: call.id, content: toolResultContent(result) });
+        // Cancelled mid-batch: stop launching further tools and end the turn cleanly.
+        if (signal?.aborted) return aborted();
       }
       messages.push({ role: "tool", toolResults });
     }

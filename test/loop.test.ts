@@ -10,7 +10,8 @@ import type {
 } from "../src/runtime/types.ts";
 import { MockProvider, mockSpec } from "./helpers/mock-provider.ts";
 import { ProviderRegistry } from "../src/providers/index.ts";
-import type { ModelResponse } from "../src/providers/types.ts";
+import { ProviderError } from "../src/providers/index.ts";
+import type { ModelResponse, Provider, ModelInvocation } from "../src/providers/types.ts";
 import type { Provenance, ToolResult } from "../src/core/types.ts";
 
 // ─── helpers ───
@@ -122,6 +123,55 @@ test("multiple tool calls in one turn are fed back as a single batched tool mess
     toolMsgs[0]?.toolResults?.map((r) => r.toolCallId),
     ["act_1", "act_2"],
   );
+});
+
+/** Provider that never resolves until the signal aborts, then rejects like a real SDK. */
+class BlockingProvider implements Provider {
+  readonly name = "mock";
+  invoked = false;
+  supports(id: string): boolean {
+    return id === "mock-model";
+  }
+  async invoke(_inv: ModelInvocation, _spec: unknown, signal?: AbortSignal): Promise<ModelResponse> {
+    this.invoked = true;
+    return new Promise((_resolve, reject) => {
+      const fail = () => reject(new ProviderError("aborted", false));
+      if (signal?.aborted) return fail();
+      signal?.addEventListener("abort", fail, { once: true });
+    });
+  }
+}
+
+test("an in-flight turn aborts cleanly when the signal fires", async () => {
+  const provider = new BlockingProvider();
+  const reg = new ProviderRegistry().register(provider).registerModel(mockSpec);
+  const p = ports(async (a) => ({ actionId: a.action.id, outcome: "ok", summary: "" }));
+  const controller = new AbortController();
+
+  const runPromise = new Brain(config(), reg, p.ports).run(operatorInput("do a slow thing"), {
+    signal: controller.signal,
+  });
+  // Let the loop reach the blocking provider call, then cancel.
+  await new Promise((r) => setImmediate(r));
+  controller.abort();
+  const turn = await runPromise;
+
+  assert.equal(provider.invoked, true);
+  assert.equal(turn.stopReason, "aborted");
+  assert.equal(turn.haltReason, "aborted by caller");
+});
+
+test("a pre-aborted signal halts before the provider is ever called", async () => {
+  const provider = new BlockingProvider();
+  const reg = new ProviderRegistry().register(provider).registerModel(mockSpec);
+  const p = ports(async (a) => ({ actionId: a.action.id, outcome: "ok", summary: "" }));
+
+  const turn = await new Brain(config(), reg, p.ports).run(operatorInput("hi"), {
+    signal: AbortSignal.abort(),
+  });
+
+  assert.equal(turn.stopReason, "aborted");
+  assert.equal(provider.invoked, false); // never reached the model call
 });
 
 test("a denied action is handled and not retried by the loop", async () => {

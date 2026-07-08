@@ -33,6 +33,17 @@ export function initialMessages(params: {
     messages.push({ role: "user", content: contextBlocks.join("\n\n") });
   }
 
+  // Prior turns of the conversation, so the model sees context across user messages.
+  // Only user/model lines become conversation; verdict/result lines are audit records,
+  // not dialogue, and the current inbound message is appended separately below.
+  for (const line of input.history) {
+    if (line.t === "user") {
+      messages.push({ role: "user", content: line.text });
+    } else if (line.t === "model" && line.text !== undefined) {
+      messages.push({ role: "assistant", content: line.text });
+    }
+  }
+
   const p = input.message.provenance;
   const trusted = p.origin === "operator" || p.origin === "system";
   const content = trusted ? input.message.text : untrustedFence(input.message.text, p.origin);

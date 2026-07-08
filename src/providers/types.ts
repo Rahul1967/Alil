@@ -89,5 +89,10 @@ export class ProviderError extends Error {
 export interface Provider {
   readonly name: string;
   supports(modelId: string): boolean;
-  invoke(inv: ModelInvocation, spec: ModelSpec): Promise<ModelResponse>;
+  /**
+   * `signal`, when provided, cancels the in-flight request. An aborted call rejects with
+   * a non-retryable ProviderError (retryable=false) so the loop treats it as terminal for
+   * the turn rather than backing off and retrying.
+   */
+  invoke(inv: ModelInvocation, spec: ModelSpec, signal?: AbortSignal): Promise<ModelResponse>;
 }

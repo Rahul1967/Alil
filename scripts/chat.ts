@@ -19,6 +19,7 @@ import { PolicyBoundary, YamlRuleSource, credentialBlock, GrantStore } from "../
 import type { ApprovalPort, ApprovalRequest, ApprovalDecision } from "../src/policy/index.ts";
 import { ToolRegistry, Executor, Sandbox, ReadTracker, RegistryToolCatalog, DEFAULT_TOOLS } from "../src/execution/index.ts";
 import type { BrainInput } from "../src/runtime/types.ts";
+import type { TranscriptLine } from "../src/core/types.ts";
 
 const modelId = process.env.BEDROCK_MODEL_ID ?? "us.anthropic.claude-sonnet-4-5-20250929-v1:0";
 
@@ -104,11 +105,27 @@ let closed = false;
 rl.on("close", () => {
   closed = true;
 });
+
+// Ctrl-C cancels the running turn (not the process); pressing it while idle at the
+// prompt exits. `current` is the in-flight turn's controller, or null when idle.
+let current: AbortController | null = null;
+rl.on("SIGINT", () => {
+  if (current) {
+    console.log("\n  ⏹ cancelling turn…");
+    current.abort();
+  } else {
+    rl.close();
+  }
+});
+
 console.log(
   `Alil dev REPL — model: ${modelId}\n` +
     `filesystem root: ${sandboxRoot}  (reads auto · writes need approval · credentials blocked)\n` +
     `Type a message (/exit to quit).\n`,
 );
+
+// Conversation so far, carried across turns so the brain sees prior context.
+const history: TranscriptLine[] = [];
 
 for (;;) {
   let text: string;
@@ -120,24 +137,38 @@ for (;;) {
   if (closed || text === "/exit" || text === "/quit") break;
   if (text.length === 0) continue;
 
+  // Pass PRIOR turns as history; the current message is added below via `message`.
+  // Record this turn into `history` only after it completes, for the next turn.
   const input: BrainInput = {
     sessionId: "repl",
     message: { text, provenance: { origin: "operator" } },
-    history: [],
+    history: [...history],
   };
 
+  current = new AbortController();
   try {
-    const turn = await brain.run(input);
+    const turn = await brain.run(input, { signal: current.signal });
     if (turn.stopReason === "error") {
       console.log(`alil › [error] ${turn.haltReason}\n`);
+    } else if (turn.stopReason === "aborted") {
+      console.log(`alil › [cancelled]\n`);
     } else if (turn.stopReason === "guard_halt") {
       console.log(`alil › [halted: ${turn.haltReason}] ${turn.assistantText ?? ""}\n`);
     } else {
       console.log(`alil › ${turn.assistantText ?? "(no text)"}`);
       console.log(`      (iterations: ${turn.iterations})\n`);
     }
+    // Only durably record the exchange when the turn produced a real answer.
+    if (turn.stopReason === "complete") {
+      history.push({ t: "user", at: new Date().toISOString(), channel: "repl", provenanceId: "operator", text });
+      if (turn.assistantText !== undefined) {
+        history.push({ t: "model", at: new Date().toISOString(), text: turn.assistantText });
+      }
+    }
   } catch (e) {
     console.log(`alil › [crash] ${(e as Error).message}\n`);
+  } finally {
+    current = null;
   }
 }
 

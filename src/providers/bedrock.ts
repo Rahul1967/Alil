@@ -44,7 +44,7 @@ export class BedrockProvider implements Provider {
     return modelId.length > 0;
   }
 
-  async invoke(inv: ModelInvocation, spec: ModelSpec): Promise<ModelResponse> {
+  async invoke(inv: ModelInvocation, spec: ModelSpec, signal?: AbortSignal): Promise<ModelResponse> {
     const command = new ConverseCommand({
       modelId: inv.model,
       messages: toBedrockMessages(inv),
@@ -60,7 +60,7 @@ export class BedrockProvider implements Provider {
 
     let out: ConverseCommandOutput;
     try {
-      out = await this.#client.send(command);
+      out = await this.#client.send(command, signal ? { abortSignal: signal } : {});
     } catch (err) {
       throw classifyError(err);
     }
@@ -146,6 +146,10 @@ function classifyError(err: unknown): ProviderError {
   const e = err as { name?: string; $metadata?: { httpStatusCode?: number }; message?: string };
   const status = e.$metadata?.httpStatusCode;
   const name = e.name ?? "";
+  // Abort is caller-initiated cancellation — terminal for the turn, never retried.
+  if (name === "AbortError" || name === "TimeoutError") {
+    return new ProviderError("bedrock request aborted", false, status);
+  }
   const retryable =
     name === "ThrottlingException" ||
     name === "ModelTimeoutException" ||

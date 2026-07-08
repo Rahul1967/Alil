@@ -24,6 +24,7 @@ export interface ProposedAction {
 export type BrainStopReason =
   | "complete"
   | "guard_halt"
+  | "aborted"
   | "error";
 
 export interface BrainTurn {
@@ -84,7 +85,7 @@ export interface BrainObserver {
   onModelTurn?(e: { iteration: number; text?: string; toolCalls: number }): void;
   onToolCall?(e: { tool: string; args: Record<string, unknown> }): void;
   onToolResult?(e: { tool: string; outcome: ToolResult["outcome"]; summary: string }): void;
-  onHalt?(e: { reason: string; kind: "guard" | "error" }): void;
+  onHalt?(e: { reason: string; kind: "guard" | "error" | "aborted" }): void;
 }
 
 /** A monotonic clock, injectable so guard tests are deterministic. */
