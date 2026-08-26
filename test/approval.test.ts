@@ -138,6 +138,41 @@ test("grant covers a second matching action without re-prompting", async () => {
   }
 });
 
+test("a grant never covers an execute action — shell re-prompts every time", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "alil-appr-"));
+  try {
+    let prompts = 0;
+    // Approves AND tries to mint a broad shell grant — which must be ignored for execute.
+    const grantingApprove: ApprovalPort = {
+      async request(): Promise<ApprovalDecision> {
+        prompts += 1;
+        return { approved: true, scope: { tool: "shell", maxUses: 5, ttlMs: 60_000, task: "t" } };
+      },
+    };
+    const execConfig: PolicyConfig = {
+      mode: "default",
+      rules: [{ kind: "ask", match: { effect: "execute" }, note: "confirm exec" }],
+    };
+    const boundary = new PolicyBoundary({
+      rules: new StaticRuleSource(execConfig), tools, hooks: [credentialBlock],
+      executor: new Executor({ sandbox: new Sandbox(dir) }),
+      approvals: grantingApprove, grants: new GrantStore(),
+    });
+    const shellAction = (id: string): ProposedAction => ({
+      action: {
+        id, tool: "shell", args: { command: "echo hi" },
+        effect: "execute", reversible: false, risk: "medium", classified: false,
+        provenance: { origin: "operator" },
+      },
+    });
+    await boundary.submit(shellAction("s1"));
+    await boundary.submit(shellAction("s2"));
+    assert.equal(prompts, 2); // each execute re-prompts; the grant never covers it
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("terminal deny (credential hook) never reaches approval", async () => {
   let prompted = false;
   const spy: ApprovalPort = { async request() { prompted = true; return { approved: true }; } };

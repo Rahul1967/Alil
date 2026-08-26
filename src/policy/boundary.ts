@@ -66,8 +66,11 @@ export class PolicyBoundary implements ActionSink {
       return denied(action.id, `approval required [${decidedBy}]: ${reason} (HITL not wired yet)`);
     }
 
-    // A standing grant can cover this without prompting.
-    if (grants) {
+    // A standing grant can cover this without prompting — but NOT for execute-effect or
+    // high/critical-risk actions. Those (e.g. shell/rm) must be approved fresh every time; a
+    // broad grant must never silently auto-approve a destructive command.
+    const grantable = action.effect !== "execute" && action.risk !== "high" && action.risk !== "critical";
+    if (grants && grantable) {
       const g = grants.match(action);
       if (g) {
         grants.consume(g.id);
@@ -94,7 +97,9 @@ export class PolicyBoundary implements ActionSink {
       return denied(action.id, `declined by operator${decision.reason ? `: ${decision.reason}` : ""}`);
     }
 
-    if (decision.scope && grants) grants.mint(decision.scope);
+    // Don't mint a standing grant for non-grantable actions (execute / high-risk) — it would
+    // never be honored anyway, and shouldn't look like it grants future destructive commands.
+    if (decision.scope && grants && grantable) grants.mint(decision.scope);
 
     // TOCTOU: the action must not have drifted since approval.
     if (!verifyBinding(binding, action)) {
