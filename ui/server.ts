@@ -197,27 +197,46 @@ const server = createServer(async (req, res) => {
       }
     };
     try {
+      // Clamp a paging window from ?limit=&offset=.
+      const paging = (defLimit: number, maxLimit: number) => {
+        const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") ?? defLimit), maxLimit));
+        const offset = Math.max(0, Number(url.searchParams.get("offset") ?? 0) || 0);
+        return { limit, offset };
+      };
+      const count = (t: string) => (memory!.db.prepare(`SELECT count(*) c FROM ${t}`).get() as { c: number }).c;
+
       let payload: unknown;
       if (which === "timeline") {
-        const limit = Math.min(Number(url.searchParams.get("limit") ?? 200), 1000);
+        const { limit, offset } = paging(50, 1000);
         const rows = memory.db
-          .prepare("SELECT seq, at, channel, role, provenance, text FROM timeline ORDER BY seq DESC LIMIT ?")
-          .all(limit) as { seq: number; at: string; channel: string; role: string; provenance: string; text: string | null }[];
-        payload = rows.map((r) => ({ seq: r.seq, at: r.at, channel: r.channel, role: r.role, provenance: parseProv(r.provenance), text: r.text }));
+          .prepare("SELECT seq, at, channel, role, provenance, text FROM timeline ORDER BY seq DESC LIMIT ? OFFSET ?")
+          .all(limit, offset) as { seq: number; at: string; channel: string; role: string; provenance: string; text: string | null }[];
+        payload = {
+          items: rows.map((r) => ({ seq: r.seq, at: r.at, channel: r.channel, role: r.role, provenance: parseProv(r.provenance), text: r.text })),
+          total: count("timeline"),
+          limit,
+          offset,
+        };
       } else if (which === "episodes") {
+        const { limit, offset } = paging(20, 500);
         const rows = memory.db
-          .prepare("SELECT id, start_seq, end_seq, started_at, ended_at, summary, salient_facts FROM episodes ORDER BY start_seq DESC")
-          .all() as { id: string; start_seq: number; end_seq: number | null; started_at: string; ended_at: string | null; summary: string | null; salient_facts: string | null }[];
-        payload = rows.map((r) => ({
-          id: r.id,
-          startSeq: r.start_seq,
-          endSeq: r.end_seq,
-          startedAt: r.started_at,
-          endedAt: r.ended_at,
-          open: r.end_seq === null,
-          summary: r.summary,
-          salientFacts: r.salient_facts ? (JSON.parse(r.salient_facts) as string[]) : [],
-        }));
+          .prepare("SELECT id, start_seq, end_seq, started_at, ended_at, summary, salient_facts FROM episodes ORDER BY start_seq DESC LIMIT ? OFFSET ?")
+          .all(limit, offset) as { id: string; start_seq: number; end_seq: number | null; started_at: string; ended_at: string | null; summary: string | null; salient_facts: string | null }[];
+        payload = {
+          items: rows.map((r) => ({
+            id: r.id,
+            startSeq: r.start_seq,
+            endSeq: r.end_seq,
+            startedAt: r.started_at,
+            endedAt: r.ended_at,
+            open: r.end_seq === null,
+            summary: r.summary,
+            salientFacts: r.salient_facts ? (JSON.parse(r.salient_facts) as string[]) : [],
+          })),
+          total: count("episodes"),
+          limit,
+          offset,
+        };
       } else if (which === "canonical") {
         const rows = memory.db
           .prepare("SELECT key, kind, text, provenance, source, created_at FROM canonical ORDER BY kind ASC, created_at DESC")

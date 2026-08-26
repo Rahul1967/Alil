@@ -122,6 +122,15 @@ const tabChat = document.getElementById("tabChat");
 const tabMemory = document.getElementById("tabMemory");
 const memContent = document.getElementById("memContent");
 let memView = "timeline";
+// Page sizes for the paginated views; other views return a plain array.
+const PAGE_SIZE = { timeline: 50, episodes: 20 };
+const memOffset = { timeline: 0, episodes: 0 };
+const RENDERERS = {
+  timeline: renderTimeline,
+  episodes: renderEpisode,
+  canonical: renderCanonical,
+  procedures: renderProcedure,
+};
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -161,6 +170,7 @@ document.querySelectorAll(".tabs button").forEach((b) => {
     document.querySelectorAll(".tabs button").forEach((x) => x.classList.remove("active"));
     b.classList.add("active");
     memView = b.getAttribute("data-view");
+    if (memView in memOffset) memOffset[memView] = 0; // restart paginated views at the top
     loadMemory(memView);
   });
 });
@@ -176,25 +186,33 @@ async function loadStats() {
 }
 
 async function loadMemory(view) {
+  const paged = view in memOffset;
   memContent.innerHTML = "";
   memContent.appendChild(el("div", "empty-tab", "loading…"));
-  let data;
+
+  let url = "/api/memory/" + view;
+  if (paged) url += "?limit=" + PAGE_SIZE[view] + "&offset=" + memOffset[view];
+
+  let body;
   try {
-    data = await (await fetch("/api/memory/" + view)).json();
+    body = await (await fetch(url)).json();
   } catch (e) {
     memContent.innerHTML = "";
     memContent.appendChild(el("div", "empty-tab", "error: " + e.message));
     return;
   }
+
+  // Paginated views return { items, total, limit, offset }; others a plain array.
+  const items = paged ? (body.items || []) : body;
   memContent.innerHTML = "";
-  if (!Array.isArray(data) || data.length === 0) {
+  if (!Array.isArray(items) || items.length === 0) {
     memContent.appendChild(el("div", "empty-tab", "nothing here yet"));
+    if (paged && memOffset[view] > 0) renderPager(view, body); // let the user page back
     return;
   }
-  if (view === "timeline") data.forEach(renderTimeline);
-  else if (view === "episodes") data.forEach(renderEpisode);
-  else if (view === "canonical") data.forEach(renderCanonical);
-  else if (view === "procedures") data.forEach(renderProcedure);
+  const render = RENDERERS[view];
+  if (render) items.forEach(render);
+  if (paged) renderPager(view, body);
 }
 
 function renderProcedure(p) {
@@ -210,6 +228,31 @@ function renderProcedure(p) {
   if (p.steps) card.appendChild(el("div", "meta muted", "steps: " + p.steps));
   if (p.evidence) card.appendChild(el("div", "meta muted", "evidence: " + p.evidence));
   memContent.appendChild(card);
+}
+
+function renderPager(view, body) {
+  const total = body.total ?? 0;
+  const limit = body.limit ?? PAGE_SIZE[view];
+  const offset = body.offset ?? 0;
+  if (total <= limit && offset === 0) return; // single page — no controls needed
+  const shownFrom = total === 0 ? 0 : offset + 1;
+  const shownTo = Math.min(offset + limit, total);
+
+  const bar = el("div", "pager");
+  const prev = el("button", null, "‹ Newer");
+  prev.disabled = offset === 0;
+  prev.addEventListener("click", () => { memOffset[view] = Math.max(0, offset - limit); loadMemory(view); });
+
+  const label = el("span", "pager-label", shownFrom + "–" + shownTo + " of " + total);
+
+  const next = el("button", null, "Older ›");
+  next.disabled = offset + limit >= total;
+  next.addEventListener("click", () => { memOffset[view] = offset + limit; loadMemory(view); });
+
+  bar.appendChild(prev);
+  bar.appendChild(label);
+  bar.appendChild(next);
+  memContent.appendChild(bar);
 }
 
 function renderTimeline(r) {

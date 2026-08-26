@@ -107,6 +107,14 @@
     .key { font: 12px ui-monospace, Menlo, Consolas, monospace; color: var(--accent); font-weight: 700; }
     .muted { color: var(--ink-soft); }
     .empty-tab { text-align: center; color: var(--ink-soft); padding: 8vh 0; }
+    .pager { display: flex; align-items: center; justify-content: center; gap: 14px; padding: 14px 0 4px; }
+    .pager button {
+      border: 1px solid var(--line); background: var(--panel); color: var(--ink); font: inherit; font-weight: 600;
+      padding: 6px 14px; border-radius: 8px; cursor: pointer;
+    }
+    .pager button:disabled { opacity: 0.4; cursor: default; }
+    .pager button:not(:disabled):hover { border-color: var(--accent); color: var(--accent); }
+    .pager-label { font: 12px ui-monospace, Menlo, Consolas, monospace; color: var(--ink-soft); }
   </style>
 </head>
 <body>
