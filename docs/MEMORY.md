@@ -14,6 +14,8 @@ its own.
 - [§5 · Lifecycle: timeline → episodes → distillation](#5--lifecycle-timeline--episodes--distillation)
 - [§6 · Canonical memory](#6--canonical-memory)
 - [§7 · The agentic model (pull, not push)](#7--the-agentic-model-pull-not-push)
+- [§7a · Procedural memory (learned how-to)](#7a--procedural-memory-learned-how-to)
+- [§7b · Prospective memory (remember to act later)](#7b--prospective-memory-remember-to-act-later)
 - [§8 · Memory tools](#8--memory-tools)
 - [§9 · Safety: provenance, taint & audit](#9--safety-provenance-taint--audit)
 - [§10 · Cross-channel concurrency](#10--cross-channel-concurrency)
@@ -51,6 +53,7 @@ evolves.** Both are always in context, but one is fixed and one is living.
 | **Episodic** | `episodes` table | via tools | **pull** (`memory.query`) | past-conversation summaries |
 | **Semantic** | recall index | via tools | **pull** (`memory.query`) | search over episodic |
 | **Procedural** | `procedure` table | via tools | **pull** (`memory.procedure.*`) | proven how-to methods — searched before acting, never pushed |
+| **Prospective** | `intention` table | via tools | **fired by scheduler** (`remind.*`) | future intentions — remember to act later; fires as a turn |
 | **Working set** | `timeline` table | append | push, always | recent turns (continuity) |
 
 **Procedural memory is a tool tier, not canonical.** Nothing procedural is ever resident in
@@ -221,6 +224,44 @@ or stale methods be deprecated (Memp's dynamic regimen), surfaced for pruning in
 Methods are **plain NL, never executable** — Memp shows text methods transfer across models and
 keep the store inspectable.
 
+## 7b · Prospective memory (remember to act later)
+
+Prospective memory is future-directed: *remembering to do something later*. The research is
+blunt — LLMs hold a future intention in-context unreliably (PM-Bench ~65% F1; TriggerBench shows
+it decays with context length while factual recall stays ~100%). So Alil follows the universal
+fix: **externalize the intention, and let a scheduler — not the model — own the clock and the
+wake.**
+
+**Record (`intention` table).** `{title, action, trigger, fire_at | cron_expr | event_match,
+status, dedup_key, expires_at, attempts, provenance}`. `action` is an NL instruction to
+future-self, replayed when it fires. Three trigger types:
+
+- **`once`** — an absolute time (`fire_at`), for one-off reminders ("in 2 hours", "tomorrow 9am").
+- **`cron`** — a recurring schedule (`croner` computes the next run), for routines ("every Monday").
+- **`event`** — a predicate (`event_match`) over an incoming channel event ("when an email from
+  the landlord arrives"). Time triggers fire live today; event matching is built (`Scheduler.
+  fireEvent`) and arms as soon as a channel emits events.
+
+**The mechanism (the `Scheduler`, in the gateway).** The model only ever *creates* an intention
+via a tool; the `Scheduler` owns firing:
+
+1. A **poll loop** (~30s) drains `due()` (time triggers) — and because "due" is just `fire_at ≤
+   now`, a fire time that passed while the process was down is simply due at next boot: **missed-
+   fire catch-up for free.** `fireEvent(event)` drains event triggers when a channel delivers one.
+2. Each fire is a **claim → deliver → settle** handshake: `claim()` flips `pending → firing`
+   atomically so a crash can't double-fire; a `firing` row whose delivery died is reclaimed by
+   `recoverStale()` on a later tick. On success, a `once`/`event` intention is `done`; a `cron`
+   one is re-armed to its next run.
+3. **Delivery is a normal turn.** The fired intention re-enters as a system-authored turn (its
+   `action` as the message); the model decides then whether to just notify or to act — and **any
+   real action re-passes the policy boundary**, so permissions are re-checked at *fire* time, not
+   schedule time.
+
+**Safety.** `remind.create` is `effect: write`, so **provenance escalation blocks a tainted turn
+from scheduling a future action** — an injected email can't plant a time-bomb. An event-triggered
+fire carries the event's taint onto its turn, so event-driven action escalates. Every fire hits
+the audit ledger. Intentions can `expire` (never-fired past `expires_at`) and be cancelled.
+
 ## 8 · Memory tools
 
 | Tool | Effect / Risk | Gating | Purpose |
@@ -232,6 +273,9 @@ keep the store inspectable.
 | `memory.write` | write / medium | **requires approval** | pin/update a canonical fact (kind `preference`/`rule` only); upsert-by-key |
 | `memory.procedure.create` | write / medium | **requires approval** | record a proven method (dedupes on trigger) |
 | `memory.procedure.update` | write / medium | **requires approval** | revise an existing method on new findings |
+| `remind.list` | read / low | auto-allow | list scheduled/triggered intentions (prospective memory) |
+| `remind.create` | write / medium | **requires approval** | schedule a future intention (time/cron/event); taint-blocked |
+| `remind.cancel` | write / low | **requires approval** | cancel a scheduled intention by id |
 | `memory.forget` | write / high | **requires approval** | delete a canonical fact + its recall index |
 
 The store is injected into the tool `ToolContext` (a mutable holder wired after `openMemory`).

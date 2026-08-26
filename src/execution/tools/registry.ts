@@ -17,6 +17,9 @@ import { memoryProcedureSearch } from "./memory-procedure-search.ts";
 import { memoryProcedureFetch } from "./memory-procedure-fetch.ts";
 import { memoryProcedureCreate } from "./memory-procedure-create.ts";
 import { memoryProcedureUpdate } from "./memory-procedure-update.ts";
+import { remindCreate } from "./remind-create.ts";
+import { remindList } from "./remind-list.ts";
+import { remindCancel } from "./remind-cancel.ts";
 
 /** name → tool. Adding a tool = one entry here (plus its file). */
 export class ToolRegistry {
@@ -54,4 +57,7 @@ export const DEFAULT_TOOLS: AnyTool[] = [
   memoryProcedureFetch,
   memoryProcedureCreate,
   memoryProcedureUpdate,
+  remindCreate,
+  remindList,
+  remindCancel,
 ];

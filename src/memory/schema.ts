@@ -64,6 +64,28 @@ CREATE TABLE IF NOT EXISTS procedure (
   updated_at      TEXT NOT NULL
 );
 
+-- Prospective memory: future-directed intentions (remember to act later). A scheduler polls
+-- this table (time triggers) and a channel matcher evaluates it (event triggers); a due row
+-- fires as a synthetic turn. dedup_key is UNIQUE so the same intention can't be double-scheduled.
+CREATE TABLE IF NOT EXISTS intention (
+  id           TEXT PRIMARY KEY,
+  title        TEXT NOT NULL,
+  action       TEXT NOT NULL,
+  trigger      TEXT NOT NULL,              -- 'once' | 'cron' | 'event'
+  fire_at      INTEGER,                    -- epoch ms; next fire for once/cron
+  cron_expr    TEXT,                       -- recurrence, null unless cron
+  event_match  TEXT,                       -- JSON predicate, null unless event
+  status       TEXT NOT NULL DEFAULT 'pending',
+  dedup_key    TEXT,
+  expires_at   INTEGER,
+  created_at   INTEGER NOT NULL,
+  fired_at     INTEGER,
+  attempts     INTEGER NOT NULL DEFAULT 0,
+  provenance   TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS intention_dedup ON intention(dedup_key) WHERE dedup_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS intention_due ON intention(status, fire_at);
+
 -- Single live cursor (singleton row id = 1).
 CREATE TABLE IF NOT EXISTS agent_state (
   id                INTEGER PRIMARY KEY CHECK (id = 1),

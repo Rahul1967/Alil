@@ -20,6 +20,7 @@
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1080.0",
     "better-sqlite3": "^11.10.0",
+    "croner": "^10.0.1",
     "exceljs": "^4.4.0",
     "mammoth": "^1.12.1",
     "sqlite-vec": "^0.1.6",

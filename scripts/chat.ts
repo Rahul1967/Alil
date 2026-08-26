@@ -20,8 +20,10 @@ import type { ApprovalPort, ApprovalRequest, ApprovalDecision } from "../src/pol
 import { ToolRegistry, Executor, Sandbox, ReadTracker, RegistryToolCatalog, DEFAULT_TOOLS } from "../src/execution/index.ts";
 import { openMemory, EpisodeManager, ExtractiveSummarizer, CanonicalKnowledge, seedMemoryInstructions } from "../src/memory/index.ts";
 import type { MemorySystem, MemoryStore } from "../src/memory/index.ts";
+import type { ProspectiveStore } from "../src/memory/index.ts";
+import type { Intention, IncomingEvent } from "../src/memory/types.ts";
 import type { KnowledgeSource } from "../src/prompts/types.ts";
-import { AuditLedger } from "../src/gateway/index.ts";
+import { AuditLedger, Scheduler } from "../src/gateway/index.ts";
 import type { MemoryPort } from "../src/runtime/types.ts";
 import type { BrainInput } from "../src/runtime/types.ts";
 import type { TranscriptLine } from "../src/core/types.ts";
@@ -66,11 +68,12 @@ const tools = new ToolRegistry();
 // Mutable holder: memory opens after the boundary, so the memory.* tools get their store
 // wired in below once it's available.
 const memCtx: { store?: MemoryStore } = {};
+const prospCtx: { store?: ProspectiveStore } = {};
 const boundary = new PolicyBoundary({
   rules: new YamlRuleSource("config/policy.yaml"),
   tools,
   hooks: [credentialBlock],
-  executor: new Executor({ sandbox: new Sandbox(sandboxRoot), reads: new ReadTracker(), memory: memCtx }),
+  executor: new Executor({ sandbox: new Sandbox(sandboxRoot), reads: new ReadTracker(), memory: memCtx, prospective: prospCtx }),
   approvals,
   grants: new GrantStore(),
 });
@@ -111,6 +114,7 @@ try {
   memory = openMemory({ path: process.env.ALIL_DB ?? "workspace/memory.db" });
   await seedMemoryInstructions(memory.store);
   memCtx.store = memory.store; // wire the memory.* tools
+  prospCtx.store = memory.prospective; // wire the remind.* tools
   knowledge = new CanonicalKnowledge(memory.store);
   // Phase 1.5: canonical writes are model-driven and permissioned (memory.write tool), so
   // the silent auto-promoter is no longer wired in. Episode distillation still runs.
@@ -185,6 +189,52 @@ function loadHistory(): TranscriptLine[] {
   });
 }
 
+// Serialize turns: a fired intention and a user turn must never run at once (one mind, one
+// timeline). Both go through this chain so brain.run is never re-entered concurrently.
+let turnChain: Promise<void> = Promise.resolve();
+function runExclusive(fn: () => Promise<void>): Promise<void> {
+  const next = turnChain.then(fn, fn);
+  turnChain = next.catch(() => {});
+  return next;
+}
+
+// Prospective memory: when an intention fires, run its action as a system-authored turn and let
+// the model decide whether to just notify or to act (actions still pass the policy boundary).
+async function deliverIntention(intention: Intention, event?: IncomingEvent): Promise<void> {
+  await runExclusive(async () => {
+    if (!memory) return;
+    const at = new Date().toISOString();
+    const episodeId = episodes ? await episodes.beginTurn(at) : "ep_repl";
+    // Scheduled fire is system-authored; an event-triggered fire inherits the event's taint.
+    const tainted = !!event && (event.provenance.origin === "ingested" || (event.provenance.taintedBy?.length ?? 0) > 0);
+    const provenance = tainted
+      ? { origin: "system" as const, taintedBy: event!.provenance.taintedBy ?? [event!.channel] }
+      : { origin: "system" as const };
+    const banner = event ? `[event trigger fired: ${event.channel}] ` : "[scheduled reminder fired] ";
+    const input: BrainInput = {
+      sessionId: "repl",
+      message: { text: `${banner}${intention.action}`, provenance },
+      history: loadHistory(),
+    };
+    stdout.write("\n");
+    const turn = await brain.run(input, {});
+    console.log(`⏰ ${intention.title} › ${turn.assistantText ?? "(no text)"}\n`);
+    memory.timeline.append({ at, channel: CHANNEL, provenance, episodeId, role: "user", text: input.message.text });
+    if (turn.assistantText !== undefined) {
+      memory.timeline.append({ at, channel: CHANNEL, provenance: { origin: "model" }, episodeId, role: "assistant", text: turn.assistantText });
+    }
+    audit.append("turn", { channel: CHANNEL, episodeId, iterations: turn.iterations, source: "intention", intentionId: intention.id });
+    stdout.write("you › ");
+  });
+}
+
+// Own the clock: poll the intention table and fire what's due (catch-up drains missed fires).
+let scheduler: Scheduler | null = null;
+if (memory) {
+  scheduler = new Scheduler({ store: memory.prospective, deliver: deliverIntention });
+  scheduler.start();
+}
+
 for (;;) {
   let text: string;
   try {
@@ -204,33 +254,37 @@ for (;;) {
     history: loadHistory(),
   };
 
-  current = new AbortController();
-  try {
-    const turn = await brain.run(input, { signal: current.signal });
-    if (turn.stopReason === "error") {
-      console.log(`alil › [error] ${turn.haltReason}\n`);
-    } else if (turn.stopReason === "aborted") {
-      console.log(`alil › [cancelled]\n`);
-    } else if (turn.stopReason === "guard_halt") {
-      console.log(`alil › [halted: ${turn.haltReason}] ${turn.assistantText ?? ""}\n`);
-    } else {
-      console.log(`alil › ${turn.assistantText ?? "(no text)"}`);
-      console.log(`      (iterations: ${turn.iterations})\n`);
-    }
-    // Only durably record the exchange when the turn produced a real answer.
-    if (turn.stopReason === "complete" && memory) {
-      const at = new Date().toISOString();
-      memory.timeline.append({ at, channel: CHANNEL, provenance: { origin: "operator" }, episodeId, role: "user", text });
-      if (turn.assistantText !== undefined) {
-        memory.timeline.append({ at, channel: CHANNEL, provenance: { origin: "model" }, episodeId, role: "assistant", text: turn.assistantText });
+  // Run the user turn exclusively so it never overlaps a firing intention (one mind, one timeline).
+  await runExclusive(async () => {
+    current = new AbortController();
+    try {
+      const turn = await brain.run(input, { signal: current.signal });
+      if (turn.stopReason === "error") {
+        console.log(`alil › [error] ${turn.haltReason}\n`);
+      } else if (turn.stopReason === "aborted") {
+        console.log(`alil › [cancelled]\n`);
+      } else if (turn.stopReason === "guard_halt") {
+        console.log(`alil › [halted: ${turn.haltReason}] ${turn.assistantText ?? ""}\n`);
+      } else {
+        console.log(`alil › ${turn.assistantText ?? "(no text)"}`);
+        console.log(`      (iterations: ${turn.iterations})\n`);
       }
-      audit.append("turn", { channel: CHANNEL, episodeId, iterations: turn.iterations });
+      // Only durably record the exchange when the turn produced a real answer.
+      if (turn.stopReason === "complete" && memory) {
+        const at = new Date().toISOString();
+        memory.timeline.append({ at, channel: CHANNEL, provenance: { origin: "operator" }, episodeId, role: "user", text });
+        if (turn.assistantText !== undefined) {
+          memory.timeline.append({ at, channel: CHANNEL, provenance: { origin: "model" }, episodeId, role: "assistant", text: turn.assistantText });
+        }
+        audit.append("turn", { channel: CHANNEL, episodeId, iterations: turn.iterations });
+      }
+    } catch (e) {
+      console.log(`alil › [crash] ${(e as Error).message}\n`);
+    } finally {
+      current = null;
     }
-  } catch (e) {
-    console.log(`alil › [crash] ${(e as Error).message}\n`);
-  } finally {
-    current = null;
-  }
+  });
 }
 
+scheduler?.stop();
 rl.close();

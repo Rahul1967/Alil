@@ -182,6 +182,62 @@ export interface MemoryStore {
   procedureList(): Promise<Procedure[]>;
 }
 
+// ─── Prospective memory: future-directed intentions (remember to act later) ───
+// Externalized to durable storage because LLMs hold future intentions unreliably (PM-Bench,
+// TriggerBench). The model CREATES an intention via a tool; a scheduler owns the clock and the
+// wake. Firing re-enters as a normal turn, so the policy boundary re-checks at fire time.
+export type IntentionTrigger = "once" | "cron" | "event";
+export type IntentionStatus = "pending" | "firing" | "done" | "cancelled" | "expired";
+
+/** Predicate for an event-triggered intention ("when an email from X arrives…"). */
+export interface EventMatch {
+  channel?: string; // e.g. "email" | "telegram"
+  type?: string; // event type, adapter-defined
+  from?: string; // sender contains (case-insensitive)
+  subject?: string; // subject contains
+  contains?: string; // body/text contains
+}
+
+/** An event delivered from a channel adapter, evaluated against pending event intentions. */
+export interface IncomingEvent {
+  channel: string;
+  type?: string;
+  from?: string;
+  subject?: string;
+  text?: string;
+  provenance: Provenance; // rides onto the fired turn so event-driven action stays tainted
+}
+
+export interface Intention {
+  id: string;
+  title: string; // short human label, e.g. "call mom"
+  action: string; // NL instruction replayed to future-self on fire
+  trigger: IntentionTrigger;
+  fireAt: number | null; // epoch ms; next fire for once/cron, null for pure event
+  cronExpr: string | null; // recurrence, null unless cron
+  eventMatch: EventMatch | null; // null unless event
+  status: IntentionStatus;
+  dedupKey: string | null; // idempotency: a UNIQUE key prevents duplicate scheduling
+  expiresAt: number | null; // past this, a never-fired intention is expired
+  createdAt: number;
+  firedAt: number | null; // last fire time
+  attempts: number;
+  provenance: Provenance;
+}
+
+/** An intention before storage assigns id/status/stats. */
+export interface NewIntention {
+  title: string;
+  action: string;
+  trigger: IntentionTrigger;
+  fireAt?: number | null;
+  cronExpr?: string | null;
+  eventMatch?: EventMatch | null;
+  expiresAt?: number | null;
+  dedupKey?: string | null;
+  provenance: Provenance;
+}
+
 // ─── EpisodeSummarizer: distills a closed episode (Phase 5). ───
 export interface EpisodeSummarizer {
   summarize(lines: TimelineLine[]): Promise<{ summary: string; salientFacts: string[] }>;

@@ -62,3 +62,6 @@ rules:
   - kind: allow
     match: { tool: memory.procedure.fetch }
     note: "reading a proven method's steps is safe (read-only)"
+  - kind: allow
+    match: { tool: remind.list }
+    note: "listing your own scheduled intentions is safe (read-only); create/cancel require approval"

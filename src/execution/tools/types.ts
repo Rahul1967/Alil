@@ -2,6 +2,7 @@ import type { Effect, Risk } from "../../core/types.ts";
 import type { Sandbox } from "../sandbox.ts";
 import type { ReadTracker } from "../read-tracker.ts";
 import type { MemoryStore } from "../../memory/types.ts";
+import type { ProspectiveStore } from "../../memory/prospective.ts";
 import type { DocExtractor } from "../docs/types.ts";
 
 export interface ToolContext {
@@ -19,6 +20,8 @@ export interface ToolContext {
    * memory is off — memory tools then fail gracefully.
    */
   memory?: { store?: MemoryStore };
+  /** Prospective memory (scheduled/triggered intentions) for the remind.* tools. */
+  prospective?: { store?: ProspectiveStore };
 }
 
 export type ValidateResult<T> =
