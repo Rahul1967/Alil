@@ -48,6 +48,9 @@ rules:
     match: { tool: fs.grep }
     note: "searching file contents within the jail is safe"
   - kind: allow
+    match: { tool: doc.read }
+    note: "reading a document (pdf/docx/xlsx/csv) within the jail is safe; contents are untrusted/ingested"
+  - kind: allow
     match: { tool: memory.read }
     note: "reading own canonical memory is safe (memory.write/forget still require approval via the write rule)"
   - kind: allow

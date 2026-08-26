@@ -41,6 +41,7 @@ test("brain advertises catalog tools to the model", async () => {
   const advertised = mock.received[0]?.tools ?? [];
   const names = advertised.map((t) => t.name).sort();
   assert.deepEqual(names, [
+    "doc.read",
     "fs.edit",
     "fs.glob",
     "fs.grep",
@@ -137,5 +138,5 @@ test("catalog reflects a custom rule source's world consistently", async () => {
   const src = new StaticRuleSource(cfg);
   assert.equal((await src.load()).mode, "default");
   const catalog = new RegistryToolCatalog();
-  assert.equal((await catalog.list()).length, 17);
+  assert.equal((await catalog.list()).length, 18);
 });
