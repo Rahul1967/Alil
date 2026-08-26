@@ -1,220 +1,262 @@
-# Alil — Memory & Session Design
+# Alil — Memory: Architecture, Storage & Agentic Model
 
-**Companion to `DESIGN.md` and `PLAN.md` · v0.1 draft · 2026-07-08**
+**v0.2 · 2026-08-26** · Consolidates the former MEMORY / MEMORY_IMPL / MEMORY_AGENTIC docs.
 
-This document specifies how Alil manages **memory** and **sessions** across every
-interface (terminal, browser, Telegram/Slack). It supersedes the identity-routed,
-per-thread session model sketched in `PLAN.md §4`: that model partitioned conversations
-by identity and surface. Alil does not.
+Companion to `DESIGN.md` (harness architecture & threat model) and `PLAN.md` (repo layout).
+This document is the single source of truth for Alil's memory: the architecture, how it is
+stored and retrieved, and the agentic (pull) model by which the assistant fetches memory on
+its own.
 
----
-
-## 1 · The premise: one mind, many windows
-
-**One user. One assistant. One continuous mind.**
-
-Alil is a single-user personal assistant (a "Jarvis"). The terminal, the browser chat, and
-any messaging channel are not separate conversations — they are **windows onto the same
-continuous assistant**. You pick up on the browser exactly where you left off in the
-terminal. There is:
-
-- **no** per-conversation partition (unlike ChatGPT's many chats),
-- **no** per-workspace / per-project isolation (unlike Claude Code),
-- **no** per-identity session routing (there is exactly one owner).
-
-Continuity is over **time**, not over thread or surface. If something relevant is not in
-the live context window, Alil **retrieves it from the store** ("fetch from the DB").
-
-### What the premise deletes
-
-- Identity↔session routing — there is one owner; the router has no find-or-create job.
-- Per-interface session/memory resolvers — one timeline, one memory namespace.
-- "New chat" / "one-session-per-project" — the wrong axis. The axis is **time**.
-- "Grants die with the session" — there is no session boundary to die at. Grant safety
-  rests entirely on **TTL + maxUses** (both already in the `Grant` model). TTL is now
-  load-bearing, not a backstop.
-
-### What the premise does NOT simplify
-
-Single-user simplifies **identity**. It does **not** simplify **provenance**. Ingested
-content (an email Alil read, a web page it fetched) is still `tainted` and can still
-escalate an action to `ask`, even though there is only one operator. Context bleed across
-surfaces (repo work + personal chat + email all share one memory) is a **deliberate
-feature** of the Jarvis premise — the opposite of project isolation — and it is exactly
-why provenance/taint still matters.
+- [§1 · Premise](#1--premise-one-continuous-mind)
+- [§2 · Architecture: the layers](#2--architecture-the-layers)
+- [§3 · Storage](#3--storage)
+- [§4 · Retrieval](#4--retrieval)
+- [§5 · Lifecycle: timeline → episodes → distillation](#5--lifecycle-timeline--episodes--distillation)
+- [§6 · Canonical memory](#6--canonical-memory)
+- [§7 · The agentic model (pull, not push)](#7--the-agentic-model-pull-not-push)
+- [§8 · Memory tools](#8--memory-tools)
+- [§9 · Safety: provenance, taint & audit](#9--safety-provenance-taint--audit)
+- [§10 · Cross-channel concurrency](#10--cross-channel-concurrency)
+- [§11 · Deployment](#11--deployment)
+- [§12 · Implementation status](#12--implementation-status)
+- [§13 · Remaining work](#13--remaining-work)
 
 ---
 
-## 2 · Three objects
+## 1 · Premise: one continuous mind
 
-The whole SessionMeta / session-router apparatus from `PLAN.md §4` is replaced by three
-objects.
+**One user. One assistant. One continuous mind.** Alil is a single-user personal assistant.
+The terminal, the browser, and any messaging channel are not separate conversations — they
+are windows onto the same continuous assistant. You pick up on the browser exactly where you
+left off in the terminal. There is **no** per-conversation partition, **no** per-workspace
+isolation, **no** per-identity session routing (there is exactly one owner).
 
-### 2.1 · Timeline — one global append-only event log
+Continuity is over **time**, not over thread or surface. If something relevant is not in the
+live context window, Alil retrieves it from the store ("fetch from the DB").
 
-Every turn from every channel appends here, each line tagged with its `channel` and
-`provenance`. This is the single source of truth and it is continuous forever. It is the
-`TranscriptLine[]` model from `core/types.ts`, made single-namespace and channel-tagged.
+Single-user simplifies **identity**; it does **not** simplify **provenance**. Ingested
+content (an email Alil read, a web page it fetched) is still tainted and can still escalate an
+action, even though there is only one operator. Context bleed across surfaces is a deliberate
+feature of the JARVIS premise — and exactly why provenance/taint still matters (§9).
 
-```typescript
-// One global, append-only log. No per-session/per-identity partition.
-interface TimelineLine {
-  seq: number;                 // monotonic, global ordering (concurrency + audit)
-  at: string;                  // ISO
-  channel: string;             // "terminal", "browser", "telegram", ...
-  provenance: Provenance;      // operator | ingested | model | ...  (taint carries)
-  episodeId: string;           // the episode this line belongs to (§2.2)
-  role: "user" | "assistant" | "tool";
-  text?: string;
-  toolCalls?: ModelToolCall[];
-  toolResults?: ToolResultBlock[];
-}
+## 2 · Architecture: the layers
+
+The sharp line: **`SOUL.md` is identity Alil cannot edit; canonical is standing context Alil
+evolves.** Both are always in context, but one is fixed and one is living.
+
+| Layer | Source | Alil edits it? | Delivery | Contents |
+|---|---|---|---|---|
+| **Identity** | `SOUL.md` + `base.ts` | No — human-authored | system prompt, always | who Alil is, safety, tone |
+| **Canonical (standing)** | `canonical` table | Yes — evolves | system prompt, **live each turn** | preferences, memory instructions, rules, [procedural] |
+| **Episodic** | `episodes` table | via tools | **pull** (`memory.query`) | past-conversation summaries |
+| **Semantic** | recall index | via tools | **pull** (`memory.query`) | search over episodic |
+| **Working set** | `timeline` table | append | push, always | recent turns (continuity) |
+
+**Model/harness split (`DESIGN.md`):** the LLM decides *what*; the harness decides *whether
+and how*. Memory is a harness concern — the model reasons; the harness stores, retrieves,
+gates, and audits.
+
+## 3 · Storage
+
+**Single-file, embedded, zero-service.** The entire memory is one SQLite file
+(`workspace/memory.db`, WAL mode) using `better-sqlite3` + the `sqlite-vec` extension. No
+database server, no container — the "database" is one copyable file. This is the local-first,
+deploy-anywhere choice.
+
+**Why one file, not a vector service:** the continuous mind is only coherent if all state is
+co-located and totally ordered. Keeping row store and vectors in one file means a single
+transaction covers "append the turn *and* index it" — recall never sees a half-written memory.
+
+### Schema (all in `src/memory/schema.ts`)
+
+```sql
+timeline(seq PK AUTOINCREMENT, at, channel, provenance JSON, episode_id,
+         role, text, tool_calls JSON, tool_results JSON)   -- the global log; seq = total order
+episodes(id PK, start_seq, end_seq, started_at, ended_at, summary, salient_facts JSON)
+canonical(id PK, key, kind DEFAULT 'preference', text, provenance JSON, source, created_at)
+agent_state(id=1 singleton, active_episode_id, last_active_at, token_*, active_grants JSON)
+recall_vec USING vec0(embedding float[DIM])                -- sqlite-vec KNN index
+recall_chunk(rowid PK = vec rowid, kind, ref, text, provenance JSON, source)  -- metadata
+recall_fts USING fts5(text)                                -- lexical / hybrid ranking
 ```
 
-`seq` is assigned by the gateway at append time, so concurrent channels are totally
-ordered. This is also what the audit ledger references.
+Everything is text/JSON plus one float array per chunk. `provenance` is JSON on every row so
+taint is never lost. The same episode is stored three ways — raw turns (`timeline`), the
+distilled summary (`episodes`), and the searchable chunk (`recall_chunk` + `recall_vec` +
+`recall_fts`) — deliberate: truth vs distillation vs index.
 
-### 2.2 · Episode — a time-bounded slice (housekeeping, not identity)
+**Embeddings:** the default `HashingEmbedder` is in-process, deterministic, offline (feature
+hashing, L2-normalized) — memory works on any device with no API key. A `BedrockTitanEmbedder`
+is an opt-in quality upgrade behind the same `Embedder` port. Stored vectors are only valid for
+the embedder that produced them; switching requires re-embedding (DIM is fixed at create time).
 
-An unbounded log cannot be compacted or recalled efficiently. An **episode** is a
-time-bounded slice of the timeline, cut on an **inactivity gap** (e.g. > 30 min silence
-closes the current episode) or a rolling time ceiling. It is purely a housekeeping unit:
+## 4 · Retrieval
 
-- An episode is **not** a separate conversation. Continuity spans episodes seamlessly —
-  the model never sees an episode boundary as a reset.
-- When an episode closes, it is **summarized into memory** (a gated, audited
-  `memory.write`). The summary becomes episodic-tier recall (§3).
+### The four tiers (what a turn draws on)
 
-```typescript
-interface Episode {
-  id: string;
-  startSeq: number;
-  endSeq: number;              // exclusive; open episode has endSeq = null
-  startedAt: string;
-  endedAt?: string;            // set when the inactivity gap closes it
-  summary?: string;            // distilled on close → episodic recall
-  salientFacts?: string[];     // candidate promotions to canonical memory
-}
-```
-
-### 2.3 · AgentState — the single live cursor
-
-There is no per-thread `SessionMeta`. There is one small live-state object.
-
-```typescript
-interface AgentState {
-  activeEpisodeId: string;
-  lastActiveAt: string;
-  tokenBudget: { spent: number; ceiling: number };
-  activeGrants: string[];      // Grant.ids — now TTL/uses-scoped, not session-scoped
-}
-```
-
----
-
-## 3 · Memory: tiered, single-namespace, retrieval-backed
-
-Context assembly is a memory hierarchy. This is the heart of the "fetch from the DB if
-it's not in context" behavior. The current `context-assembler.ts` already accepts
-`history` + `recalled` fragments — this is the exact seam. Today `memory.recall` is a
-no-op stub; here it becomes a real retrieval query returning `Fragment[]` (which carry
-provenance, so taint survives recall).
-
-| Tier | What | In context |
+| Tier | Source | In context |
 |---|---|---|
-| **Working set** | Last N turns across **all** channels | Always (hot) |
-| **Episodic** | Summaries of recent closed episodes | Always (cheap, small) |
-| **Semantic recall** | Vector/keyword search over the full timeline + distilled facts | On demand — retrieved per message when relevant |
-| **Canonical** | Durable pinned facts (preferences, standing instructions) | Always |
+| Working set | last N `timeline` rows, all channels | always (push) |
+| Canonical | all `canonical` facts | always — in the **system prompt** (§7) |
+| Episodic | recent closed-episode summaries | on demand via `memory.query` |
+| Semantic | KNN + keyword search over episode chunks | on demand via `memory.query` |
 
-**Recall flow, per turn:** always include the working set + episodic summaries +
-canonical facts; then run a semantic query keyed on the current message over the recall
-index (episode summaries first, drilling into individual turns only when needed) and fold
-the top hits in as `Fragment[]`. Recalled fragments keep their original provenance so an
-old ingested fact stays tainted when it re-enters context.
-
-```typescript
-// The MemoryStore port — one namespace, no workspace/identity scoping.
-interface MemoryStore {
-  // canonical, durable, always-in-context facts
-  canonical(): Promise<Fragment[]>;
-  writeCanonical(fact: Fragment): Promise<void>;   // gated + audited (behavior-changing)
-
-  // episodic summaries (recent-first)
-  recentEpisodes(limit: number): Promise<Episode[]>;
-
-  // semantic recall over the full history + distilled facts
-  recall(query: string, k: number): Promise<Fragment[]>;
-
-  // index a closed episode's summary/turns for future recall
-  index(episode: Episode, lines: TimelineLine[]): Promise<void>;
-}
-```
-
-### Recall index backend
-
-Start **local-first and zero-infra**: an embedded store (SQLite + a vector extension, or a
-flat embedding file) so the terminal experience needs no external service. The port lets a
-hosted vector DB be swapped in when the browser app goes multi-device — the domain model
-and every security property stay identical.
-
----
-
-## 4 · Channels are thin transports
-
-Because there is one timeline and one memory namespace, channels carry **no** session or
-memory policy. Each channel does exactly:
+### Hybrid recall (`store.recall` / `store.searchEpisodes`)
 
 ```
-recv → tag provenance → enqueue turn → (stream response back)
+1. embed(query)                         → one vector
+2. vec KNN over recall_vec              → semantic neighbors
+3. BM25 over recall_fts                 → lexical neighbors
+4. reciprocal-rank fusion (RRF)         → combine by rank position (scale-free, degrades gracefully)
+5. hydrate from recall_chunk            → text + provenance + source
+6. return Fragment[] / EpisodeHit[]     → each keeps its ORIGINAL provenance
 ```
 
-A channel is an I/O adapter, nothing more. The runtime (`Brain`) never learns which
-surface it is on; it receives an assembled context and streams back a response.
+`searchEpisodes` restricts to `kind='episode'` (canonical is already standing context) and
+enriches each hit with its episode date. Semantic search spans **all closed episodes**, not
+just recent ones — a year-old episode competes on relevance; `k` bounds results, not scope.
+
+## 5 · Lifecycle: timeline → episodes → distillation
+
+- **Timeline** is the append-only source of truth; every turn from every channel appends one
+  row, `seq`-ordered globally.
+- An **Episode** is a time-bounded slice, cut on an inactivity gap (default 30 min). Episodes
+  are housekeeping, not conversations — the model never sees a boundary as a reset.
+- On close, `EpisodeManager` distills the slice (summary + salient facts) and indexes it — a
+  gated, audited **`memory.write`** (behavior-changing). The offline `ExtractiveSummarizer` is
+  the default; an LLM summarizer drops in behind the `EpisodeSummarizer` port.
+
+**Decision — the episode is the indexing unit, not the turn.** A single turn ("set pool max to
+20") lacks the context that makes it meaningful. Indexing the distilled episode avoids
+re-stitching turns at read time. Consequence: **taint is episode-granular** (if any line was
+ingested, the episode chunk carries the taint — correct under this model, fail-closed), and
+**recall precision rides on summary quality** (the lever is an LLM summarizer, not finer
+chunking).
+
+## 6 · Canonical memory
+
+Canonical is the mutable, Alil-level standing layer — **typed by `kind`**, each kind rendering
+as its own system-prompt section:
+
+- **`preference`** — user facts/preferences (name, timezone, tone, standing wishes).
+- **`memory_instruction`** — the self-operating manual: how Alil's memory works and how to use
+  each operation. This is what makes the pull model work; seeded as editable canonical rows,
+  inspectable in the Memory dashboard, evolving per phase. **Truthfulness rule:** it describes
+  only currently-shipped tools.
+- **`rule`** — standing behavioral rules.
+- **`procedural`** — **reserved (Phase 4)**; learned how-to sequences, planned separately.
+
+**Upsert-by-key:** a changed value replaces the old (name "Rahul" → "Rahul Jain" = one row),
+and the stale recall chunk/vector is deleted so recall never returns an outdated value.
+
+## 7 · The agentic model (pull, not push)
+
+Memory is **agentic**: standing context is loaded once; everything else the model fetches on
+need via tools. This replaced an earlier push model that injected canonical + episodic +
+semantic recall into *every* turn.
+
+- **Session start:** canonical (preferences + memory instructions + rules) is rendered into
+  the system prompt, grouped by kind, **live each turn** (a fact pinned at 10:00 is known at
+  10:05 — no restart). Rendered by `CanonicalKnowledge` → the `PromptAssembler`'s knowledge
+  seam.
+- **On need:** the model calls `memory.read` / `memory.write` / `memory.forget` (canonical) and
+  `memory.query` (episodic/semantic). Nothing episodic/semantic is pushed.
+- **Working-set history** stays pushed — that's conversation continuity, not memory recall.
+
+Resulting system prompt each turn:
+```
+[ base.ts safety ] + [ SOUL.md persona ]     ← identity, immutable
+## About the user            ← canonical kind=preference
+## How your memory works     ← canonical kind=memory_instruction
+## Standing rules            ← canonical kind=rule
+## Environment (date)
+```
+
+## 8 · Memory tools
+
+| Tool | Effect / Risk | Gating | Purpose |
+|---|---|---|---|
+| `memory.read` | read / low | auto-allow | look up canonical facts by kind/key |
+| `memory.query` | read / low | auto-allow | semantic search over **past conversations** (episodes), dated, taint-flagged |
+| `memory.write` | write / medium | **requires approval** | pin/update a canonical fact (kind `preference`/`rule` only); upsert-by-key |
+| `memory.forget` | write / high | **requires approval** | delete a canonical fact + its recall index |
+
+The store is injected into the tool `ToolContext` (a mutable holder wired after `openMemory`).
+Writes go through the policy boundary like any other write; reads are allowlisted. The model
+learns the tools exist from the seeded `memory_instruction` rows.
+
+**Kind restriction:** `memory.write` may write only `preference`/`rule` — the model cannot
+rewrite its own `memory_instruction` or `procedural` entries via a tool call.
+
+## 9 · Safety: provenance, taint & audit
+
+- **Provenance rides on every row and every recalled fragment.** A fact recalled from a
+  week-old ingested email is still tainted today.
+- **Taint escalates downstream.** The policy boundary escalates any action influenced by
+  tainted provenance (`allow→ask`, `ask→deny`). So an injection-derived memory cannot silently
+  drive a sensitive action, even days later. Since `memory.write` is already `ask`, a write
+  proposed on a tainted turn escalates to `deny` — injection can't pin a canonical fact.
+- **Canonical writes require your permission** (§8). All durable memory writes are
+  model-proposed + user-approved; the earlier silent heuristic promoter is retired.
+- **Audit ledger** (`workspace/logs/audit.jsonl`, append-only, `seq`-persistent): every
+  behavior-changing event — `turn`, `episode.distill`, `canonical.tool` — is recorded. Because
+  memory writes change *future* behavior, they must be auditable; this makes the
+  context-manipulation threat traceable rather than silent.
+
+## 10 · Cross-channel concurrency
+
+One mind, one timeline: two turns can't run coherently at once, so the gateway `TurnQueue`
+serializes all inbound turns (from any channel) — a single timeline writer, totally ordered by
+`seq`. Default is FIFO; a turn submitted with `{ preempt: true }` cancels the in-flight turn via
+`AbortSignal` and jumps ahead (the "STOP, urgent" path). A preempted turn's result is still
+delivered (auditable, not lost).
+
+## 11 · Deployment
+
+- **Portable state:** the whole memory is one `workspace/memory.db` (WAL). Copy it to move the
+  assistant; path via `ALIL_DB`. `:memory:` for ephemeral.
+- **Native modules:** `better-sqlite3` + `sqlite-vec` ship prebuilt binaries for common Node-22
+  targets; bundle the matching ones for exotic devices.
+- **No-API default:** the `HashingEmbedder` needs no network/key. Titan embeddings are opt-in.
+- **Fail-safe:** WAL + append-only timeline → a crash mid-turn resumes cleanly; a pending
+  approval frozen to disk resumes fail-closed.
+- **Setup:** `npm run db:setup` (idempotent; seeds memory instructions) · `npm run db:reset`
+  (fresh) · `npm run memory:demo` (offline end-to-end demo) · `npm run chat` / `npm run ui`
+  (the assistant, both sharing one `memory.db`). The Memory dashboard in the browser UI
+  (Chat/Memory toggle) shows the Timeline, Episodes, and Canonical (with kinds) tabs.
+
+## 12 · Implementation status
+
+Built and tested (141 tests green across the suite):
+
+| Area | Modules |
+|---|---|
+| Storage | `db.ts`, `schema.ts`, `timeline.ts`, `store.ts`, `embedder.ts`, `vendor.d.ts` |
+| Lifecycle | `episodes.ts`, `summarizer.ts` (extractive) |
+| Canonical | `seed.ts`, `knowledge.ts`, `fact-extractor.ts` + `promoter.ts` (retired from the loop, kept for reference) |
+| Retrieval | hybrid recall in `store.ts`, `recall-port.ts` |
+| Tools | `execution/tools/memory-{read,write,forget,query}.ts` |
+| Gateway | `gateway/turn-queue.ts`, `gateway/audit-ledger.ts` |
+| Prompt seam | `prompts/assembler.ts` knowledge source + `prompts/types.ts` |
+| Channels | REPL (`scripts/chat.ts`), browser (`ui/server.ts` + dashboard) |
+
+Phased delivery (all ✅): storage & retrieval (timeline/embedder/store/recall), episode
+lifecycle, cross-channel turn queue, canonical auto-write→**tool-driven + permissioned**, audit
+ledger, agentic Phase 1 (standing canonical), Phase 1.5 (canonical tools), Phase 2
+(`memory.query`).
+
+## 13 · Remaining work
+
+1. **LLM quality swaps** (behind existing ports, deferred — need model/network):
+   - **`EpisodeSummarizer`** → LLM summarizer. Highest-value lever now: `memory.query`
+     relevance rides on summary quality, and the offline extractive summaries are blobby.
+   - **`FactExtractor`** → LLM extractor for open-ended preferences the heuristics miss.
+2. **Phase 4 — procedural memory** (reserved): the `procedural` canonical kind — learned
+   how-to sequences. To be planned separately.
+3. **Browser approvals:** the browser channel currently fail-closes on writes (approve from the
+   terminal); a browser approval affordance would let `memory.write`/`forget` work there.
 
 ---
 
-## 5 · Cross-channel concurrency: a single turn queue
-
-Multiple channels can be live at once (terminal open + a Telegram message arrives). They
-feed **one** mind and **one** continuous timeline — two turns cannot run coherently at
-once. Therefore the gateway **serializes all inbound into a single turn queue**: one turn
-at a time against the timeline.
-
-- **Default: queue.** A new input waits behind the running turn.
-- **Preemption (opt-in):** an explicit "stop / new priority" input **cancels** the
-  in-flight turn via the existing `AbortSignal` (see the cancellable-turn work already in
-  `runtime/loop.ts`), folds the new input in, and continues. The machinery is already
-  built; this is where it pays off.
-
-Total ordering by `seq` (§2.1) makes the interleaving auditable.
-
----
-
-## 6 · Where the risk moves
-
-With continuity there is no user-chosen "new chat" to bound context, so the system's
-quality rides on two things:
-
-1. **Compaction / episode-summary quality.** A weak summary silently drops continuity.
-2. **Recall relevance.** Weak recall makes Alil either forget or confabulate continuity.
-
-Both deserve an evaluation harness early — they are not plumbing. This is the single
-biggest departure in risk profile from a thread-partitioned assistant, where the user's
-own "new chat" action did the bounding for free.
-
----
-
-## 7 · Build order
-
-1. **`Timeline` store** — append-only, single-namespace, channel-tagged, `seq`-ordered.
-   The productionized form of the in-memory `history` currently in `scripts/chat.ts`.
-2. **Tiered `MemoryStore` + real `recall`** — canonical + episodic + semantic; wired into
-   `context-assembler.ts`, replacing the no-op stub.
-3. **Episode lifecycle** — inactivity-gap close → summarize → gated/audited
-   `memory.write`.
-4. **Gateway turn-queue** — serialize multi-channel inbound; preemption via `AbortSignal`.
-5. **Channels as thin transports** — recv → tag provenance → enqueue → stream back.
-
-All five preserve the existing boundary properties: provenance, taint propagation,
-TTL/uses-scoped grants, and audit linkage via `seq`.
+*Related: `DESIGN.md` (harness architecture, threat model, HITL), `PLAN.md` (repo layout, data
+model, tool catalog), `BEST_PRACTICES.md`.*

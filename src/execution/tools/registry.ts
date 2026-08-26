@@ -8,6 +8,10 @@ import { fsWrite } from "./fs-write.ts";
 import { shell } from "./shell.ts";
 import { webFetch } from "./web-fetch.ts";
 import { webSearch } from "./web-search.ts";
+import { memoryRead } from "./memory-read.ts";
+import { memoryWrite } from "./memory-write.ts";
+import { memoryForget } from "./memory-forget.ts";
+import { memoryQuery } from "./memory-query.ts";
 
 /** name → tool. Adding a tool = one entry here (plus its file). */
 export class ToolRegistry {
@@ -36,4 +40,8 @@ export const DEFAULT_TOOLS: AnyTool[] = [
   shell,
   webFetch,
   webSearch,
+  memoryRead,
+  memoryWrite,
+  memoryForget,
+  memoryQuery,
 ];

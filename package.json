@@ -7,7 +7,11 @@
   "scripts": {
     "build": "tsc --noEmit",
     "test": "node --experimental-strip-types --test test/**/*.test.ts",
-    "chat": "node --experimental-strip-types --env-file=.env scripts/chat.ts"
+    "chat": "node --experimental-strip-types --env-file=.env scripts/chat.ts",
+    "ui": "node --experimental-strip-types --env-file=.env ui/server.ts",
+    "db:setup": "node --experimental-strip-types scripts/db-setup.ts",
+    "db:reset": "node --experimental-strip-types scripts/db-setup.ts --reset",
+    "memory:demo": "node --experimental-strip-types scripts/memory-demo.ts"
   },
   "devDependencies": {
     "@types/node": "^26.1.0",
@@ -15,6 +19,8 @@
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1080.0",
+    "better-sqlite3": "^11.10.0",
+    "sqlite-vec": "^0.1.6",
     "yaml": "^2.9.0"
   }
 }

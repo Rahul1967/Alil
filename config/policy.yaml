@@ -47,3 +47,9 @@ rules:
   - kind: allow
     match: { tool: fs.grep }
     note: "searching file contents within the jail is safe"
+  - kind: allow
+    match: { tool: memory.read }
+    note: "reading own canonical memory is safe (memory.write/forget still require approval via the write rule)"
+  - kind: allow
+    match: { tool: memory.query }
+    note: "searching own past-conversation memory is safe (read-only)"

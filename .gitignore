@@ -4,6 +4,9 @@ dist/
 *.log
 workspace/sessions/
 workspace/logs/
+workspace/memory.db
+workspace/memory.db-wal
+workspace/memory.db-shm
 
 # Claude Code local settings + temp files
 .claude/

@@ -24,3 +24,17 @@ export interface PersonaSource {
 export interface EnvContext {
   now(): Date;
 }
+
+/** A titled block of standing knowledge rendered into the system prompt. */
+export interface KnowledgeSection {
+  title: string;
+  items: string[];
+}
+
+/**
+ * Supplies standing knowledge (canonical memory) for the system prompt. Read live each turn
+ * so newly-pinned facts appear without a restart. Empty sections are skipped by the assembler.
+ */
+export interface KnowledgeSource {
+  sections(): Promise<KnowledgeSection[]>;
+}

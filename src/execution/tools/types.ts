@@ -1,11 +1,18 @@
 import type { Effect, Risk } from "../../core/types.ts";
 import type { Sandbox } from "../sandbox.ts";
 import type { ReadTracker } from "../read-tracker.ts";
+import type { MemoryStore } from "../../memory/types.ts";
 
 export interface ToolContext {
   sandbox: Sandbox;
   /** Optional read-before-edit tracker. When present, fs.edit/fs.write enforce it. */
   reads?: ReadTracker;
+  /**
+   * Canonical memory access for memory.* tools. A mutable holder so it can be wired after
+   * the boundary is constructed (store opens after the executor). `store` is undefined when
+   * memory is off — memory tools then fail gracefully.
+   */
+  memory?: { store?: MemoryStore };
 }
 
 export type ValidateResult<T> =

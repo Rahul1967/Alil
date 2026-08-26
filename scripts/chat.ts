@@ -18,12 +18,18 @@ import { PromptAssembler, FilePersonaSource } from "../src/prompts/index.ts";
 import { PolicyBoundary, YamlRuleSource, credentialBlock, GrantStore } from "../src/policy/index.ts";
 import type { ApprovalPort, ApprovalRequest, ApprovalDecision } from "../src/policy/index.ts";
 import { ToolRegistry, Executor, Sandbox, ReadTracker, RegistryToolCatalog, DEFAULT_TOOLS } from "../src/execution/index.ts";
+import { openMemory, EpisodeManager, ExtractiveSummarizer, CanonicalKnowledge, seedMemoryInstructions } from "../src/memory/index.ts";
+import type { MemorySystem, MemoryStore } from "../src/memory/index.ts";
+import type { KnowledgeSource } from "../src/prompts/types.ts";
+import { AuditLedger } from "../src/gateway/index.ts";
+import type { MemoryPort } from "../src/runtime/types.ts";
 import type { BrainInput } from "../src/runtime/types.ts";
 import type { TranscriptLine } from "../src/core/types.ts";
 
 const modelId = process.env.BEDROCK_MODEL_ID ?? "us.anthropic.claude-sonnet-4-5-20250929-v1:0";
 
 const registry = new ProviderRegistry().register(new BedrockProvider());
+const audit = new AuditLedger("workspace/logs/audit.jsonl");
 
 const rl = createInterface({ input: stdin, output: stdout });
 
@@ -57,11 +63,14 @@ const approvals: ApprovalPort = {
 // Sandbox root: defaults to workspace/, override with ALIL_SANDBOX_ROOT (e.g. /home/user).
 const sandboxRoot = process.env.ALIL_SANDBOX_ROOT ?? "workspace";
 const tools = new ToolRegistry();
+// Mutable holder: memory opens after the boundary, so the memory.* tools get their store
+// wired in below once it's available.
+const memCtx: { store?: MemoryStore } = {};
 const boundary = new PolicyBoundary({
   rules: new YamlRuleSource("config/policy.yaml"),
   tools,
   hooks: [credentialBlock],
-  executor: new Executor({ sandbox: new Sandbox(sandboxRoot), reads: new ReadTracker() }),
+  executor: new Executor({ sandbox: new Sandbox(sandboxRoot), reads: new ReadTracker(), memory: memCtx }),
   approvals,
   grants: new GrantStore(),
 });
@@ -80,19 +89,54 @@ const observer = {
   },
   onToolResult(e: { tool: string; outcome: "ok" | "error" | "denied"; summary: string }) {
     console.log(`    ${OUTCOME_MARK[e.outcome]} ${e.outcome}: ${e.summary}`);
+    // Audit model-driven canonical memory writes (memory.write / memory.forget).
+    if (e.tool.startsWith("memory.") && e.tool !== "memory.read") {
+      audit.append("canonical.tool", { tool: e.tool, outcome: e.outcome, summary: e.summary });
+    }
   },
   onHalt(e: { reason: string; kind: "guard" | "error" }) {
     console.log(`  ⏹ halted (${e.kind}): ${e.reason}`);
   },
 };
 
+// Persistent memory: one portable SQLite file (ALIL_DB, default workspace/memory.db).
+// Falls back to an ephemeral no-op if the native module can't load, so the REPL still runs.
+let memory: MemorySystem | null = null;
+let episodes: EpisodeManager | null = null;
+let knowledge: KnowledgeSource | undefined;
+// Phase 1 (agentic memory): the per-turn recall PUSH is off. Canonical is standing context
+// in the system prompt; episodic/semantic are fetched by tools (phases 1.5 / 2). No-op port.
+const memoryPort: MemoryPort = { recall: async () => [] };
+try {
+  memory = openMemory({ path: process.env.ALIL_DB ?? "workspace/memory.db" });
+  await seedMemoryInstructions(memory.store);
+  memCtx.store = memory.store; // wire the memory.* tools
+  knowledge = new CanonicalKnowledge(memory.store);
+  // Phase 1.5: canonical writes are model-driven and permissioned (memory.write tool), so
+  // the silent auto-promoter is no longer wired in. Episode distillation still runs.
+  episodes = new EpisodeManager({
+    db: memory.db,
+    timeline: memory.timeline,
+    store: memory.store,
+    summarizer: new ExtractiveSummarizer(),
+    onMemoryWrite: (e) => {
+      audit.append("episode.distill", { episodeId: e.episodeId, lines: e.lines });
+      console.log(`  · episode ${e.episodeId} distilled → memory (${e.lines} lines)`);
+    },
+  });
+  console.log(`memory: ${process.env.ALIL_DB ?? "workspace/memory.db"} (persistent · agentic tools on)`);
+} catch (e) {
+  console.log(`memory: disabled (${(e as Error).message}) — running without recall`);
+}
+
 const ports: BrainPorts = {
-  memory: { recall: async () => [] },
+  memory: memoryPort,
   skills: { eligible: async () => [] },
   // Advertise the same tools the boundary governs.
   tools: new RegistryToolCatalog(DEFAULT_TOOLS),
-  // Persona from workspace/SOUL.md (falls back to base-only if absent); inject the date.
-  prompt: new PromptAssembler(new FilePersonaSource(), { env: { now: () => new Date() } }),
+  // Persona from workspace/SOUL.md (falls back to base-only if absent); inject the date;
+  // standing canonical memory (preferences + memory instructions) live-rendered each turn.
+  prompt: new PromptAssembler(new FilePersonaSource(), { env: { now: () => new Date() }, knowledge }),
   // Real policy boundary: reads run; writes/high-risk gated by approval; credentials blocked.
   actions: boundary,
   // Live trace of tool calls and outcomes.
@@ -124,8 +168,22 @@ console.log(
     `Type a message (/exit to quit).\n`,
 );
 
-// Conversation so far, carried across turns so the brain sees prior context.
-const history: TranscriptLine[] = [];
+// The continuous timeline is the source of truth for prior context. Load the recent
+// working set from persistent memory (spanning past sessions — one continuous mind).
+const CHANNEL = "terminal";
+
+function loadHistory(): TranscriptLine[] {
+  if (!memory) return [];
+  return memory.timeline.workingSet(40).flatMap((l): TranscriptLine[] => {
+    if (l.role === "user" && l.text !== undefined) {
+      return [{ t: "user", at: l.at, channel: l.channel, provenanceId: l.provenance.origin, text: l.text }];
+    }
+    if (l.role === "assistant" && l.text !== undefined) {
+      return [{ t: "model", at: l.at, text: l.text }];
+    }
+    return [];
+  });
+}
 
 for (;;) {
   let text: string;
@@ -137,12 +195,13 @@ for (;;) {
   if (closed || text === "/exit" || text === "/quit") break;
   if (text.length === 0) continue;
 
-  // Pass PRIOR turns as history; the current message is added below via `message`.
-  // Record this turn into `history` only after it completes, for the next turn.
+  // Roll the episode cursor (closes + distills any idle episode), then pass PRIOR turns as
+  // history (from the persistent timeline). The current message is recorded after the turn.
+  const episodeId = episodes ? await episodes.beginTurn(new Date().toISOString()) : "ep_repl";
   const input: BrainInput = {
     sessionId: "repl",
     message: { text, provenance: { origin: "operator" } },
-    history: [...history],
+    history: loadHistory(),
   };
 
   current = new AbortController();
@@ -159,11 +218,13 @@ for (;;) {
       console.log(`      (iterations: ${turn.iterations})\n`);
     }
     // Only durably record the exchange when the turn produced a real answer.
-    if (turn.stopReason === "complete") {
-      history.push({ t: "user", at: new Date().toISOString(), channel: "repl", provenanceId: "operator", text });
+    if (turn.stopReason === "complete" && memory) {
+      const at = new Date().toISOString();
+      memory.timeline.append({ at, channel: CHANNEL, provenance: { origin: "operator" }, episodeId, role: "user", text });
       if (turn.assistantText !== undefined) {
-        history.push({ t: "model", at: new Date().toISOString(), text: turn.assistantText });
+        memory.timeline.append({ at, channel: CHANNEL, provenance: { origin: "model" }, episodeId, role: "assistant", text: turn.assistantText });
       }
+      audit.append("turn", { channel: CHANNEL, episodeId, iterations: turn.iterations });
     }
   } catch (e) {
     console.log(`alil › [crash] ${(e as Error).message}\n`);
