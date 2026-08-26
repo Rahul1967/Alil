@@ -12,6 +12,10 @@ import { memoryRead } from "./memory-read.ts";
 import { memoryWrite } from "./memory-write.ts";
 import { memoryForget } from "./memory-forget.ts";
 import { memoryQuery } from "./memory-query.ts";
+import { memoryProcedureSearch } from "./memory-procedure-search.ts";
+import { memoryProcedureFetch } from "./memory-procedure-fetch.ts";
+import { memoryProcedureCreate } from "./memory-procedure-create.ts";
+import { memoryProcedureUpdate } from "./memory-procedure-update.ts";
 
 /** name → tool. Adding a tool = one entry here (plus its file). */
 export class ToolRegistry {
@@ -44,4 +48,8 @@ export const DEFAULT_TOOLS: AnyTool[] = [
   memoryWrite,
   memoryForget,
   memoryQuery,
+  memoryProcedureSearch,
+  memoryProcedureFetch,
+  memoryProcedureCreate,
+  memoryProcedureUpdate,
 ];

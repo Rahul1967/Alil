@@ -45,6 +45,25 @@ CREATE TABLE IF NOT EXISTS canonical (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS canonical_key ON canonical(key) WHERE key IS NOT NULL;
 
+-- Procedural memory: proven how-to methods (MEMORY.md §7a). A pulled tier — never in the
+-- prompt. Two granularities: abstract_method generalizes, verbatim_steps carries the detail.
+-- Only the trigger is embedded (into recall_vec with kind='procedure', ref=name) for search.
+CREATE TABLE IF NOT EXISTS procedure (
+  id              TEXT PRIMARY KEY,
+  name            TEXT NOT NULL UNIQUE,
+  trigger         TEXT NOT NULL,
+  abstract_method TEXT NOT NULL,
+  verbatim_steps  TEXT NOT NULL,
+  evidence        TEXT NOT NULL DEFAULT '',
+  uses            INTEGER NOT NULL DEFAULT 0,
+  score           REAL NOT NULL DEFAULT 0,
+  last_used_at    TEXT,
+  version         INTEGER NOT NULL DEFAULT 1,
+  provenance      TEXT NOT NULL,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL
+);
+
 -- Single live cursor (singleton row id = 1).
 CREATE TABLE IF NOT EXISTS agent_state (
   id                INTEGER PRIMARY KEY CHECK (id = 1),

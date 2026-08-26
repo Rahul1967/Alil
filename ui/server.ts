@@ -223,9 +223,18 @@ const server = createServer(async (req, res) => {
           .prepare("SELECT key, kind, text, provenance, source, created_at FROM canonical ORDER BY kind ASC, created_at DESC")
           .all() as { key: string | null; kind: string; text: string; provenance: string; source: string | null; created_at: string }[];
         payload = rows.map((r) => ({ key: r.key, kind: r.kind, text: r.text, provenance: parseProv(r.provenance), source: r.source, createdAt: r.created_at }));
+      } else if (which === "procedures") {
+        const rows = memory.db
+          .prepare("SELECT name, trigger, abstract_method, verbatim_steps, evidence, uses, score, last_used_at, version, provenance, updated_at FROM procedure ORDER BY updated_at DESC")
+          .all() as { name: string; trigger: string; abstract_method: string; verbatim_steps: string; evidence: string; uses: number; score: number; last_used_at: string | null; version: number; provenance: string; updated_at: string }[];
+        payload = rows.map((r) => ({
+          name: r.name, trigger: r.trigger, method: r.abstract_method, steps: r.verbatim_steps,
+          evidence: r.evidence, uses: r.uses, score: r.score, lastUsedAt: r.last_used_at,
+          version: r.version, provenance: parseProv(r.provenance), updatedAt: r.updated_at,
+        }));
       } else if (which === "stats") {
         const c = (t: string) => (memory!.db.prepare(`SELECT count(*) c FROM ${t}`).get() as { c: number }).c;
-        payload = { timeline: c("timeline"), episodes: c("episodes"), canonical: c("canonical"), chunks: c("recall_chunk") };
+        payload = { timeline: c("timeline"), episodes: c("episodes"), canonical: c("canonical"), procedures: c("procedure"), chunks: c("recall_chunk") };
       } else {
         res.writeHead(404, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: "unknown memory view" }));

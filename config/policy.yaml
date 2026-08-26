@@ -53,3 +53,9 @@ rules:
   - kind: allow
     match: { tool: memory.query }
     note: "searching own past-conversation memory is safe (read-only)"
+  - kind: allow
+    match: { tool: memory.procedure.search }
+    note: "searching own procedural memory is safe (read-only); create/update still require approval"
+  - kind: allow
+    match: { tool: memory.procedure.fetch }
+    note: "reading a proven method's steps is safe (read-only)"

@@ -8,8 +8,8 @@ interface MemoryWriteArgs {
 }
 
 // The model may only write user-facing facts — never its own operating manual (kind
-// memory_instruction) or procedures (kind procedural). Those evolve deliberately, not via a
-// model tool call.
+// memory_instruction). That evolves deliberately, not via a model tool call. (Procedural
+// methods are a separate tier with their own memory.procedure.create/update tools.)
 const WRITABLE_KINDS = new Set<CanonicalKind>(["preference", "rule"]);
 
 /**

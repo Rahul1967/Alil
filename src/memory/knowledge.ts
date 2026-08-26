@@ -11,7 +11,6 @@ const SECTIONS: { kind: CanonicalKind; title: string }[] = [
   { kind: "preference", title: "About the user" },
   { kind: "memory_instruction", title: "How your memory works" },
   { kind: "rule", title: "Standing rules" },
-  { kind: "procedural", title: "Procedures" },
 ];
 
 export class CanonicalKnowledge implements KnowledgeSource {

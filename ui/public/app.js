@@ -171,6 +171,7 @@ async function loadStats() {
     document.getElementById("c-timeline").textContent = s.timeline ?? "";
     document.getElementById("c-episodes").textContent = s.episodes ?? "";
     document.getElementById("c-canonical").textContent = s.canonical ?? "";
+    document.getElementById("c-procedures").textContent = s.procedures ?? "";
   } catch {}
 }
 
@@ -193,6 +194,22 @@ async function loadMemory(view) {
   if (view === "timeline") data.forEach(renderTimeline);
   else if (view === "episodes") data.forEach(renderEpisode);
   else if (view === "canonical") data.forEach(renderCanonical);
+  else if (view === "procedures") data.forEach(renderProcedure);
+}
+
+function renderProcedure(p) {
+  const card = el("div", "card");
+  const meta = el("div", "meta");
+  meta.appendChild(el("span", "tag operator", "procedure"));
+  meta.appendChild(el("span", "key", p.name));
+  meta.appendChild(el("span", "muted", "v" + p.version + " · used " + p.uses + "×"));
+  meta.appendChild(provTag(p.provenance));
+  card.appendChild(meta);
+  card.appendChild(el("div", "meta muted", "when: " + p.trigger));
+  card.appendChild(el("div", "body", p.method));
+  if (p.steps) card.appendChild(el("div", "meta muted", "steps: " + p.steps));
+  if (p.evidence) card.appendChild(el("div", "meta muted", "evidence: " + p.evidence));
+  memContent.appendChild(card);
 }
 
 function renderTimeline(r) {

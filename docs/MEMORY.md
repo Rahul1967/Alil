@@ -47,10 +47,17 @@ evolves.** Both are always in context, but one is fixed and one is living.
 | Layer | Source | Alil edits it? | Delivery | Contents |
 |---|---|---|---|---|
 | **Identity** | `SOUL.md` + `base.ts` | No — human-authored | system prompt, always | who Alil is, safety, tone |
-| **Canonical (standing)** | `canonical` table | Yes — evolves | system prompt, **live each turn** | preferences, memory instructions, rules, [procedural] |
+| **Canonical (standing)** | `canonical` table | Yes — evolves | system prompt, **live each turn** | preferences, memory instructions (incl. the procedural protocol), rules |
 | **Episodic** | `episodes` table | via tools | **pull** (`memory.query`) | past-conversation summaries |
 | **Semantic** | recall index | via tools | **pull** (`memory.query`) | search over episodic |
+| **Procedural** | `procedure` table | via tools | **pull** (`memory.procedure.*`) | proven how-to methods — searched before acting, never pushed |
 | **Working set** | `timeline` table | append | push, always | recent turns (continuity) |
+
+**Procedural memory is a tool tier, not canonical.** Nothing procedural is ever resident in
+the prompt. The *only* procedural thing the model always sees is a standing instruction inside
+canonical `memory_instruction` (the "code of conduct") that tells it to **search procedural
+memory before acting, and on a hit fetch the method and follow it** (§6, §7a). The methods
+themselves are pulled through tools, exactly like episodic memory.
 
 **Model/harness split (`DESIGN.md`):** the LLM decides *what*; the harness decides *whether
 and how*. Memory is a harness concern — the model reasons; the harness stores, retrieves,
@@ -74,6 +81,8 @@ timeline(seq PK AUTOINCREMENT, at, channel, provenance JSON, episode_id,
          role, text, tool_calls JSON, tool_results JSON)   -- the global log; seq = total order
 episodes(id PK, start_seq, end_seq, started_at, ended_at, summary, salient_facts JSON)
 canonical(id PK, key, kind DEFAULT 'preference', text, provenance JSON, source, created_at)
+procedure(id PK, name UNIQUE, trigger, abstract_method, verbatim_steps, evidence,   -- proven how-to methods (§7a)
+          uses DEFAULT 0, score DEFAULT 0, last_used_at, version DEFAULT 1, provenance JSON, created_at, updated_at)
 agent_state(id=1 singleton, active_episode_id, last_active_at, token_*, active_grants JSON)
 recall_vec USING vec0(embedding float[DIM])                -- sqlite-vec KNN index
 recall_chunk(rowid PK = vec rowid, kind, ref, text, provenance JSON, source)  -- metadata
@@ -139,12 +148,16 @@ Canonical is the mutable, Alil-level standing layer — **typed by `kind`**, eac
 as its own system-prompt section:
 
 - **`preference`** — user facts/preferences (name, timezone, tone, standing wishes).
-- **`memory_instruction`** — the self-operating manual: how Alil's memory works and how to use
-  each operation. This is what makes the pull model work; seeded as editable canonical rows,
-  inspectable in the Memory dashboard, evolving per phase. **Truthfulness rule:** it describes
-  only currently-shipped tools.
+- **`memory_instruction`** — the self-operating manual / code of conduct: how Alil's memory
+  works and how to use each operation. This is what makes the pull model work; seeded as
+  editable canonical rows, inspectable in the Memory dashboard, evolving per phase. It **also
+  carries the procedural protocol** — the standing instructions that drive procedural memory
+  (§7a): search before acting, on a hit fetch-and-follow, when to create a new method, when to
+  update one on new findings. **Truthfulness rule:** it describes only currently-shipped tools.
 - **`rule`** — standing behavioral rules.
-- **`procedural`** — **reserved (Phase 4)**; learned how-to sequences, planned separately.
+
+Canonical has exactly these three kinds. **Procedural methods are *not* canonical** — they
+live in their own pulled tier (§7a); only the *instruction to use them* is canonical.
 
 **Upsert-by-key:** a changed value replaces the old (name "Rahul" → "Rahul Jain" = one row),
 and the stale recall chunk/vector is deleted so recall never returns an outdated value.
@@ -172,13 +185,53 @@ Resulting system prompt each turn:
 ## Environment (date)
 ```
 
+## 7a · Procedural memory (learned how-to)
+
+Procedural memory is Alil's store of **proven methods**: "the last time I did a task like this,
+here is what worked." It is a **pull tier reached only through tools** — never pushed into the
+prompt — and it closes a learn-once/reuse-forever loop (the design follows *Memp*,
+arXiv 2508.06433, adapted to Alil's HITL boundary).
+
+**Record (`procedure` table).** Each method stores two granularities — Memp's "distill, don't
+dump" finding: the abstraction generalizes across similar tasks better than raw steps.
+
+- `trigger` — a short "when to use this" line. **This is the only field embedded for search.**
+- `abstract_method` — the generalized recipe (returned inline by search).
+- `verbatim_steps` — the exact steps that worked (fetched on demand).
+- `evidence` — the task it succeeded on (why the method is trusted).
+- `uses`, `score`, `last_used_at`, `version` — reuse/quality stats for ranking, update, prune.
+
+**The loop (what the code of conduct instructs, §6):**
+
+1. **Search before acting.** On a new task the model calls `memory.procedure.search(task)` —
+   embedding + lexical recall over `trigger`, top-k with a similarity floor so an empty/weak
+   library returns nothing rather than noise. Returns `abstract_method` inline.
+2. **On a hit, fetch and follow.** `memory.procedure.fetch(name)` returns the `verbatim_steps`
+   + `evidence`; the model understands the proven method and implements it.
+3. **Create on success.** When a task worked and no method covered it, the model proposes a new
+   procedure via `memory.procedure.create` — **HITL-gated** (effect=write). Human approval *is*
+   Alil's version of Voyager/Memp's verified-success gate: nothing enters the library on an
+   unverified or tainted trajectory. Create semantically dedupes on `trigger` first — a near
+   match routes to update, not a duplicate.
+4. **Update on new findings.** `memory.procedure.update` revises an existing method (bumps
+   `version`, rescoring), also gated.
+
+**Maintenance.** `uses`/`last_used_at`/`score` drive ranking and let persistently low-scoring
+or stale methods be deprecated (Memp's dynamic regimen), surfaced for pruning in the dashboard.
+Methods are **plain NL, never executable** — Memp shows text methods transfer across models and
+keep the store inspectable.
+
 ## 8 · Memory tools
 
 | Tool | Effect / Risk | Gating | Purpose |
 |---|---|---|---|
 | `memory.read` | read / low | auto-allow | look up canonical facts by kind/key |
 | `memory.query` | read / low | auto-allow | semantic search over **past conversations** (episodes), dated, taint-flagged |
+| `memory.procedure.search` | read / low | auto-allow | find proven methods for the current task; returns the abstract method inline |
+| `memory.procedure.fetch` | read / low | auto-allow | pull a method's verbatim steps + evidence for a hit |
 | `memory.write` | write / medium | **requires approval** | pin/update a canonical fact (kind `preference`/`rule` only); upsert-by-key |
+| `memory.procedure.create` | write / medium | **requires approval** | record a proven method (dedupes on trigger) |
+| `memory.procedure.update` | write / medium | **requires approval** | revise an existing method on new findings |
 | `memory.forget` | write / high | **requires approval** | delete a canonical fact + its recall index |
 
 The store is injected into the tool `ToolContext` (a mutable holder wired after `openMemory`).
@@ -186,7 +239,8 @@ Writes go through the policy boundary like any other write; reads are allowliste
 learns the tools exist from the seeded `memory_instruction` rows.
 
 **Kind restriction:** `memory.write` may write only `preference`/`rule` — the model cannot
-rewrite its own `memory_instruction` or `procedural` entries via a tool call.
+rewrite its own `memory_instruction` (code of conduct) via a tool call. Procedural methods are
+a separate tier with their own gated `memory.procedure.create`/`update` tools (§7a).
 
 ## 9 · Safety: provenance, taint & audit
 
@@ -251,8 +305,8 @@ ledger, agentic Phase 1 (standing canonical), Phase 1.5 (canonical tools), Phase
    - **`EpisodeSummarizer`** → LLM summarizer. Highest-value lever now: `memory.query`
      relevance rides on summary quality, and the offline extractive summaries are blobby.
    - **`FactExtractor`** → LLM extractor for open-ended preferences the heuristics miss.
-2. **Phase 4 — procedural memory** (reserved): the `procedural` canonical kind — learned
-   how-to sequences. To be planned separately.
+2. **Phase 4 — procedural memory** (§7a): the pulled `procedure` tier + `memory.procedure.*`
+   tools + the code-of-conduct protocol. *In progress.*
 3. **Browser approvals:** the browser channel currently fail-closes on writes (approve from the
    terminal); a browser approval affordance would let `memory.write`/`forget` work there.
 

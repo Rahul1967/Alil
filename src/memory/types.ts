@@ -64,7 +64,7 @@ export interface Embedder {
   embed(texts: string[]): Promise<Float32Array[]>;
 }
 
-export type ChunkKind = "turn" | "episode" | "canonical";
+export type ChunkKind = "turn" | "episode" | "canonical" | "procedure";
 
 // ─── EpisodeHit: a semantic-search result over past conversations (memory.query) ───
 export interface EpisodeHit {
@@ -75,7 +75,8 @@ export interface EpisodeHit {
 }
 
 // ─── Canonical is typed: each kind renders as its own system-prompt section ───
-export type CanonicalKind = "preference" | "memory_instruction" | "rule" | "procedural";
+// Procedural methods are NOT canonical — they are a pulled tier (see Procedure below, §7a).
+export type CanonicalKind = "preference" | "memory_instruction" | "rule";
 
 // ─── Fact: a durable, keyed canonical fact (name, timezone, preference…) ───
 export interface Fact {
@@ -92,6 +93,56 @@ export interface Fact {
 export interface FactExtractor {
   extract(lines: TimelineLine[]): Promise<Fact[]>;
 }
+
+// ─── Procedural memory (MEMORY.md §7a): proven how-to methods, a PULLED tier ───
+// Two granularities (Memp, arXiv 2508.06433): the abstraction generalizes, the verbatim steps
+// carry the detail. Only `trigger` is embedded for search.
+export interface Procedure {
+  id: string;
+  name: string; // stable identity, e.g. "deploy.staging"
+  trigger: string; // "when to use this" — the ONLY field embedded for search
+  abstractMethod: string; // generalized recipe (returned inline by search)
+  verbatimSteps: string; // exact steps that worked (fetched on demand)
+  evidence: string; // the task it succeeded on / why it's trusted
+  uses: number;
+  score: number;
+  lastUsedAt: string | null;
+  version: number;
+  provenance: Provenance;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A procedure record before storage assigns id/stats. */
+export interface NewProcedure {
+  name: string;
+  trigger: string;
+  abstractMethod: string;
+  verbatimSteps: string;
+  evidence: string;
+  provenance: Provenance;
+}
+
+/** Partial revision of an existing procedure (only provided fields change). */
+export interface ProcedureUpdate {
+  trigger?: string;
+  abstractMethod?: string;
+  verbatimSteps?: string;
+  evidence?: string;
+}
+
+/** A search hit — abstraction inline, verbatim fetched separately. */
+export interface ProcedureHit {
+  name: string;
+  trigger: string;
+  abstractMethod: string;
+  provenance: Provenance;
+}
+
+/** Outcome of createProcedure: created, or blocked by a near-duplicate (route to update). */
+export type ProcedureCreateResult =
+  | { created: true; name: string }
+  | { created: false; duplicateOf: string; similarity: number };
 
 // ─── MemoryStore: the retrieval layer (MEMORY.md §3) ───
 export interface MemoryStore {
@@ -117,6 +168,18 @@ export interface MemoryStore {
   searchEpisodes(query: string, k: number): Promise<EpisodeHit[]>;
   /** Index a closed episode's summary + turns for future recall. */
   index(episode: Episode, lines: TimelineLine[]): Promise<void>;
+
+  // ─── Procedural tier (§7a) ───
+  /** Search proven methods for the current task (embeds `trigger`); abstraction returned inline. */
+  searchProcedures(query: string, k: number): Promise<ProcedureHit[]>;
+  /** Fetch one method in full (verbatim steps + evidence); bumps its use stats. Null if absent. */
+  getProcedure(name: string): Promise<Procedure | null>;
+  /** Record a proven method. Semantically dedupes on `trigger` before inserting. */
+  createProcedure(p: NewProcedure): Promise<ProcedureCreateResult>;
+  /** Revise an existing method on new findings (bumps version). Returns whether it existed. */
+  updateProcedure(name: string, patch: ProcedureUpdate): Promise<boolean>;
+  /** All procedures, newest-updated first (for the dashboard). */
+  procedureList(): Promise<Procedure[]>;
 }
 
 // ─── EpisodeSummarizer: distills a closed episode (Phase 5). ───

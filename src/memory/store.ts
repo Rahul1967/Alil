@@ -8,10 +8,20 @@
 import { randomUUID } from "node:crypto";
 import type { Database as DB, Statement } from "better-sqlite3";
 import type { Fragment, Provenance } from "../core/types.ts";
-import type { Embedder, Episode, EpisodeHit, Fact, MemoryStore, TimelineLine, ChunkKind, CanonicalKind } from "./types.ts";
+import type {
+  Embedder, Episode, EpisodeHit, Fact, MemoryStore, TimelineLine, ChunkKind, CanonicalKind,
+  Procedure, NewProcedure, ProcedureUpdate, ProcedureHit, ProcedureCreateResult,
+} from "./types.ts";
 
 /** RRF constant — dampens the weight of any single ranker's top positions. */
 const RRF_K = 60;
+
+/**
+ * Cosine-similarity floor for two things to count as "the same procedure" on create. Vectors
+ * are L2-normalized, so cosine = 1 − d²/2 for sqlite-vec's L2 distance d. 0.9 ⇒ near-duplicate
+ * → route to update instead of piling on a second entry (skill-bloat defense, §7a).
+ */
+const DEDUP_COSINE = 0.9;
 
 function toBlob(v: Float32Array): Buffer {
   return Buffer.from(v.buffer, v.byteOffset, v.byteLength);
@@ -63,6 +73,27 @@ interface RankRow {
   rowid: number;
 }
 
+interface DistRow {
+  rowid: number;
+  distance: number;
+}
+
+interface ProcedureRow {
+  id: string;
+  name: string;
+  trigger: string;
+  abstract_method: string;
+  verbatim_steps: string;
+  evidence: string;
+  uses: number;
+  score: number;
+  last_used_at: string | null;
+  version: number;
+  provenance: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export class SqliteMemoryStore implements MemoryStore {
   readonly #db: DB;
   readonly #embedder: Embedder;
@@ -84,7 +115,13 @@ export class SqliteMemoryStore implements MemoryStore {
   #recentEpisodes: Statement;
   #getEpisodeDate: Statement;
   #knn: Statement;
+  #knnDist: Statement;
   #fts: Statement;
+  #insProc: Statement;
+  #getProcByName: Statement;
+  #updProc: Statement;
+  #touchProc: Statement;
+  #listProc: Statement;
 
   constructor(db: DB, embedder: Embedder) {
     this.#db = db;
@@ -117,7 +154,24 @@ export class SqliteMemoryStore implements MemoryStore {
     this.#knn = db.prepare(
       `SELECT rowid FROM recall_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance`,
     );
+    this.#knnDist = db.prepare(
+      `SELECT rowid, distance FROM recall_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance`,
+    );
     this.#fts = db.prepare(`SELECT rowid FROM recall_fts WHERE recall_fts MATCH ? ORDER BY rank LIMIT ?`);
+    this.#insProc = db.prepare(
+      `INSERT INTO procedure(id, name, trigger, abstract_method, verbatim_steps, evidence,
+                             provenance, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    this.#getProcByName = db.prepare(`SELECT * FROM procedure WHERE name = ?`);
+    this.#updProc = db.prepare(
+      `UPDATE procedure SET trigger = ?, abstract_method = ?, verbatim_steps = ?, evidence = ?,
+                            version = version + 1, updated_at = ? WHERE name = ?`,
+    );
+    this.#touchProc = db.prepare(
+      `UPDATE procedure SET uses = uses + 1, score = score + 1, last_used_at = ? WHERE name = ?`,
+    );
+    this.#listProc = db.prepare(`SELECT * FROM procedure ORDER BY updated_at DESC`);
   }
 
   async #indexChunk(
@@ -308,11 +362,135 @@ export class SqliteMemoryStore implements MemoryStore {
     return out;
   }
 
+  // ─── Procedural tier (§7a) ───
+
+  async searchProcedures(query: string, k: number): Promise<ProcedureHit[]> {
+    if (k <= 0) return [];
+    // Over-fetch from both rankers, fuse, keep only procedure chunks (whose indexed text is the
+    // trigger), then hydrate the full procedure and return its abstraction inline.
+    const over = k * 4;
+    const [qvec] = await this.#embedder.embed([query]);
+    const vecRows = qvec ? (this.#knn.all(toBlob(qvec), over) as RankRow[]) : [];
+    const match = ftsQuery(query);
+    const ftsRows = match ? (this.#fts.all(match, over) as RankRow[]) : [];
+
+    const fused = new Map<number, number>();
+    const fuse = (rows: RankRow[]) => {
+      rows.forEach((row, i) => fused.set(row.rowid, (fused.get(row.rowid) ?? 0) + 1 / (RRF_K + i)));
+    };
+    fuse(vecRows);
+    fuse(ftsRows);
+
+    const ranked = [...fused.entries()].sort((a, b) => b[1] - a[1]);
+    const out: ProcedureHit[] = [];
+    const seen = new Set<string>();
+    for (const [rowid] of ranked) {
+      if (out.length >= k) break;
+      const c = this.#getChunk.get(rowid) as ChunkRow | undefined;
+      if (!c || c.kind !== "procedure" || seen.has(c.ref)) continue;
+      const p = this.#getProcByName.get(c.ref) as ProcedureRow | undefined;
+      if (!p) continue;
+      seen.add(c.ref);
+      out.push({
+        name: p.name,
+        trigger: p.trigger,
+        abstractMethod: p.abstract_method,
+        provenance: JSON.parse(p.provenance) as Provenance,
+      });
+    }
+    return out;
+  }
+
+  async getProcedure(name: string): Promise<Procedure | null> {
+    const before = this.#getProcByName.get(name) as ProcedureRow | undefined;
+    if (!before) return null;
+    // Fetching a method to follow it counts as a use — feeds ranking + soft-forgetting (§7a).
+    this.#touchProc.run(new Date().toISOString(), name);
+    const after = this.#getProcByName.get(name) as ProcedureRow;
+    return toProcedure(after);
+  }
+
+  async createProcedure(p: NewProcedure): Promise<ProcedureCreateResult> {
+    // Exact-name collision → treat as an update target, not a second row.
+    const byName = this.#getProcByName.get(p.name) as ProcedureRow | undefined;
+    if (byName) return { created: false, duplicateOf: p.name, similarity: 1 };
+
+    // Semantic dedup on the trigger (skill-bloat defense): a near-duplicate routes to update.
+    const near = await this.#nearestProcedure(p.trigger);
+    if (near && near.similarity >= DEDUP_COSINE) {
+      return { created: false, duplicateOf: near.name, similarity: near.similarity };
+    }
+
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.#insProc.run(
+      id, p.name, p.trigger, p.abstractMethod, p.verbatimSteps, p.evidence,
+      JSON.stringify(p.provenance), now, now,
+    );
+    // Index the TRIGGER (not the body) — search matches intent, per Voyager/Memp.
+    await this.#indexChunk("procedure", p.name, p.trigger, p.provenance, `procedure:${p.name}`);
+    return { created: true, name: p.name };
+  }
+
+  async updateProcedure(name: string, patch: ProcedureUpdate): Promise<boolean> {
+    const existing = this.#getProcByName.get(name) as ProcedureRow | undefined;
+    if (!existing) return false;
+    const trigger = patch.trigger ?? existing.trigger;
+    const abstractMethod = patch.abstractMethod ?? existing.abstract_method;
+    const verbatimSteps = patch.verbatimSteps ?? existing.verbatim_steps;
+    const evidence = patch.evidence ?? existing.evidence;
+    this.#updProc.run(trigger, abstractMethod, verbatimSteps, evidence, new Date().toISOString(), name);
+    // Re-index only if the trigger (the embedded field) changed.
+    if (patch.trigger !== undefined && patch.trigger !== existing.trigger) {
+      this.#deleteChunkByRef("procedure", name);
+      const prov = JSON.parse(existing.provenance) as Provenance;
+      await this.#indexChunk("procedure", name, trigger, prov, `procedure:${name}`);
+    }
+    return true;
+  }
+
+  async procedureList(): Promise<Procedure[]> {
+    return (this.#listProc.all() as ProcedureRow[]).map(toProcedure);
+  }
+
+  /** Nearest existing procedure to `trigger` by cosine, or null if the library is empty. */
+  async #nearestProcedure(trigger: string): Promise<{ name: string; similarity: number } | null> {
+    const [qvec] = await this.#embedder.embed([trigger]);
+    if (!qvec) return null;
+    const rows = this.#knnDist.all(toBlob(qvec), 16) as DistRow[];
+    for (const row of rows) {
+      const c = this.#getChunk.get(row.rowid) as ChunkRow | undefined;
+      if (!c || c.kind !== "procedure") continue;
+      // L2 distance on unit vectors → cosine similarity.
+      const cosine = 1 - (row.distance * row.distance) / 2;
+      return { name: c.ref, similarity: cosine };
+    }
+    return null;
+  }
+
   #toFragment(text: string, provenanceJson: string, source: string | null): Fragment {
     const frag: Fragment = { text, provenance: JSON.parse(provenanceJson) as Provenance };
     if (source !== null) frag.source = source;
     return frag;
   }
+}
+
+function toProcedure(r: ProcedureRow): Procedure {
+  return {
+    id: r.id,
+    name: r.name,
+    trigger: r.trigger,
+    abstractMethod: r.abstract_method,
+    verbatimSteps: r.verbatim_steps,
+    evidence: r.evidence,
+    uses: r.uses,
+    score: r.score,
+    lastUsedAt: r.last_used_at,
+    version: r.version,
+    provenance: JSON.parse(r.provenance) as Provenance,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
 }
 
 function toEpisode(r: EpisodeRow): Episode {
