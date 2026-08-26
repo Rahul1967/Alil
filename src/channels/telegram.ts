@@ -4,8 +4,10 @@
  * pulls updates over an outbound connection and resumes cleanly after downtime (Telegram queues
  * updates ~24h). Pure transport only: no brain/memory here, so it unit-tests with a fake fetch.
  *
- * The 2026 "AI bot" features (guest bots, bot-to-bot, streaming rich messages) don't change the
- * core receive/reply loop; we use plain getUpdates + sendMessage. Streaming edits can come later.
+ * The loop dispatches two update kinds: `message` (a turn — handled fire-and-forget so the poller
+ * keeps running and can fetch the approval button-press mid-turn) and `callback_query` (an inline
+ * button press — used for HITL approve/reject). Plain sendMessage + sendDocument cover replies and
+ * files; the 2026 rich-message features can layer on later.
  */
 export interface TelegramUser {
   id: number;
@@ -16,20 +18,33 @@ export interface TelegramUser {
 
 export interface TelegramChat {
   id: number;
-  type?: string; // "private" | "group" | ...
+  type?: string;
 }
 
 export interface TelegramMessage {
   message_id: number;
-  date: number; // unix seconds
+  date: number;
   text?: string;
   chat: TelegramChat;
   from?: TelegramUser;
 }
 
+export interface TelegramCallbackQuery {
+  id: string;
+  from: TelegramUser;
+  message?: TelegramMessage;
+  data?: string; // our callback_data, e.g. "a:7" | "r:7"
+}
+
 export interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
+  callback_query?: TelegramCallbackQuery;
+}
+
+/** An inline keyboard, e.g. Approve / Reject buttons. */
+export interface InlineKeyboard {
+  inline_keyboard: { text: string; callback_data: string }[][];
 }
 
 /** Telegram caps a message at 4096 chars — split long replies on line/word boundaries. */
@@ -38,7 +53,6 @@ export function splitMessage(text: string, max = 4096): string[] {
   const out: string[] = [];
   let rest = text;
   while (rest.length > max) {
-    // Prefer a newline, then a space, else a hard cut, all within the window.
     let cut = rest.lastIndexOf("\n", max);
     if (cut < max * 0.5) cut = rest.lastIndexOf(" ", max);
     if (cut < max * 0.5) cut = max;
@@ -53,8 +67,8 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 export interface TelegramClientOptions {
   token: string;
-  apiBase?: string; // override for tests
-  fetchImpl?: typeof fetch; // inject for tests
+  apiBase?: string;
+  fetchImpl?: typeof fetch;
 }
 
 interface ApiResponse<T> {
@@ -75,7 +89,7 @@ export class TelegramClient {
     this.#fetch = opts.fetchImpl ?? fetch;
   }
 
-  /** POST a Bot API method. Retries once on 429 honoring retry_after. */
+  /** POST a JSON Bot API method. Retries once on 429 honoring retry_after. */
   async call<T>(method: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
     const res = await this.#fetch(`${this.#base}/${method}`, {
       method: "POST",
@@ -94,54 +108,90 @@ export class TelegramClient {
     return json.result as T;
   }
 
-  /** Verify the token; returns the bot's own user. */
   getMe(): Promise<TelegramUser> {
     return this.call<TelegramUser>("getMe", {});
   }
 
-  /** Long-poll for updates. `timeout` seconds holds the connection open server-side. */
   getUpdates(offset: number, timeout: number, signal?: AbortSignal): Promise<TelegramUpdate[]> {
     return this.call<TelegramUpdate[]>(
       "getUpdates",
-      { offset, timeout, allowed_updates: ["message"] },
-      // The held request can run up to `timeout`s; give it headroom over that.
+      { offset, timeout, allowed_updates: ["message", "callback_query"] },
       signal,
     );
   }
 
-  /** Send text, split into ≤4096-char chunks. */
-  async sendMessage(chatId: number, text: string): Promise<void> {
-    for (const chunk of splitMessage(text)) {
-      await this.call("sendMessage", { chat_id: chatId, text: chunk });
+  /** Send text (split into ≤4096-char chunks). An inline keyboard attaches to the last chunk;
+   * returns that last sent message (its message_id, for later edits). */
+  async sendMessage(chatId: number, text: string, opts?: { replyMarkup?: InlineKeyboard }): Promise<TelegramMessage> {
+    const chunks = splitMessage(text);
+    let last!: TelegramMessage;
+    for (let i = 0; i < chunks.length; i++) {
+      const body: Record<string, unknown> = { chat_id: chatId, text: chunks[i] };
+      if (opts?.replyMarkup && i === chunks.length - 1) body["reply_markup"] = opts.replyMarkup;
+      last = await this.call<TelegramMessage>("sendMessage", body);
+    }
+    return last;
+  }
+
+  /** Replace a message's text (used to show an approval's outcome and clear its buttons). */
+  editMessageText(chatId: number, messageId: number, text: string): Promise<unknown> {
+    return this.call("editMessageText", { chat_id: chatId, message_id: messageId, text, reply_markup: { inline_keyboard: [] } });
+  }
+
+  /** Acknowledge a button press (stops its spinner; optional toast). */
+  async answerCallbackQuery(id: string, text?: string): Promise<void> {
+    try {
+      await this.call("answerCallbackQuery", { callback_query_id: id, ...(text ? { text } : {}) });
+    } catch {
+      /* non-critical */
     }
   }
 
-  /** Show a "typing…" indicator (lasts ~5s; re-send for longer turns). */
   async sendChatAction(chatId: number, action = "typing"): Promise<void> {
     try {
       await this.call("sendChatAction", { chat_id: chatId, action });
     } catch {
-      /* cosmetic — never fail a turn because the typing hint didn't send */
+      /* cosmetic */
     }
+  }
+
+  /** Upload and send a local file as a document (multipart, not JSON). */
+  async sendDocument(chatId: number, filePath: string, caption?: string): Promise<void> {
+    const { readFile } = await import("node:fs/promises");
+    const { basename } = await import("node:path");
+    const bytes = await readFile(filePath);
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    if (caption) form.append("caption", caption);
+    form.append("document", new Blob([bytes]), basename(filePath));
+    const res = await this.#fetch(`${this.#base}/sendDocument`, {
+      method: "POST",
+      body: form,
+      signal: AbortSignal.timeout(120_000),
+    });
+    const json = (await res.json()) as ApiResponse<unknown>;
+    if (!json.ok) throw new Error(`telegram sendDocument failed: ${json.description ?? res.status}`);
   }
 }
 
 export interface TelegramLoopDeps {
   client: TelegramClient;
-  /** Only messages from this Telegram user id are handled; everyone else is ignored. */
   authorizedUserId: number;
-  /** Handle one authorized text message (run the turn, reply). */
-  onMessage: (msg: TelegramMessage) => Promise<void>;
+  /** Handle one authorized text message. Called fire-and-forget so the poller keeps running
+   * (a turn may await an approval button press, which arrives as a later update). */
+  onMessage: (msg: TelegramMessage) => Promise<void> | void;
+  /** Handle an authorized inline-button press (HITL approve/reject). Awaited — it's fast. */
+  onCallback?: (cbq: TelegramCallbackQuery) => Promise<void> | void;
   loadOffset: () => number;
   saveOffset: (offset: number) => void;
-  signal?: AbortSignal; // abort to stop the loop
+  signal?: AbortSignal;
   pollTimeout?: number; // seconds, default 50
 }
 
 /**
- * The long-poll loop. Advances the offset (which ACKs prior updates to Telegram) and persists it
- * only AFTER the message is durably handled, so a crash re-delivers rather than drops. Backs off
- * exponentially on network errors. Single-user lock: non-authorized senders are silently skipped.
+ * The long-poll loop. Advances the offset (ACKing prior updates) and persists it as each update
+ * is dispatched. Messages are dispatched fire-and-forget so an in-progress turn awaiting approval
+ * doesn't stall the poller. Single-user lock: only the authorized user's updates are handled.
  */
 export async function runTelegramLoop(deps: TelegramLoopDeps): Promise<void> {
   const timeout = deps.pollTimeout ?? 50;
@@ -160,18 +210,15 @@ export async function runTelegramLoop(deps: TelegramLoopDeps): Promise<void> {
       continue;
     }
     for (const u of updates) {
-      offset = u.update_id + 1; // advance before the next getUpdates ACKs it
-      const m = u.message;
-      if (!m || !m.text || m.from?.id !== deps.authorizedUserId) {
-        deps.saveOffset(offset); // ignored (or non-text) — still advance past it
-        continue;
+      offset = u.update_id + 1;
+      const cbq = u.callback_query;
+      const msg = u.message;
+      if (cbq && cbq.from.id === deps.authorizedUserId) {
+        await deps.onCallback?.(cbq);
+      } else if (msg && msg.text && msg.from?.id === deps.authorizedUserId) {
+        void Promise.resolve(deps.onMessage(msg)).catch(() => {});
       }
-      try {
-        await deps.onMessage(m);
-      } finally {
-        deps.saveOffset(offset); // persist only after handling
-      }
-      if (deps.signal?.aborted) break;
+      deps.saveOffset(offset);
     }
   }
 }

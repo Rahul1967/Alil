@@ -83,6 +83,28 @@ test("runTelegramLoop ignores non-authorized senders, handles the owner, advance
   assert.equal(savedOffset, 3); // last update_id (2) + 1
 });
 
+test("runTelegramLoop routes an authorized button press to onCallback", async () => {
+  const owner = 100;
+  const updates: TelegramUpdate[] = [
+    { update_id: 5, callback_query: { id: "cb1", from: { id: owner }, data: "a:3" } },
+    { update_id: 6, callback_query: { id: "cb2", from: { id: 999 }, data: "r:3" } }, // stranger — ignored
+  ];
+  const f = fakeFetch([{ ok: true, result: updates }]);
+  const client = new TelegramClient({ token: "T", fetchImpl: f.fn });
+  const callbacks: string[] = [];
+  const controller = new AbortController();
+  await runTelegramLoop({
+    client,
+    authorizedUserId: owner,
+    onMessage: async () => {},
+    onCallback: async (cbq) => { callbacks.push(cbq.data ?? ""); controller.abort(); },
+    loadOffset: () => 0,
+    saveOffset: () => {},
+    signal: controller.signal,
+  });
+  assert.deepEqual(callbacks, ["a:3"]); // only the owner's press handled
+});
+
 test("runTelegramLoop stops cleanly when the signal is already aborted", async () => {
   const f = fakeFetch([{ ok: true, result: [] }]);
   const client = new TelegramClient({ token: "T", fetchImpl: f.fn });

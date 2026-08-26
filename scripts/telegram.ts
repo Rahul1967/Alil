@@ -6,9 +6,10 @@
  *
  * Run:  TELEGRAM_BOT_TOKEN=… TELEGRAM_ALLOWED_USER_ID=… npm run telegram
  *
- * Like the browser channel, this has no interactive approval affordance, so write/high-risk
- * tools fail closed (denied with a note). Chat, recall, and reminder delivery work; scheduling
- * or writing memory from Telegram is refused until a Telegram approval flow is added.
+ * HITL is interactive over Telegram: an action needing approval is sent with Approve/Reject
+ * buttons and the turn waits for the tap (or times out and rejects). The assistant can also
+ * hand you files via the send_file tool. So chat, recall, scheduling, memory writes, and file
+ * delivery all work from the phone — writes just wait for your tap first.
  */
 import { Brain } from "../src/runtime/loop.ts";
 import type { BrainPorts } from "../src/runtime/loop.ts";
@@ -26,7 +27,7 @@ import type { Intention, IncomingEvent } from "../src/memory/types.ts";
 import type { KnowledgeSource } from "../src/prompts/types.ts";
 import { TurnQueue, AuditLedger, Scheduler } from "../src/gateway/index.ts";
 import { TelegramClient, runTelegramLoop } from "../src/channels/telegram.ts";
-import type { TelegramMessage } from "../src/channels/telegram.ts";
+import type { TelegramMessage, TelegramCallbackQuery } from "../src/channels/telegram.ts";
 
 const CHANNEL = "telegram";
 const modelId = process.env.BEDROCK_MODEL_ID ?? "us.anthropic.claude-sonnet-4-5-20250929-v1:0";
@@ -73,19 +74,81 @@ try {
   console.warn(`memory disabled: ${(e as Error).message}`);
 }
 
-// No interactive approval on Telegram yet → fail closed on anything needing consent.
+// HITL over Telegram: an action needing approval is sent to the owner with Approve/Reject
+// buttons; the turn awaits the button press (or times out and rejects). Pending decisions are
+// keyed by a short token embedded in the buttons' callback_data.
+const pendingApprovals = new Map<string, (d: ApprovalDecision) => void>();
+let approvalSeq = 0;
+const APPROVAL_TIMEOUT_MS = 5 * 60_000;
+
 const approvals: ApprovalPort = {
-  async request(_req: ApprovalRequest): Promise<ApprovalDecision> {
-    return { approved: false, reason: "Telegram channel can't ask for approval yet — do write actions from the terminal." };
+  async request(req: ApprovalRequest): Promise<ApprovalDecision> {
+    const a = req.action;
+    const token = String(approvalSeq++);
+    const text =
+      `⚠️ Approval needed\n\n${a.tool}  (${a.effect}/${a.risk})\n` +
+      `args: ${JSON.stringify(a.args).slice(0, 300)}\n\n${req.reason}`;
+    const replyMarkup = {
+      inline_keyboard: [[
+        { text: "✅ Approve", callback_data: `a:${token}` },
+        { text: "❌ Reject", callback_data: `r:${token}` },
+      ]],
+    };
+    let prompt: TelegramMessage;
+    try {
+      prompt = await client.sendMessage(allowedUserId, text, { replyMarkup });
+    } catch {
+      return { approved: false, reason: "couldn't reach Telegram to ask for approval" };
+    }
+    return await new Promise<ApprovalDecision>((resolve) => {
+      const timer = setTimeout(() => {
+        if (pendingApprovals.delete(token)) {
+          void client.editMessageText(allowedUserId, prompt.message_id, `${text}\n\n⏳ timed out — rejected`);
+          resolve({ approved: false, reason: "approval timed out" });
+        }
+      }, APPROVAL_TIMEOUT_MS);
+      pendingApprovals.set(token, (decision) => {
+        clearTimeout(timer);
+        void client.editMessageText(allowedUserId, prompt.message_id, `${text}\n\n${decision.approved ? "✅ approved" : "❌ rejected"}`);
+        resolve(decision);
+      });
+    });
   },
 };
+
+// Resolve a pending approval from an inline-button press.
+async function onCallback(cbq: TelegramCallbackQuery): Promise<void> {
+  const [kind, token] = (cbq.data ?? "").split(":");
+  const resolver = token ? pendingApprovals.get(token) : undefined;
+  if (resolver && token) {
+    pendingApprovals.delete(token);
+    resolver({ approved: kind === "a", ...(kind === "a" ? {} : { reason: "rejected via Telegram" }) });
+  }
+  await client.answerCallbackQuery(cbq.id, kind === "a" ? "Approved ✅" : "Rejected ❌");
+}
 
 const sandboxRoot = process.env.ALIL_SANDBOX_ROOT ?? "workspace";
 const boundary = new PolicyBoundary({
   rules: new YamlRuleSource("config/policy.yaml"),
   tools: new ToolRegistry(),
   hooks: [credentialBlock],
-  executor: new Executor({ sandbox: new Sandbox(sandboxRoot), reads: new ReadTracker(), memory: memCtx, prospective: prospCtx }),
+  executor: new Executor({
+    sandbox: new Sandbox(sandboxRoot),
+    reads: new ReadTracker(),
+    memory: memCtx,
+    prospective: prospCtx,
+    // send_file delivers a workspace file to the owner over Telegram.
+    channel: {
+      sendFile: async (path: string, caption?: string) => {
+        try {
+          await client.sendDocument(allowedUserId, path, caption);
+          return { ok: true };
+        } catch (e) {
+          return { ok: false, detail: (e as Error).message };
+        }
+      },
+    },
+  }),
   approvals,
   grants: new GrantStore(),
 });
@@ -193,7 +256,7 @@ const me = await client.getMe();
 console.log(`Alil on Telegram as @${me.username} — answering user ${allowedUserId} only. Ctrl-C to stop.`);
 scheduler?.start();
 
-await runTelegramLoop({ client, authorizedUserId: allowedUserId, onMessage, loadOffset, saveOffset, signal: controller.signal });
+await runTelegramLoop({ client, authorizedUserId: allowedUserId, onMessage, onCallback, loadOffset, saveOffset, signal: controller.signal });
 
 scheduler?.stop();
 memory?.close();

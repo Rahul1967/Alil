@@ -22,6 +22,11 @@ export interface ToolContext {
   memory?: { store?: MemoryStore };
   /** Prospective memory (scheduled/triggered intentions) for the remind.* tools. */
   prospective?: { store?: ProspectiveStore };
+  /**
+   * The active outbound channel's capabilities (e.g. Telegram). `sendFile` delivers a file to
+   * the user; undefined on channels without file support (the send_file tool then reports so).
+   */
+  channel?: { sendFile?: (path: string, caption?: string) => Promise<{ ok: boolean; detail?: string }> };
 }
 
 export type ValidateResult<T> =
