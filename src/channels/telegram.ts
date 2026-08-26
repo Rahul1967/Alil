@@ -200,8 +200,12 @@ export async function runTelegramLoop(deps: TelegramLoopDeps): Promise<void> {
 
   while (!deps.signal?.aborted) {
     let updates: TelegramUpdate[];
+    // Bound each long-poll a bit past the server timeout so a wedged connection can't stop the
+    // poller forever (it would otherwise never receive the next callback/message).
+    const deadline = AbortSignal.timeout((timeout + 15) * 1000);
+    const pollSignal = deps.signal ? AbortSignal.any([deps.signal, deadline]) : deadline;
     try {
-      updates = await deps.client.getUpdates(offset, timeout, deps.signal);
+      updates = await deps.client.getUpdates(offset, timeout, pollSignal);
       backoff = 1000;
     } catch {
       if (deps.signal?.aborted) break;
@@ -213,10 +217,19 @@ export async function runTelegramLoop(deps: TelegramLoopDeps): Promise<void> {
       offset = u.update_id + 1;
       const cbq = u.callback_query;
       const msg = u.message;
-      if (cbq && cbq.from.id === deps.authorizedUserId) {
-        await deps.onCallback?.(cbq);
-      } else if (msg && msg.text && msg.from?.id === deps.authorizedUserId) {
-        void Promise.resolve(deps.onMessage(msg)).catch(() => {});
+      if (cbq) {
+        if (cbq.from.id === deps.authorizedUserId) {
+          await deps.onCallback?.(cbq);
+        } else {
+          console.error(`[tg] ignored callback from unauthorized user ${cbq.from.id}`);
+        }
+      } else if (msg && msg.text) {
+        if (msg.from?.id === deps.authorizedUserId) {
+          // Fire-and-forget so the poller keeps running (a turn may await an approval tap).
+          void Promise.resolve(deps.onMessage(msg)).catch((e) => console.error("[tg] turn error:", e));
+        } else {
+          console.error(`[tg] ignored message from unauthorized user ${msg.from?.id}`);
+        }
       }
       deps.saveOffset(offset);
     }

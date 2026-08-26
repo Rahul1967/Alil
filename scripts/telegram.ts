@@ -100,6 +100,7 @@ const approvals: ApprovalPort = {
     } catch {
       return { approved: false, reason: "couldn't reach Telegram to ask for approval" };
     }
+    console.error(`[tg] approval pending token=${token} for ${a.tool} (${a.effect}/${a.risk})`);
     return await new Promise<ApprovalDecision>((resolve) => {
       const timer = setTimeout(() => {
         if (pendingApprovals.delete(token)) {
@@ -120,6 +121,7 @@ const approvals: ApprovalPort = {
 async function onCallback(cbq: TelegramCallbackQuery): Promise<void> {
   const [kind, token] = (cbq.data ?? "").split(":");
   const resolver = token ? pendingApprovals.get(token) : undefined;
+  console.error(`[tg] callback data=${cbq.data} resolver=${resolver ? "found" : "MISSING"} pending=[${[...pendingApprovals.keys()].join(",")}]`);
   if (resolver && token) {
     pendingApprovals.delete(token);
     resolver({ approved: kind === "a", ...(kind === "a" ? {} : { reason: "rejected via Telegram" }) });
