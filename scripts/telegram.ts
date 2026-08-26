@@ -254,8 +254,26 @@ process.on("SIGINT", () => {
   controller.abort();
 });
 
-const me = await client.getMe();
-console.log(`Alil on Telegram as @${me.username} — answering user ${allowedUserId} only. Ctrl-C to stop.`);
+// Verify the token, but don't crash on a slow/flaky network — Telegram can be slow to reach
+// and the poll loop retries with backoff anyway, so start it regardless and let it self-heal.
+async function verifyToken(): Promise<void> {
+  for (let attempt = 1; attempt <= 5 && !controller.signal.aborted; attempt++) {
+    try {
+      const me = await client.getMe();
+      console.log(`Alil on Telegram as @${me.username} — answering user ${allowedUserId} only. Ctrl-C to stop.`);
+      return;
+    } catch (e) {
+      console.error(`[tg] getMe attempt ${attempt}/5 failed: ${(e as Error).message}`);
+      await new Promise((r) => setTimeout(r, Math.min(2000 * 2 ** (attempt - 1), 15_000)));
+    }
+  }
+  console.error(
+    "[tg] couldn't confirm the token yet — starting the poll loop anyway; it keeps retrying.\n" +
+      "     If this persists, api.telegram.org is slow/blocked on your network (a VPN/proxy may be needed).",
+  );
+}
+
+await verifyToken();
 scheduler?.start();
 
 await runTelegramLoop({ client, authorizedUserId: allowedUserId, onMessage, onCallback, loadOffset, saveOffset, signal: controller.signal });
