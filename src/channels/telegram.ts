@@ -65,6 +65,14 @@ export function splitMessage(text: string, max = 4096): string[] {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/** A transient network failure worth retrying (not an API error and not our own abort). */
+function isTransientNetworkError(e: unknown): boolean {
+  if (e && typeof e === "object" && "name" in e && (e as { name: string }).name === "AbortError") return false;
+  if (e instanceof TypeError) return true; // undici "fetch failed"
+  const code = (e as { cause?: { code?: string }; code?: string })?.cause?.code ?? (e as { code?: string })?.code;
+  return ["ETIMEDOUT", "ENETUNREACH", "ECONNRESET", "ECONNREFUSED", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT"].includes(code ?? "");
+}
+
 export interface TelegramClientOptions {
   token: string;
   apiBase?: string;
@@ -89,19 +97,31 @@ export class TelegramClient {
     this.#fetch = opts.fetchImpl ?? fetch;
   }
 
-  /** POST a JSON Bot API method. Retries once on 429 honoring retry_after. */
-  async call<T>(method: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
-    const res = await this.#fetch(`${this.#base}/${method}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-      signal: signal ?? AbortSignal.timeout(60_000),
-    });
+  /** POST a JSON Bot API method. Retries on 429 (retry_after) and on transient network errors
+   * (the connection to api.telegram.org can be slow/flaky) with exponential backoff. */
+  async call<T>(method: string, body: Record<string, unknown>, signal?: AbortSignal, attempt = 1): Promise<T> {
+    const MAX_ATTEMPTS = 4;
+    let res: Response;
+    try {
+      res = await this.#fetch(`${this.#base}/${method}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+        signal: signal ?? AbortSignal.timeout(60_000),
+      });
+    } catch (e) {
+      // Network failure (ETIMEDOUT / fetch failed): retry unless aborted or out of attempts.
+      if (isTransientNetworkError(e) && attempt < MAX_ATTEMPTS && !signal?.aborted) {
+        await sleep(Math.min(1000 * 2 ** (attempt - 1), 8000));
+        return this.call<T>(method, body, signal, attempt + 1);
+      }
+      throw e;
+    }
     const json = (await res.json()) as ApiResponse<T>;
     if (!json.ok) {
       if (res.status === 429 && json.parameters?.retry_after) {
         await sleep(json.parameters.retry_after * 1000);
-        return this.call<T>(method, body, signal);
+        return this.call<T>(method, body, signal, attempt);
       }
       throw new Error(`telegram ${method} failed: ${json.description ?? res.status}`);
     }

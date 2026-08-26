@@ -11,6 +11,7 @@
  * hand you files via the send_file tool. So chat, recall, scheduling, memory writes, and file
  * delivery all work from the phone — writes just wait for your tap first.
  */
+import { randomUUID } from "node:crypto";
 import { Brain } from "../src/runtime/loop.ts";
 import type { BrainPorts } from "../src/runtime/loop.ts";
 import { DEFAULT_GUARDS } from "../src/runtime/types.ts";
@@ -79,12 +80,14 @@ try {
 // keyed by a short token embedded in the buttons' callback_data.
 const pendingApprovals = new Map<string, (d: ApprovalDecision) => void>();
 let approvalSeq = 0;
+// A per-process prefix so buttons left over from an earlier run can't match a live approval.
+const PROC = randomUUID().slice(0, 6);
 const APPROVAL_TIMEOUT_MS = 5 * 60_000;
 
 const approvals: ApprovalPort = {
   async request(req: ApprovalRequest): Promise<ApprovalDecision> {
     const a = req.action;
-    const token = String(approvalSeq++);
+    const token = `${PROC}${approvalSeq++}`;
     const text =
       `⚠️ Approval needed\n\n${a.tool}  (${a.effect}/${a.risk})\n` +
       `args: ${JSON.stringify(a.args).slice(0, 300)}\n\n${req.reason}`;
@@ -125,8 +128,11 @@ async function onCallback(cbq: TelegramCallbackQuery): Promise<void> {
   if (resolver && token) {
     pendingApprovals.delete(token);
     resolver({ approved: kind === "a", ...(kind === "a" ? {} : { reason: "rejected via Telegram" }) });
+    await client.answerCallbackQuery(cbq.id, kind === "a" ? "Approved ✅" : "Rejected ❌");
+  } else {
+    // A button from an earlier run/session, or one already handled — nothing to resolve.
+    await client.answerCallbackQuery(cbq.id, "This approval expired — send the request again.");
   }
-  await client.answerCallbackQuery(cbq.id, kind === "a" ? "Approved ✅" : "Rejected ❌");
 }
 
 const sandboxRoot = process.env.ALIL_SANDBOX_ROOT ?? "workspace";
