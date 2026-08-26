@@ -31,14 +31,15 @@ import type { TelegramMessage } from "../src/channels/telegram.ts";
 const CHANNEL = "telegram";
 const modelId = process.env.BEDROCK_MODEL_ID ?? "us.anthropic.claude-sonnet-4-5-20250929-v1:0";
 
-const token = process.env.TELEGRAM_BOT_TOKEN;
-const allowedUserId = Number(process.env.TELEGRAM_ALLOWED_USER_ID);
+// Accept token + user id from env vars OR positional args (env wins; args are the fallback).
+const token = process.env.TELEGRAM_BOT_TOKEN ?? process.argv[2];
+const allowedUserId = Number(process.env.TELEGRAM_ALLOWED_USER_ID ?? process.argv[3]);
 if (!token || !Number.isInteger(allowedUserId)) {
   console.error(
-    "Telegram channel needs two env vars:\n" +
-      "  TELEGRAM_BOT_TOKEN        — from @BotFather\n" +
-      "  TELEGRAM_ALLOWED_USER_ID  — your numeric Telegram user id (message @userinfobot to find it)\n" +
-      "Only that user is answered; everyone else is ignored.",
+    "Telegram channel needs a bot token and your numeric user id. Provide either:\n" +
+      "  env:  TELEGRAM_BOT_TOKEN=… TELEGRAM_ALLOWED_USER_ID=… npm run telegram\n" +
+      "  args: npm run telegram -- <BOT_TOKEN> <USER_ID>\n" +
+      "Token from @BotFather; user id from @userinfobot. Only that user is answered.",
   );
   process.exit(1);
 }
