@@ -9,6 +9,7 @@
     "test": "node --experimental-strip-types --test test/**/*.test.ts",
     "chat": "node --experimental-strip-types --env-file=.env scripts/chat.ts",
     "ui": "node --experimental-strip-types --env-file=.env ui/server.ts",
+    "telegram": "node --experimental-strip-types --env-file=.env scripts/telegram.ts",
     "db:setup": "node --experimental-strip-types scripts/db-setup.ts",
     "db:reset": "node --experimental-strip-types scripts/db-setup.ts --reset",
     "memory:demo": "node --experimental-strip-types scripts/memory-demo.ts"

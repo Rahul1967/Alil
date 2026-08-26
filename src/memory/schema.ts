@@ -86,6 +86,13 @@ CREATE TABLE IF NOT EXISTS intention (
 CREATE UNIQUE INDEX IF NOT EXISTS intention_dedup ON intention(dedup_key) WHERE dedup_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS intention_due ON intention(status, fire_at);
 
+-- Small key/value store for channel adapter state (e.g. the Telegram getUpdates offset),
+-- so a restart resumes exactly where it left off.
+CREATE TABLE IF NOT EXISTS kv (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
 -- Single live cursor (singleton row id = 1).
 CREATE TABLE IF NOT EXISTS agent_state (
   id                INTEGER PRIMARY KEY CHECK (id = 1),
