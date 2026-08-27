@@ -25,6 +25,14 @@ export interface PlanRunnerDeps {
   observer?: PlanObserver;
   /** Task id for the world-model entry. Default derived from a counter. */
   taskId?: string;
+  /**
+   * Plan-level HITL. Called with the decomposed DAG (and again after each replan, since the plan
+   * changed) before any node runs. Return false to abandon without executing. Absent ⇒ no plan
+   * gate (individual node actions are still gated by the policy boundary).
+   */
+  approvePlan?: (nodes: PlanNode[]) => Promise<boolean>;
+  /** Plan mode: decompose (and gate) only, execute nothing. Returns status "planned". */
+  dryRun?: boolean;
 }
 
 /**
@@ -49,6 +57,19 @@ export class PlanRunner {
 
     let nodes = capNodes(await this.#d.planner.decompose(goal), this.#limits.maxNodes);
     this.#d.observer?.onPlan?.(nodes);
+
+    // Plan-level HITL: approve the whole DAG once before anything runs.
+    if (this.#d.approvePlan && !(await this.#d.approvePlan(nodes))) {
+      return this.#finish(taskId, goal, nodes, 0, "abandoned", "plan declined by operator");
+    }
+    // Plan mode: decomposed + approved, execute nothing.
+    if (this.#d.dryRun) {
+      this.#d.world?.upsertTask({ id: taskId, goal, status: "planning", note: "plan only (dry run)", provenance: { origin: "model" } });
+      const planned: PlanResult = { goal, status: "planned", nodes, replans: 0 };
+      this.#d.observer?.onFinish?.(planned);
+      return planned;
+    }
+
     this.#d.world?.upsertTask({ id: taskId, goal, status: "running", provenance: { origin: "model" } });
 
     let replans = 0;
@@ -107,11 +128,15 @@ export class PlanRunner {
     this.#d.observer?.onReplan?.(failure, attempt);
     const done = nodes.filter((n) => n.status === "done");
     const remaining = nodes.filter((n) => n.status !== "done");
-    let revised = capNodes(await this.#d.planner.replan(goal, remaining, failure), this.#limits.maxNodes);
+    const revised = capNodes(await this.#d.planner.replan(goal, remaining, failure), this.#limits.maxNodes);
     // Revised steps may depend on already-done ids; keep those edges valid by retaining done nodes.
     const knownIds = new Set([...done, ...revised].map((n) => n.id));
     for (const n of revised) n.deps = n.deps.filter((d) => knownIds.has(d));
-    return { nodes: [...done, ...revised], replans: attempt };
+    const merged = [...done, ...revised];
+    // The revised plan is a new plan — re-gate it at plan altitude before executing.
+    if (this.#d.approvePlan && !(await this.#d.approvePlan(merged))) return null;
+    this.#d.observer?.onPlan?.(merged);
+    return { nodes: merged, replans: attempt };
   }
 
   #finish(taskId: string, goal: string, nodes: PlanNode[], replans: number, status: "done" | "abandoned", reason?: string): PlanResult {

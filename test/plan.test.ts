@@ -96,6 +96,46 @@ test("runner ABANDONS cleanly when the replan budget is exhausted", async () => 
   assert.match(result.reason ?? "", /fail/);
 });
 
+// ─── plan-level HITL + dry run (§2 wiring) ───
+test("declining the plan abandons before any node runs", async () => {
+  const planner = plannerWith('[{"id":"a","description":"A","deps":[]}]');
+  const { exec, order } = scriptedExecutor(new Set());
+  const result = await new PlanRunner({
+    planner, executor: exec,
+    approvePlan: async () => false, // operator says no
+  }).run("do it");
+  assert.equal(result.status, "abandoned");
+  assert.match(result.reason ?? "", /declined/);
+  assert.deepEqual(order, [], "no nodes executed");
+});
+
+test("dry run decomposes but executes nothing", async () => {
+  const planner = plannerWith('[{"id":"a","description":"A","deps":[]},{"id":"b","description":"B","deps":["a"]}]');
+  const { exec, order } = scriptedExecutor(new Set());
+  const world = new WorldStore({ now: () => 1 });
+  const result = await new PlanRunner({ planner, executor: exec, world, dryRun: true, approvePlan: async () => true }).run("preview");
+  assert.equal(result.status, "planned");
+  assert.equal(result.nodes.length, 2);
+  assert.deepEqual(order, [], "dry run executes nothing");
+  assert.equal(world.snapshot().tasks[0]!.status, "planning"); // never moved to running
+});
+
+test("a revised plan is re-gated at plan altitude", async () => {
+  const planner = plannerWith(
+    '[{"id":"a","description":"first","deps":[]}]',
+    '[{"id":"a2","description":"revised","deps":[]}]',
+  );
+  const { exec } = scriptedExecutor(new Set(["a"])); // a fails once → triggers replan
+  const gates: number[] = [];
+  const result = await new PlanRunner({
+    planner, executor: exec,
+    // approve the first plan (so it runs, node a fails, triggers a replan), decline the revised one
+    approvePlan: async (nodes) => { gates.push(nodes.length); return gates.length === 1; },
+  }).run("do it");
+  assert.equal(gates.length, 2, "gated on the initial plan and again on the replan");
+  assert.equal(result.status, "abandoned");
+});
+
 test("plan size is capped at maxNodes", async () => {
   const big = JSON.stringify(Array.from({ length: 30 }, (_, i) => ({ id: `s${i}`, description: `step ${i}`, deps: [] })));
   const planner = plannerWith(big);

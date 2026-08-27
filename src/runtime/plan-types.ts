@@ -35,7 +35,7 @@ export const DEFAULT_PLAN_LIMITS: PlanLimits = { maxReplans: 2, maxNodes: 20 };
 
 export interface PlanResult {
   goal: string;
-  status: "done" | "abandoned";
+  status: "done" | "abandoned" | "planned"; // "planned" = decomposed only (dry run / plan mode)
   nodes: PlanNode[];
   replans: number;
   reason?: string; // set when abandoned

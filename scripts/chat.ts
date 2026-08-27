@@ -13,6 +13,8 @@ import { stdin, stdout } from "node:process";
 import { Brain } from "../src/runtime/loop.ts";
 import type { BrainPorts } from "../src/runtime/loop.ts";
 import { DEFAULT_GUARDS } from "../src/runtime/types.ts";
+import { Planner, PlanRunner, BrainNodeExecutor } from "../src/runtime/index.ts";
+import type { PlanNode } from "../src/runtime/index.ts";
 import { ProviderRegistry, BedrockProvider } from "../src/providers/index.ts";
 import { PromptAssembler, FilePersonaSource } from "../src/prompts/index.ts";
 import { PolicyBoundary, YamlRuleSource, credentialBlock, GrantStore } from "../src/policy/index.ts";
@@ -161,6 +163,50 @@ const ports: BrainPorts = {
 
 const brain = new Brain({ modelId, guards: DEFAULT_GUARDS }, registry, ports);
 
+// Plan/execute/replan (§2): the planner decomposes a goal into a DAG; each node runs as a real
+// Brain turn (so every action still crosses the policy boundary). The whole plan is approved once
+// at plan altitude; execution replans on a step failure instead of halting.
+const planner = new Planner(modelId, registry);
+const nodeExecutor = new BrainNodeExecutor(brain, "repl");
+async function runPlan(goal: string, dryRun: boolean): Promise<void> {
+  const runner = new PlanRunner({
+    planner,
+    executor: nodeExecutor,
+    world,
+    dryRun,
+    async approvePlan(nodes: PlanNode[]): Promise<boolean> {
+      console.log(`\n  plan for: ${goal}`);
+      for (const n of nodes) {
+        console.log(`    ${n.id}. ${n.description}${n.deps.length ? ` (after ${n.deps.join(", ")})` : ""}`);
+      }
+      if (dryRun) return true; // plan mode: nothing will execute
+      let ans: string;
+      try {
+        ans = (await rl.question("  approve this plan? [y] run  [n] cancel › ")).trim().toLowerCase();
+      } catch {
+        return false;
+      }
+      return ans === "y";
+    },
+    observer: {
+      onNodeStart: (n) => console.log(`  ▶ ${n.id}: ${n.description}`),
+      onNodeDone: (n, ok) => console.log(`    ${ok ? "✓" : "✗"} ${n.summary ?? ""}`),
+      onReplan: (f, attempt) => console.log(`  ↻ replanning (attempt ${attempt}) after: ${f.summary}`),
+    },
+  });
+  try {
+    current = new AbortController();
+    const result = await runner.run(goal);
+    audit.append("plan", { goal, status: result.status, nodes: result.nodes.length, replans: result.replans });
+    if (result.status === "planned") console.log(`  (plan only — ${result.nodes.length} steps, not executed)\n`);
+    else console.log(`  plan ${result.status}${result.reason ? `: ${result.reason}` : ""} (${result.replans} replan${result.replans === 1 ? "" : "s"})\n`);
+  } catch (e) {
+    console.log(`  [plan error] ${(e as Error).message}\n`);
+  } finally {
+    current = null;
+  }
+}
+
 let closed = false;
 rl.on("close", () => {
   closed = true;
@@ -256,6 +302,16 @@ for (;;) {
   }
   if (closed || text === "/exit" || text === "/quit") break;
   if (text.length === 0) continue;
+
+  // /plan <goal>  — decompose into a DAG, approve the whole plan once, then execute with
+  //                 replan-on-failure. /plan-dry <goal> shows the plan without executing.
+  const planMatch = text.match(/^\/plan(-dry)?\s+(.+)$/s);
+  if (planMatch) {
+    const dryRun = planMatch[1] === "-dry";
+    const goal = planMatch[2]!.trim();
+    await runExclusive(() => runPlan(goal, dryRun));
+    continue;
+  }
 
   // Roll the episode cursor (closes + distills any idle episode), then pass PRIOR turns as
   // history (from the persistent timeline). The current message is recorded after the turn.
