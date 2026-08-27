@@ -10,8 +10,12 @@
 > delegation + parallel plan execution)** — **all Phase-2 milestones shipped and tested (233 tests
 > passing, clean typecheck).**
 >
-> Follow-ups (optional polish, not milestones): ambient + subagent parity in the browser/telegram
-> entrypoints; wire the SubagentNodeExecutor into `/plan` for opt-in parallel plans.
+> ✅ **Channel parity**: ambient ingestion + subagent-backed parallel planning are now wired into all
+> three entrypoints (REPL, browser `POST /api/event` + `/api/plan`, telegram `/event` + `/plan`) via
+> shared `PlanService` / `createAmbientBus` helpers (237 tests). Telegram also gained the world-model.
+>
+> Remaining polish (not milestones): situational recall in telegram; per-node subagent tool-scoping
+> by hint; a browser UI surface for the plan/event endpoints.
 
 Phase 1 built the **trust layer** (policy boundary, HITL, memory tiers, audit) — the part most
 assistant clones fake. Phase 2 grows the two missing *organs* that separate a reactive,

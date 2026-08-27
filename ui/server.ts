@@ -30,6 +30,9 @@ import type { MemorySystem } from "../src/memory/index.ts";
 import { WorldStore } from "../src/world/index.ts";
 import type { KnowledgeSource } from "../src/prompts/types.ts";
 import { TurnQueue, AuditLedger } from "../src/gateway/index.ts";
+import type { WakeRequest } from "../src/gateway/index.ts";
+import { PlanService, createAmbientBus, toIncomingEvent } from "../src/app/index.ts";
+import type { PlanNode } from "../src/runtime/index.ts";
 
 const PORT = Number(process.env.PORT ?? 8787);
 const PUBLIC = join(dirname(fileURLToPath(import.meta.url)), "public");
@@ -154,6 +157,27 @@ const ports: BrainPorts = {
 
 const brain = new Brain({ modelId, guards: DEFAULT_GUARDS }, registry, ports);
 const queue = new TurnQueue();
+
+// Shared plan (subagent-backed, parallel) + ambient services, same as the REPL.
+const catalog = new RegistryToolCatalog(DEFAULT_TOOLS);
+const planService = new PlanService({ registry, modelId, catalog, boundary, world, maxParallel: 2 });
+
+// Ambient: an unprompted turn runs through the same queue + boundary, starts tainted, and is
+// recorded so the page shows it in history. Inject events at POST /api/event.
+async function onWake(w: WakeRequest): Promise<void> {
+  await queue.submit(async (signal) => {
+    const at = new Date().toISOString();
+    const episodeId = episodes ? await episodes.beginTurn(at) : "ep_browser";
+    activeTrace = [];
+    const turn = await brain.run({ sessionId: "browser", message: { text: w.instruction, provenance: w.event.provenance }, history: loadHistory() }, { signal });
+    if (turn.stopReason === "complete" && memory) {
+      memory.timeline.append({ at, channel: CHANNEL, provenance: w.event.provenance, episodeId, role: "user", text: `(ambient · ${w.rule}) ${w.instruction}` });
+      if (turn.assistantText !== undefined) memory.timeline.append({ at, channel: CHANNEL, provenance: { origin: "model" }, episodeId, role: "assistant", text: turn.assistantText });
+    }
+    audit.append("turn", { channel: CHANNEL, episodeId, iterations: turn.iterations, source: "ambient", rule: w.rule });
+  });
+}
+const eventBus = createAmbientBus({ world, audit, onWake });
 
 function loadHistory(): TranscriptLine[] {
   if (!memory) return [];
@@ -343,6 +367,49 @@ const server = createServer(async (req, res) => {
       );
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
+    } catch (e) {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: (e as Error).message }));
+    }
+    return;
+  }
+
+  // Ambient: inject an external event (webhook/poller stand-in). Recorded in the world-model and
+  // may wake an unprompted, gated turn. body: {channel?, type?, from?, subject?, text?}
+  if (req.method === "POST" && url.pathname === "/api/event") {
+    try {
+      const raw = JSON.parse((await readBody(req)) || "{}") as Record<string, unknown>;
+      await eventBus.ingest(toIncomingEvent(raw));
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    } catch (e) {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: (e as Error).message }));
+    }
+    return;
+  }
+
+  // Plan a goal. body: {goal, execute?}. Without execute ⇒ dry run (returns the plan). With
+  // execute:true ⇒ run it (nodes run as scoped subagents, in parallel; actions still gated in-page).
+  if (req.method === "POST" && url.pathname === "/api/plan") {
+    try {
+      const body = JSON.parse((await readBody(req)) || "{}") as { goal?: string; execute?: boolean };
+      const goal = (body.goal ?? "").trim();
+      if (!goal) {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "empty goal" }));
+        return;
+      }
+      const result = await queue.submit(async () => {
+        activeTrace = [];
+        return planService.run(goal, {
+          dryRun: !body.execute,
+          approvePlan: async (_nodes: PlanNode[]) => true, // preview happens via dry-run; execute confirms
+        });
+      });
+      audit.append("plan", { channel: CHANNEL, goal, status: result.status, nodes: result.nodes.length, replans: result.replans });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ status: result.status, replans: result.replans, nodes: result.nodes.map((n) => ({ id: n.id, description: n.description, deps: n.deps, status: n.status, summary: n.summary })) }));
     } catch (e) {
       res.writeHead(500, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: (e as Error).message }));

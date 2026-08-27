@@ -27,6 +27,9 @@ import type { MemorySystem } from "../src/memory/index.ts";
 import type { Intention, IncomingEvent } from "../src/memory/types.ts";
 import type { KnowledgeSource } from "../src/prompts/types.ts";
 import { TurnQueue, AuditLedger, Scheduler } from "../src/gateway/index.ts";
+import type { WakeRequest } from "../src/gateway/index.ts";
+import { WorldStore } from "../src/world/index.ts";
+import { PlanService, createAmbientBus, toIncomingEvent } from "../src/app/index.ts";
 import { TelegramClient, runTelegramLoop } from "../src/channels/telegram.ts";
 import type { TelegramMessage, TelegramCallbackQuery } from "../src/channels/telegram.ts";
 
@@ -136,6 +139,7 @@ async function onCallback(cbq: TelegramCallbackQuery): Promise<void> {
 }
 
 const sandboxRoot = process.env.ALIL_SANDBOX_ROOT ?? "workspace";
+const world = new WorldStore({ path: "workspace/.alil/world.json", markdownPath: "workspace/WORLD.md" });
 const boundary = new PolicyBoundary({
   rules: new YamlRuleSource("config/policy.yaml"),
   tools: new ToolRegistry(),
@@ -145,6 +149,7 @@ const boundary = new PolicyBoundary({
     reads: new ReadTracker(),
     memory: memCtx,
     prospective: prospCtx,
+    world: { store: world },
     // send_file delivers a workspace file to the owner over Telegram.
     channel: {
       sendFile: async (path: string, caption?: string) => {
@@ -177,11 +182,17 @@ const ports: BrainPorts = {
   tools: new RegistryToolCatalog(DEFAULT_TOOLS),
   prompt: new PromptAssembler(new FilePersonaSource(), { env: { now: () => new Date() }, knowledge }),
   actions: boundary,
+  world,
   observer,
 };
 
 const brain = new Brain({ modelId, guards: DEFAULT_GUARDS }, registry, ports);
 const queue = new TurnQueue(); // one in-flight turn across inbound messages AND fired intentions
+
+// Shared plan (subagent-backed, parallel) service, same as the other channels.
+const planService = new PlanService({
+  registry, modelId, catalog: new RegistryToolCatalog(DEFAULT_TOOLS), boundary, world, maxParallel: 2,
+});
 
 function loadHistory(): TranscriptLine[] {
   if (!memory) return [];
@@ -239,8 +250,46 @@ const scheduler = memory
     })
   : null;
 
+// Ambient: an unprompted turn runs on the shared queue (gated, tainted) and the reply is pushed
+// to the owner. Inject events with "/event {json}"; a matching watch wakes a turn.
+async function onWake(w: WakeRequest): Promise<void> {
+  const reply = await runTurn(w.instruction, w.event.provenance, "ambient");
+  await client.sendMessage(allowedUserId, `🔔 (${w.rule})\n\n${reply}`);
+}
+const eventBus = createAmbientBus({ world, audit, onWake, ...(scheduler ? { scheduler } : {}) });
+
 async function onMessage(msg: TelegramMessage): Promise<void> {
   const provenance = { origin: "user_channel" as const, channel: CHANNEL, sender: String(msg.from?.id ?? "") };
+  const text = (msg.text ?? "").trim();
+
+  // /plan <goal> — decompose + execute (nodes run as scoped subagents; each action still prompts
+  // for Approve/Reject in Telegram). /plan-dry <goal> previews the plan without executing.
+  const planMatch = text.match(/^\/plan(-dry)?\s+([\s\S]+)$/);
+  if (planMatch) {
+    const dryRun = planMatch[1] === "-dry";
+    const goal = planMatch[2]!.trim();
+    try {
+      const result = await queue.submit(() => planService.run(goal, { dryRun, approvePlan: async () => true }));
+      audit.append("plan", { channel: CHANNEL, goal, status: result.status, nodes: result.nodes.length, replans: result.replans });
+      const lines = result.nodes.map((n) => `• ${n.id}: ${n.description}${n.summary ? ` — ${n.summary}` : ""}`).join("\n");
+      const head = dryRun ? `plan (${result.nodes.length} steps, not executed):` : `plan ${result.status} (${result.replans} replan${result.replans === 1 ? "" : "s"}):`;
+      await client.sendMessage(msg.chat.id, `${head}\n${lines}`);
+    } catch (e) {
+      await client.sendMessage(msg.chat.id, `plan error: ${(e as Error).message}`);
+    }
+    return;
+  }
+
+  // /event {json} — inject an ambient event (owner-only, already the sole allowed user).
+  if (text.startsWith("/event ")) {
+    try {
+      await eventBus.ingest(toIncomingEvent(JSON.parse(text.slice(7)) as Record<string, unknown>));
+      await client.sendMessage(msg.chat.id, "· event ingested");
+    } catch (e) {
+      await client.sendMessage(msg.chat.id, `event error: ${(e as Error).message}`);
+    }
+    return;
+  }
   // An inbound message is an event: fire any matching event-intentions (don't await — it queues
   // its own turn behind this one; awaiting inside a queued turn would deadlock the serializer).
   if (scheduler) {
