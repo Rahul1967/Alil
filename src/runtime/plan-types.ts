@@ -29,9 +29,10 @@ export interface ObservedFailure {
 export interface PlanLimits {
   maxReplans: number; // consecutive replans allowed before abandoning (distinct from the turn iteration cap)
   maxNodes: number; // cap on plan size (a decomposition larger than this is truncated + logged)
+  maxParallel: number; // max independent ready nodes executed at once (1 = sequential)
 }
 
-export const DEFAULT_PLAN_LIMITS: PlanLimits = { maxReplans: 2, maxNodes: 20 };
+export const DEFAULT_PLAN_LIMITS: PlanLimits = { maxReplans: 2, maxNodes: 20, maxParallel: 1 };
 
 export interface PlanResult {
   goal: string;

@@ -91,21 +91,10 @@ export class PlanRunner {
         continue;
       }
 
-      // Execute the ready set (sequentially in M3; parallel dispatch is §4/subagents).
-      let failed: ObservedFailure | null = null;
-      for (const node of ready) {
-        node.status = "running";
-        this.#d.observer?.onNodeStart?.(node);
-        const outcome = await this.#d.executor.execute(node, goal);
-        node.status = outcome.ok ? "done" : "failed";
-        node.summary = outcome.summary;
-        this.#d.observer?.onNodeDone?.(node, outcome.ok);
-        this.#d.world?.applyEvent(outcome.ok ? "step.done" : "step.failed", `${goal}: ${node.description} — ${outcome.summary}`, { origin: "model" });
-        if (!outcome.ok) {
-          failed = { nodeId: node.id, description: node.description, summary: outcome.summary };
-          break; // stop the round; replan before doing more
-        }
-      }
+      // Execute the ready set — concurrently up to maxParallel (independent nodes; §4 subagents),
+      // or sequentially when maxParallel is 1. The whole batch settles before we replan, so a
+      // failure doesn't strand siblings mid-flight.
+      const failed = await this.#runReady(ready, goal);
 
       if (failed) {
         const outcome = await this.#tryReplan(goal, nodes, failed, replans);
@@ -114,6 +103,33 @@ export class PlanRunner {
         replans = outcome.replans;
       }
     }
+  }
+
+  /**
+   * Execute the ready set with bounded concurrency. Every node in the batch runs (the pool
+   * drains fully) before returning, so a failing sibling never strands an in-flight one. Returns
+   * the first failure (by ready-set order) if any node failed, else null.
+   */
+  async #runReady(ready: PlanNode[], goal: string): Promise<ObservedFailure | null> {
+    const limit = Math.max(1, this.#limits.maxParallel);
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        const i = next++;
+        if (i >= ready.length) return;
+        const node = ready[i]!;
+        node.status = "running";
+        this.#d.observer?.onNodeStart?.(node);
+        const outcome = await this.#d.executor.execute(node, goal);
+        node.status = outcome.ok ? "done" : "failed";
+        node.summary = outcome.summary;
+        this.#d.observer?.onNodeDone?.(node, outcome.ok);
+        this.#d.world?.applyEvent(outcome.ok ? "step.done" : "step.failed", `${goal}: ${node.description} — ${outcome.summary}`, { origin: "model" });
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(limit, ready.length) }, () => worker()));
+    const firstFailed = ready.find((n) => n.status === "failed");
+    return firstFailed ? { nodeId: firstFailed.id, description: firstFailed.description, summary: firstFailed.summary ?? "failed" } : null;
   }
 
   /** Replan the remaining (not-done) work, keeping completed nodes. Null ⇒ budget exhausted. */

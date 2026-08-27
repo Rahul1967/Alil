@@ -6,8 +6,12 @@
 > ✅ **M3 (§2 plan→execute→replan, wired: `/plan` command, plan-level HITL, dry-run, §5 persona)**, and
 > ✅ **boundary decision audit** (every allow/ask/deny + resolution + provenance logged), and
 > ✅ **M4 (§3 ambient ingestion: EventBus → world-model + prospective + rate-limited unprompted wakes,
-> wired into the REPL with `/event`)** — all shipped and tested (226 tests passing, clean typecheck).
-> Remaining: M5 (§4 subagents); ambient parity in the browser/telegram entrypoints.
+> wired into the REPL with `/event`)**, and ✅ **M5 (§4 subagents: scoped, structurally non-inheriting
+> delegation + parallel plan execution)** — **all Phase-2 milestones shipped and tested (233 tests
+> passing, clean typecheck).**
+>
+> Follow-ups (optional polish, not milestones): ambient + subagent parity in the browser/telegram
+> entrypoints; wire the SubagentNodeExecutor into `/plan` for opt-in parallel plans.
 
 Phase 1 built the **trust layer** (policy boundary, HITL, memory tiers, audit) — the part most
 assistant clones fake. Phase 2 grows the two missing *organs* that separate a reactive,

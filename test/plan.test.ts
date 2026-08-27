@@ -89,7 +89,7 @@ test("runner ABANDONS cleanly when the replan budget is exhausted", async () => 
   // always fails
   const exec: NodeExecutor = { async execute(n) { return { ok: false, summary: `fail ${n.id}` }; } };
   const world = new WorldStore({ now: () => 1 });
-  const result = await new PlanRunner({ planner, executor: exec, world, limits: { maxReplans: 2, maxNodes: 20 } }).run("impossible");
+  const result = await new PlanRunner({ planner, executor: exec, world, limits: { maxReplans: 2, maxNodes: 20, maxParallel: 1 } }).run("impossible");
   assert.equal(result.status, "abandoned");
   assert.equal(result.replans, 2); // used the whole budget, then stopped — did not loop forever
   assert.equal(world.snapshot().tasks[0]!.status, "abandoned");
@@ -140,7 +140,7 @@ test("plan size is capped at maxNodes", async () => {
   const big = JSON.stringify(Array.from({ length: 30 }, (_, i) => ({ id: `s${i}`, description: `step ${i}`, deps: [] })));
   const planner = plannerWith(big);
   const { exec } = scriptedExecutor(new Set());
-  const result = await new PlanRunner({ planner, executor: exec, limits: { maxReplans: 0, maxNodes: 5 } }).run("many steps");
+  const result = await new PlanRunner({ planner, executor: exec, limits: { maxReplans: 0, maxNodes: 5, maxParallel: 1 } }).run("many steps");
   assert.equal(result.nodes.length, 5);
   assert.equal(result.status, "done");
 });
