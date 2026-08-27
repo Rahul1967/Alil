@@ -75,14 +75,14 @@ function renderApproval(a) {
   card.dataset.id = a.id;
   const head = document.createElement("div");
   head.className = "approval-head";
-  head.textContent = `⚠ approval needed — ${a.tool} (${a.effect}/${a.risk})`;
+  head.textContent = `Alil wants to run ${a.tool} · ${a.effect} · ${a.risk} risk`;
   card.appendChild(head);
   if (a.reason) card.appendChild(Object.assign(document.createElement("div"), { className: "approval-reason", textContent: a.reason }));
   card.appendChild(Object.assign(document.createElement("div"), { className: "approval-args", textContent: a.args }));
   const btns = document.createElement("div");
   btns.className = "approval-btns";
-  const approve = Object.assign(document.createElement("button"), { className: "approve", textContent: "✅ Approve" });
-  const reject = Object.assign(document.createElement("button"), { className: "reject", textContent: "❌ Reject" });
+  const approve = Object.assign(document.createElement("button"), { className: "approve", textContent: "Approve & run" });
+  const reject = Object.assign(document.createElement("button"), { className: "reject", textContent: "Reject" });
   const answer = async (approved) => {
     approve.disabled = reject.disabled = true;
     try {
@@ -95,7 +95,7 @@ function renderApproval(a) {
       addNote("approval failed: " + e.message);
     }
     card.classList.add("resolved");
-    head.textContent = (approved ? "✅ approved" : "❌ rejected") + ` — ${a.tool}`;
+    head.textContent = (approved ? "Approved — running" : "Rejected — not run") + ` · ${a.tool}`;
     btns.remove();
   };
   approve.addEventListener("click", () => answer(true));
