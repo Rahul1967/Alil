@@ -82,6 +82,7 @@ const boundary = new PolicyBoundary({
   approvals,
   grants: new GrantStore(),
   workspaceRoot: sandboxRoot,
+  audit, // record every policy decision (allow/ask/deny + resolution + provenance)
 });
 
 // Live trace of what happens inside a turn: model thinking, tool calls, and outcomes.

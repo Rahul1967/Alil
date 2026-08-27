@@ -4,13 +4,21 @@ import type { RuleSource } from "./rules.ts";
 import type { GuardHook } from "./hooks/types.ts";
 import { classify } from "./classifier.ts";
 import { evaluate } from "./engine.ts";
-import { escalateForProvenance } from "./provenance-check.ts";
+import { escalateForProvenance, isTainted } from "./provenance-check.ts";
 import { ask } from "./verdict.ts";
 import type { ToolRegistry } from "../execution/tools/registry.ts";
 import type { Executor } from "../execution/executor.ts";
 import type { ApprovalPort } from "./approval/types.ts";
 import type { GrantStore } from "./approval/grants.ts";
 import { captureBinding, verifyBinding } from "./approval/binding.ts";
+
+/**
+ * Where the boundary records its decisions. Structurally satisfied by the gateway's AuditLedger
+ * (`append`), so the ledger can be passed straight in. Absent ⇒ decisions are not logged.
+ */
+export interface AuditSink {
+  append(evt: string, fields?: Record<string, unknown>): unknown;
+}
 
 export interface BoundaryDeps {
   rules: RuleSource;
@@ -21,6 +29,8 @@ export interface BoundaryDeps {
   approvals?: ApprovalPort;
   /** Optional. Present with `approvals` ⇒ grants can cover an `ask` without re-prompting. */
   grants?: GrantStore;
+  /** Optional. Records every policy decision (allow/ask/deny), its source, and how it resolved. */
+  audit?: AuditSink;
   /**
    * Optional workspace root. When set, approval bindings hash the target file's content so a
    * file changed between approval and execution is caught as drift (TOCTOU). Absent ⇒ file-
@@ -54,21 +64,26 @@ export class PolicyBoundary implements ActionSink {
     const verdict = escalateForProvenance(base, action);
 
     // 4. Act.
-    if (verdict.decision === "allow") return this.#execute(action);
+    if (verdict.decision === "allow") {
+      this.#record(action, "allow", verdict.decidedBy, verdict.reason, "executed");
+      return this.#execute(action);
+    }
 
     if (verdict.decision === "deny") {
+      this.#record(action, "deny", verdict.decidedBy, verdict.reason, "denied");
       return denied(action.id, `denied [${verdict.decidedBy}]: ${verdict.reason}`);
     }
 
     // ask / defer → HITL.
-    return this.#requestAndAct(action, verdict.decidedBy, verdict.reason);
+    return this.#requestAndAct(action, verdict.decision, verdict.decidedBy, verdict.reason);
   }
 
-  async #requestAndAct(action: ActionContract, decidedBy: string, reason: string): Promise<ToolResult> {
+  async #requestAndAct(action: ActionContract, decision: string, decidedBy: string, reason: string): Promise<ToolResult> {
     const { approvals, grants } = this.#deps;
 
     // Fail-closed: no approval channel ⇒ deny.
     if (!approvals) {
+      this.#record(action, decision, decidedBy, reason, "denied:no-approval-channel");
       return denied(action.id, `approval required [${decidedBy}]: ${reason} (HITL not wired yet)`);
     }
 
@@ -80,15 +95,16 @@ export class PolicyBoundary implements ActionSink {
       const g = grants.match(action);
       if (g) {
         grants.consume(g.id);
+        this.#record(action, decision, decidedBy, reason, "grant-covered", { grantId: g.id });
         return this.#execute(action);
       }
     }
 
     // Prompt the operator. The binding freezes the action for a post-approval drift check.
     const binding = captureBinding(action, this.#deps.workspaceRoot);
-    let decision;
+    let approvalDecision;
     try {
-      decision = await approvals.request({
+      approvalDecision = await approvals.request({
         id: `apr_${++this.#seq}`,
         action,
         binding,
@@ -96,23 +112,51 @@ export class PolicyBoundary implements ActionSink {
         reason,
       });
     } catch (err) {
-      return denied(action.id, `approval error (fail-closed): ${err instanceof Error ? err.message : String(err)}`);
+      const detail = err instanceof Error ? err.message : String(err);
+      this.#record(action, decision, decidedBy, reason, "denied:approval-error", { error: detail });
+      return denied(action.id, `approval error (fail-closed): ${detail}`);
     }
 
-    if (!decision.approved) {
-      return denied(action.id, `declined by operator${decision.reason ? `: ${decision.reason}` : ""}`);
+    if (!approvalDecision.approved) {
+      this.#record(action, decision, decidedBy, reason, "declined", { by: "operator" });
+      return denied(action.id, `declined by operator${approvalDecision.reason ? `: ${approvalDecision.reason}` : ""}`);
     }
 
     // Don't mint a standing grant for non-grantable actions (execute / high-risk) — it would
     // never be honored anyway, and shouldn't look like it grants future destructive commands.
-    if (decision.scope && grants && grantable) grants.mint(decision.scope);
+    if (approvalDecision.scope && grants && grantable) grants.mint(approvalDecision.scope);
 
     // TOCTOU: the action must not have drifted since approval.
     if (!verifyBinding(binding, action, this.#deps.workspaceRoot)) {
+      this.#record(action, decision, decidedBy, reason, "denied:binding-mismatch");
       return denied(action.id, "action changed after approval (binding mismatch)");
     }
 
+    this.#record(action, decision, decidedBy, reason, "approved", {
+      ...(approvalDecision.scope && grants && grantable ? { grantMinted: true } : {}),
+    });
     return this.#execute(action);
+  }
+
+  /** Emit one audit record for a policy decision and how it resolved. Never logs raw secrets:
+   * args are truncated to a bounded preview (credential-shaped args are denied before here). */
+  #record(action: ActionContract, decision: string, decidedBy: string, reason: string, resolution: string, extra: Record<string, unknown> = {}): void {
+    const audit = this.#deps.audit;
+    if (!audit) return;
+    audit.append("policy", {
+      tool: action.tool,
+      effect: action.effect,
+      risk: action.risk,
+      decision,
+      decidedBy,
+      reason,
+      resolution,
+      tainted: isTainted(action),
+      ...(action.provenance.taintedBy?.length ? { taintedBy: action.provenance.taintedBy } : {}),
+      argsPreview: JSON.stringify(action.args).slice(0, 200),
+      actionId: action.id,
+      ...extra,
+    });
   }
 
   async #execute(action: ActionContract): Promise<ToolResult> {

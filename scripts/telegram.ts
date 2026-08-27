@@ -159,6 +159,8 @@ const boundary = new PolicyBoundary({
   }),
   approvals,
   grants: new GrantStore(),
+  workspaceRoot: sandboxRoot,
+  audit, // record every policy decision (allow/ask/deny + resolution + provenance)
 });
 
 const observer: BrainObserver = {

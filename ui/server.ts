@@ -124,6 +124,7 @@ const boundary = new PolicyBoundary({
   approvals,
   grants: new GrantStore(),
   workspaceRoot: sandboxRoot,
+  audit, // record every policy decision (allow/ask/deny + resolution + provenance)
 });
 
 // One shared observer; the TurnQueue guarantees a single in-flight turn, so a module-level
