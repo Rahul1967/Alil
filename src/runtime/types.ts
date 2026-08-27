@@ -73,6 +73,15 @@ export interface SkillPort {
   eligible(input: BrainInput): Promise<SkillRef[]>;
 }
 
+/**
+ * Present-tense world-model access for context assembly. `stateBlock` returns a compact,
+ * model-facing summary of current tasks/systems/events, or null when there's nothing to show.
+ * Optional on the brain — absent ⇒ no state block is injected.
+ */
+export interface WorldPort {
+  stateBlock(): string | null;
+}
+
 /** Lists the tools available to advertise to the model. Decouples the brain from the registry. */
 export interface ToolCatalogPort {
   list(): Promise<ToolSpec[]>;

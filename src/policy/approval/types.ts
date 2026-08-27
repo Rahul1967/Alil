@@ -4,6 +4,15 @@ import type { ActionContract, Risk } from "../../core/types.ts";
 export interface ExecutionBinding {
   tool: string;
   argsHash: string;
+  /** Canonical working directory the grant was approved against, when known. */
+  cwd?: string;
+  /**
+   * Hash of the target file's content at approval time, for write/execute actions with a path.
+   * `null` = target did not exist at approval. Recomputed at verify time; a change ⇒ the human
+   * approved a different file state than the one about to be executed ⇒ deny. Absent when no
+   * workspace root was wired (file-content binding disabled, args/cwd binding still applies).
+   */
+  targetHash?: string | null;
 }
 
 /** Scope of a standing grant minted when the operator chooses to grant, not just allow. */

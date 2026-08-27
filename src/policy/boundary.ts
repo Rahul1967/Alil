@@ -21,6 +21,12 @@ export interface BoundaryDeps {
   approvals?: ApprovalPort;
   /** Optional. Present with `approvals` ⇒ grants can cover an `ask` without re-prompting. */
   grants?: GrantStore;
+  /**
+   * Optional workspace root. When set, approval bindings hash the target file's content so a
+   * file changed between approval and execution is caught as drift (TOCTOU). Absent ⇒ file-
+   * content binding is skipped; args + cwd binding still apply.
+   */
+  workspaceRoot?: string;
 }
 
 /**
@@ -79,7 +85,7 @@ export class PolicyBoundary implements ActionSink {
     }
 
     // Prompt the operator. The binding freezes the action for a post-approval drift check.
-    const binding = captureBinding(action);
+    const binding = captureBinding(action, this.#deps.workspaceRoot);
     let decision;
     try {
       decision = await approvals.request({
@@ -102,7 +108,7 @@ export class PolicyBoundary implements ActionSink {
     if (decision.scope && grants && grantable) grants.mint(decision.scope);
 
     // TOCTOU: the action must not have drifted since approval.
-    if (!verifyBinding(binding, action)) {
+    if (!verifyBinding(binding, action, this.#deps.workspaceRoot)) {
       return denied(action.id, "action changed after approval (binding mismatch)");
     }
 

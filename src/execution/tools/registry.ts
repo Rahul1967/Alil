@@ -21,6 +21,9 @@ import { remindCreate } from "./remind-create.ts";
 import { remindList } from "./remind-list.ts";
 import { remindCancel } from "./remind-cancel.ts";
 import { sendFile } from "./send-file.ts";
+import { worldRead } from "./world-read.ts";
+import { worldTrack } from "./world-track.ts";
+import { worldNote } from "./world-note.ts";
 
 /** name → tool. Adding a tool = one entry here (plus its file). */
 export class ToolRegistry {
@@ -62,4 +65,7 @@ export const DEFAULT_TOOLS: AnyTool[] = [
   remindList,
   remindCancel,
   sendFile,
+  worldRead,
+  worldTrack,
+  worldNote,
 ];

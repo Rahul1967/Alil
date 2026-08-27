@@ -15,11 +15,17 @@ export function initialMessages(params: {
   input: BrainInput;
   recalled: Fragment[];
   skills: SkillRef[];
+  worldState?: string | null;
 }): ChatMessage[] {
-  const { input, recalled, skills } = params;
+  const { input, recalled, skills, worldState } = params;
   const messages: ChatMessage[] = [];
 
   const contextBlocks: string[] = [];
+  // Present-tense state first — it orients everything else. Authored by the assistant's own
+  // gated world.* tools; individual entries carry their own ⚠untrusted markers when tainted.
+  if (worldState) {
+    contextBlocks.push(`[current state]\n${worldState}`);
+  }
   for (const f of recalled) {
     contextBlocks.push(
       `[memory · ${f.provenance.origin}${f.source ? ` · ${f.source}` : ""}]\n${f.text}`,

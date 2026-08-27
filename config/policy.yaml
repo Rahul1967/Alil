@@ -65,3 +65,6 @@ rules:
   - kind: allow
     match: { tool: remind.list }
     note: "listing your own scheduled intentions is safe (read-only); create/cancel require approval"
+  - kind: allow
+    match: { tool: world.read }
+    note: "reading your own present-tense world-model is safe (read-only); world.track/world.note are writes and require approval"

@@ -74,11 +74,30 @@ export const webFetch: ToolImpl<WebFetchArgs> = {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
     try {
-      const res = await fetch(args.url, {
-        signal: controller.signal,
-        headers: { "user-agent": "Alil/0.1 (+personal-assistant)" },
-        redirect: "follow",
-      });
+      // redirect:"manual" — the initial host is checked in validate(), but a public URL can
+      // 302 to 169.254.169.254/loopback. Follow redirects ourselves, re-validating each hop's
+      // host, so the SSRF guard survives redirects (fail-closed on any private/loopback hop).
+      let url = args.url;
+      let res: Response;
+      for (let hop = 0; ; hop++) {
+        if (hop > MAX_REDIRECTS) throw new Error(`too many redirects (>${MAX_REDIRECTS})`);
+        res = await fetch(url, {
+          signal: controller.signal,
+          headers: { "user-agent": "Alil/0.1 (+personal-assistant)" },
+          redirect: "manual",
+        });
+        if (res.status < 300 || res.status >= 400) break;
+        const location = res.headers.get("location");
+        if (!location) break; // redirect status with no target — treat as terminal
+        const next = new URL(location, url);
+        if (next.protocol !== "http:" && next.protocol !== "https:") {
+          throw new Error(`blocked redirect to unsupported protocol "${next.protocol}"`);
+        }
+        if (isPrivateHost(next.hostname)) {
+          throw new Error(`blocked redirect to private/loopback address "${next.hostname}"`);
+        }
+        url = next.href;
+      }
       const body = await res.text();
       const truncated = body.length > max;
       const text = truncated ? body.slice(0, max) : body;
@@ -86,11 +105,15 @@ export const webFetch: ToolImpl<WebFetchArgs> = {
         summary: `fetched ${args.url} → ${res.status} (${body.length} chars${truncated ? `, truncated to ${max}` : ""})`,
         data: {
           url: args.url,
+          finalUrl: url,
           status: res.status,
           contentType: res.headers.get("content-type") ?? undefined,
           truncated,
           text,
         },
+        // Fetched web content is untrusted; tag it so the runtime fences it and taints
+        // any action the model takes after reading it.
+        provenance: { origin: "ingested", ingestedFrom: url },
       };
     } catch (e) {
       const reason = controller.signal.aborted ? `timed out after ${TIMEOUT_MS}ms` : (e as Error).message;
@@ -100,3 +123,5 @@ export const webFetch: ToolImpl<WebFetchArgs> = {
     }
   },
 };
+
+const MAX_REDIRECTS = 5;

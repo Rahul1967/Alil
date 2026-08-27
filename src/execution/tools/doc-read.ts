@@ -135,6 +135,8 @@ export const docRead: ToolImpl<DocReadArgs> = {
         truncated: overBudget,
         text,
       },
+      // Document contents are untrusted ingested data — fence + taint like web.fetch.
+      provenance: { origin: "ingested", ingestedFrom: args.path },
     };
   },
 };

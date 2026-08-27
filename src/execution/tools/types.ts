@@ -1,9 +1,10 @@
-import type { Effect, Risk } from "../../core/types.ts";
+import type { Effect, Risk, Provenance } from "../../core/types.ts";
 import type { Sandbox } from "../sandbox.ts";
 import type { ReadTracker } from "../read-tracker.ts";
 import type { MemoryStore } from "../../memory/types.ts";
 import type { ProspectiveStore } from "../../memory/prospective.ts";
 import type { DocExtractor } from "../docs/types.ts";
+import type { WorldStore } from "../../world/store.ts";
 
 export interface ToolContext {
   sandbox: Sandbox;
@@ -22,6 +23,8 @@ export interface ToolContext {
   memory?: { store?: MemoryStore };
   /** Prospective memory (scheduled/triggered intentions) for the remind.* tools. */
   prospective?: { store?: ProspectiveStore };
+  /** Present-tense world-model for the world.* tools. Undefined when the world-model is off. */
+  world?: { store?: WorldStore };
   /**
    * The active outbound channel's capabilities (e.g. Telegram). `sendFile` delivers a file to
    * the user; undefined on channels without file support (the send_file tool then reports so).
@@ -36,6 +39,13 @@ export type ValidateResult<T> =
 export interface ToolRunResult {
   summary: string;
   data?: unknown;
+  /**
+   * Set by tools that ingest untrusted external content (web.fetch, doc.read, ambient events)
+   * to `{ origin: "ingested", ingestedFrom: <source> }`. The executor copies it onto the
+   * ToolResult so the runtime can (a) fence the body before it enters the model's context and
+   * (b) taint subsequent same-turn actions — driving the provenance escalation in the boundary.
+   */
+  provenance?: Provenance;
 }
 
 /**

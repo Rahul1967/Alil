@@ -63,6 +63,9 @@ test("brain advertises catalog tools to the model", async () => {
     "shell",
     "web.fetch",
     "web.search",
+    "world.note",
+    "world.read",
+    "world.track",
   ]);
   const read = advertised.find((t) => t.name === "fs.read");
   assert.equal((read?.parameters as { type?: string }).type, "object");
@@ -142,5 +145,5 @@ test("catalog reflects a custom rule source's world consistently", async () => {
   const src = new StaticRuleSource(cfg);
   assert.equal((await src.load()).mode, "default");
   const catalog = new RegistryToolCatalog();
-  assert.equal((await catalog.list()).length, 22);
+  assert.equal((await catalog.list()).length, 25);
 });

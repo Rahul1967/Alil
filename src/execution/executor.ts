@@ -36,6 +36,7 @@ export class Executor {
         outcome: "ok",
         summary: out.summary,
         ...(out.data !== undefined ? { data: out.data } : {}),
+        ...(out.provenance !== undefined ? { resultProvenance: out.provenance } : {}),
       });
     } catch (err) {
       const summary =
