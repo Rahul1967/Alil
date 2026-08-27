@@ -2,9 +2,10 @@
 
 **Status: in progress · basis: Phase-1 security audit + Phase-2 JARVIS-fit evaluation**
 
-> **Progress:** ✅ **M1 (§0 security hardening)** and ✅ **M2 (§1 world-model)** shipped and tested
-> (199 tests passing, clean typecheck). Remaining: M3 (§2 plan/replan + §5 persona), M4 (§3 ambient),
-> M5 (§4 subagents).
+> **Progress:** ✅ **M1 (§0 security hardening)**, ✅ **M2 (§1 world-model + wiring + recall)**, and
+> ✅ **M3 core (§2 plan→execute→replan engine)** shipped and tested (206 tests passing, clean typecheck).
+> Remaining in M3: wire `PlanRunner` into the entrypoints + plan-level HITL + §5 persona reconciliation.
+> Then M4 (§3 ambient), M5 (§4 subagents).
 
 Phase 1 built the **trust layer** (policy boundary, HITL, memory tiers, audit) — the part most
 assistant clones fake. Phase 2 grows the two missing *organs* that separate a reactive,
