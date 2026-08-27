@@ -26,7 +26,8 @@ import type { MemorySystem, MemoryStore } from "../src/memory/index.ts";
 import type { ProspectiveStore } from "../src/memory/index.ts";
 import type { Intention, IncomingEvent } from "../src/memory/types.ts";
 import type { KnowledgeSource } from "../src/prompts/types.ts";
-import { AuditLedger, Scheduler } from "../src/gateway/index.ts";
+import { AuditLedger, Scheduler, EventBus, RateLimiter, keywordTrigger } from "../src/gateway/index.ts";
+import type { WakeRequest } from "../src/gateway/index.ts";
 import type { MemoryPort } from "../src/runtime/types.ts";
 import type { BrainInput } from "../src/runtime/types.ts";
 import type { TranscriptLine } from "../src/core/types.ts";
@@ -293,6 +294,46 @@ if (memory) {
   scheduler.start();
 }
 
+// Ambient ingestion (§3): external events are recorded into the world-model (tainted), forwarded
+// to the scheduler for prospective intentions, and — when a watch matches — wake an unprompted,
+// rate-limited turn. An unprompted turn runs through the same policy boundary as any other, and
+// starts already tainted so every action it proposes is escalated. Inject events with `/event`.
+async function onWake(w: WakeRequest): Promise<void> {
+  await runExclusive(async () => {
+    const at = new Date().toISOString();
+    const episodeId = episodes ? await episodes.beginTurn(at) : "ep_repl";
+    const input: BrainInput = {
+      sessionId: "repl",
+      message: { text: w.instruction, provenance: w.event.provenance },
+      history: loadHistory(),
+    };
+    stdout.write("\n");
+    current = new AbortController();
+    try {
+      const turn = await brain.run(input, { signal: current.signal });
+      console.log(`🔔 (ambient · ${w.rule}) › ${turn.assistantText ?? "(no action)"}\n`);
+      if (turn.stopReason === "complete" && memory) {
+        memory.timeline.append({ at, channel: CHANNEL, provenance: w.event.provenance, episodeId, role: "user", text: input.message.text });
+        if (turn.assistantText !== undefined) memory.timeline.append({ at, channel: CHANNEL, provenance: { origin: "model" }, episodeId, role: "assistant", text: turn.assistantText });
+      }
+      audit.append("turn", { channel: CHANNEL, episodeId, iterations: turn.iterations, source: "ambient", rule: w.rule });
+    } finally {
+      current = null;
+      stdout.write("you › ");
+    }
+  });
+}
+
+const eventBus = new EventBus({
+  ...(world ? { world } : {}),
+  ...(scheduler ? { scheduler } : {}),
+  // A starter watch: anything marked urgent/asap/important wakes the assistant. Tune per user.
+  triggers: [keywordTrigger("urgent-watch", ["urgent", "asap", "important", "emergency"])],
+  onWake,
+  limiter: new RateLimiter(5, 10 * 60_000), // at most 5 unprompted wakes per 10 minutes
+  audit,
+});
+
 for (;;) {
   let text: string;
   try {
@@ -310,6 +351,28 @@ for (;;) {
     const dryRun = planMatch[1] === "-dry";
     const goal = planMatch[2]!.trim();
     await runExclusive(() => runPlan(goal, dryRun));
+    continue;
+  }
+
+  // /event {json}  — inject an ambient event (simulating a webhook/poller) to exercise the
+  // ingestion path: it's recorded in the world-model and may wake an unprompted turn.
+  // e.g. /event {"channel":"email","from":"landlord","subject":"URGENT: leak in unit 4"}
+  if (text.startsWith("/event ")) {
+    try {
+      const raw = JSON.parse(text.slice(7)) as Partial<IncomingEvent>;
+      const event: IncomingEvent = {
+        channel: raw.channel ?? "manual",
+        ...(raw.type ? { type: raw.type } : {}),
+        ...(raw.from ? { from: raw.from } : {}),
+        ...(raw.subject ? { subject: raw.subject } : {}),
+        ...(raw.text ? { text: raw.text } : {}),
+        provenance: raw.provenance ?? { origin: "ingested", taintedBy: ["manual-inject"] },
+      };
+      await eventBus.ingest(event);
+      console.log(`  · event ingested (${event.channel})\n`);
+    } catch (e) {
+      console.log(`  [event error] ${(e as Error).message}\n`);
+    }
     continue;
   }
 

@@ -89,6 +89,24 @@ test("taint does NOT flow between sibling calls in the same round", async () => 
   assert.equal(seen.find((s) => s.tool === "fs.read")!.provenance.taintedBy, undefined);
 });
 
+// ─── M4: a turn seeded by an ingested (ambient/event) message starts tainted ───
+test("an ingested inbound message taints the turn's very first action", async () => {
+  const { sink, seen } = taintingSink(new Set());
+  const mock = new MockProvider().script(
+    toolResponse("a1", "fs.read", { path: "n.md" }), // round 1 — should already be tainted
+    endResponse(),
+  );
+  const registry = new ProviderRegistry().register(mock).registerModel(mockSpec);
+  const brain = new Brain({ modelId: "mock-model", guards: DEFAULT_GUARDS }, registry, {
+    memory: { recall: async () => [] }, skills: { eligible: async () => [] },
+    tools: { list: async () => [] }, prompt: { system: async () => "sys" },
+    actions: { submit: sink },
+  });
+  // Ambient wake: message provenance is ingested/tainted.
+  await brain.run({ sessionId: "s", message: { text: "event: server alert", provenance: { origin: "ingested", ingestedFrom: "webhook:alerts" } }, history: [] });
+  assert.deepEqual(seen.find((s) => s.tool === "fs.read")!.provenance.taintedBy, ["webhook:alerts"]);
+});
+
 // ─── §0.2 ingested tool-result bodies are fenced before re-entering context ───
 test("ingested tool result is fenced in the next model invocation", async () => {
   const { sink } = taintingSink(new Set(["web.fetch"]));

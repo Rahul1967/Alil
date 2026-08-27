@@ -4,3 +4,5 @@ export { AuditLedger } from "./audit-ledger.ts";
 export type { AuditEvent } from "./audit-ledger.ts";
 export { Scheduler } from "./scheduler.ts";
 export type { SchedulerDeps } from "./scheduler.ts";
+export { EventBus, RateLimiter, PollingSource, trigger, keywordTrigger, thresholdTrigger } from "./ingest/index.ts";
+export type { EventBusDeps, EventSource, TriggerRule, WakeRequest } from "./ingest/index.ts";

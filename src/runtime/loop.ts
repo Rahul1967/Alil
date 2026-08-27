@@ -94,7 +94,13 @@ export class Brain {
     // possibly influenced by it. The boundary's provenance-check then escalates those actions
     // (allow→ask, ask→deny). Sources accumulate; a round's actions carry the taint present
     // BEFORE that round (the model proposed them without having seen this round's results yet).
+    // A turn seeded by untrusted input (an ambient/event-triggered wake) starts already tainted,
+    // so every action it proposes is escalated — the model can't launder the event into a clean act.
     const taintSources: string[] = [];
+    const seedProv = input.message.provenance;
+    if (seedProv.origin === "ingested" || (seedProv.taintedBy?.length ?? 0) > 0) {
+      taintSources.push(seedProv.ingestedFrom ?? seedProv.taintedBy?.[0] ?? "ingested");
+    }
 
     // The growing conversation. Seeded once; each iteration appends the assistant turn
     // (with any tool calls) and the tool results, so the provider sees a valid
