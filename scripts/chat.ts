@@ -18,7 +18,8 @@ import { PromptAssembler, FilePersonaSource } from "../src/prompts/index.ts";
 import { PolicyBoundary, YamlRuleSource, credentialBlock, GrantStore } from "../src/policy/index.ts";
 import type { ApprovalPort, ApprovalRequest, ApprovalDecision } from "../src/policy/index.ts";
 import { ToolRegistry, Executor, Sandbox, ReadTracker, RegistryToolCatalog, DEFAULT_TOOLS } from "../src/execution/index.ts";
-import { openMemory, EpisodeManager, ExtractiveSummarizer, CanonicalKnowledge, seedMemoryInstructions } from "../src/memory/index.ts";
+import { openMemory, EpisodeManager, ExtractiveSummarizer, CanonicalKnowledge, seedMemoryInstructions, MemoryRecall } from "../src/memory/index.ts";
+import { WorldStore } from "../src/world/index.ts";
 import type { MemorySystem, MemoryStore } from "../src/memory/index.ts";
 import type { ProspectiveStore } from "../src/memory/index.ts";
 import type { Intention, IncomingEvent } from "../src/memory/types.ts";
@@ -69,13 +70,18 @@ const tools = new ToolRegistry();
 // wired in below once it's available.
 const memCtx: { store?: MemoryStore } = {};
 const prospCtx: { store?: ProspectiveStore } = {};
+// Present-tense world-model: durable JSON + a human-readable WORLD.md mirror, both under
+// workspace/ (git-inspectable). Wired into the tool context (world.* tools) and, below, into
+// the brain's context so the current-state block is injected each turn.
+const world = new WorldStore({ path: "workspace/.alil/world.json", markdownPath: "workspace/WORLD.md" });
 const boundary = new PolicyBoundary({
   rules: new YamlRuleSource("config/policy.yaml"),
   tools,
   hooks: [credentialBlock],
-  executor: new Executor({ sandbox: new Sandbox(sandboxRoot), reads: new ReadTracker(), memory: memCtx, prospective: prospCtx }),
+  executor: new Executor({ sandbox: new Sandbox(sandboxRoot), reads: new ReadTracker(), memory: memCtx, prospective: prospCtx, world: { store: world } }),
   approvals,
   grants: new GrantStore(),
+  workspaceRoot: sandboxRoot,
 });
 
 // Live trace of what happens inside a turn: model thinking, tool calls, and outcomes.
@@ -107,14 +113,17 @@ const observer = {
 let memory: MemorySystem | null = null;
 let episodes: EpisodeManager | null = null;
 let knowledge: KnowledgeSource | undefined;
-// Phase 1 (agentic memory): the per-turn recall PUSH is off. Canonical is standing context
-// in the system prompt; episodic/semantic are fetched by tools (phases 1.5 / 2). No-op port.
-const memoryPort: MemoryPort = { recall: async () => [] };
+// Situational recall is ON: each turn the brain is pushed recent episode summaries + the
+// semantic hits most relevant to the inbound message (canonical is excluded here — it's already
+// standing context in the system prompt via CanonicalKnowledge). Falls back to a no-op port when
+// memory is unavailable.
+let memoryPort: MemoryPort = { recall: async () => [] };
 try {
   memory = openMemory({ path: process.env.ALIL_DB ?? "workspace/memory.db" });
   await seedMemoryInstructions(memory.store);
   memCtx.store = memory.store; // wire the memory.* tools
   prospCtx.store = memory.prospective; // wire the remind.* tools
+  memoryPort = new MemoryRecall(memory.store, { includeCanonical: false }); // situational recall on
   knowledge = new CanonicalKnowledge(memory.store);
   // Phase 1.5: canonical writes are model-driven and permissioned (memory.write tool), so
   // the silent auto-promoter is no longer wired in. Episode distillation still runs.
@@ -143,6 +152,8 @@ const ports: BrainPorts = {
   prompt: new PromptAssembler(new FilePersonaSource(), { env: { now: () => new Date() }, knowledge }),
   // Real policy boundary: reads run; writes/high-risk gated by approval; credentials blocked.
   actions: boundary,
+  // Present-tense state injected first into each turn's context.
+  world,
   // Live trace of tool calls and outcomes.
   observer,
 };

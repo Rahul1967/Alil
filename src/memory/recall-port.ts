@@ -35,16 +35,21 @@ export class MemoryRecall implements MemoryPort {
   readonly #store: MemoryStore;
   readonly #k: number;
   readonly #episodes: number;
+  readonly #includeCanonical: boolean;
 
-  constructor(store: MemoryStore, opts?: { k?: number; episodes?: number }) {
+  constructor(store: MemoryStore, opts?: { k?: number; episodes?: number; includeCanonical?: boolean }) {
     this.#store = store;
     this.#k = opts?.k ?? 6;
     this.#episodes = opts?.episodes ?? 3;
+    // Default true, but callers that already render canonical as standing system-prompt context
+    // pass false to avoid injecting it twice — recall then carries only situational memory
+    // (recent episodes + query-relevant semantic hits).
+    this.#includeCanonical = opts?.includeCanonical ?? true;
   }
 
   async recall(query: string): Promise<Fragment[]> {
     const [canon, eps, hits] = await Promise.all([
-      this.#store.canonical(),
+      this.#includeCanonical ? this.#store.canonical() : Promise.resolve<Fragment[]>([]),
       this.#store.recentEpisodes(this.#episodes),
       this.#store.recall(query, this.#k),
     ]);

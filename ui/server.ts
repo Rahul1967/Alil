@@ -25,8 +25,9 @@ import { PromptAssembler, FilePersonaSource } from "../src/prompts/index.ts";
 import { PolicyBoundary, YamlRuleSource, credentialBlock, GrantStore } from "../src/policy/index.ts";
 import type { ApprovalPort, ApprovalRequest, ApprovalDecision } from "../src/policy/index.ts";
 import { ToolRegistry, Executor, Sandbox, ReadTracker, RegistryToolCatalog, DEFAULT_TOOLS } from "../src/execution/index.ts";
-import { openMemory, EpisodeManager, ExtractiveSummarizer, CanonicalKnowledge, seedMemoryInstructions } from "../src/memory/index.ts";
+import { openMemory, EpisodeManager, ExtractiveSummarizer, CanonicalKnowledge, seedMemoryInstructions, MemoryRecall } from "../src/memory/index.ts";
 import type { MemorySystem } from "../src/memory/index.ts";
+import { WorldStore } from "../src/world/index.ts";
 import type { KnowledgeSource } from "../src/prompts/types.ts";
 import { TurnQueue, AuditLedger } from "../src/gateway/index.ts";
 
@@ -41,12 +42,14 @@ const registry = new ProviderRegistry().register(new BedrockProvider());
 let memory: MemorySystem | null = null;
 let episodes: EpisodeManager | null = null;
 let knowledge: KnowledgeSource | undefined;
-// Phase 1 (agentic memory): recall push off; canonical is standing prompt context.
-const memoryPort: MemoryPort = { recall: async () => [] };
+// Situational recall is ON: recent episodes + query-relevant semantic hits are pushed each turn
+// (canonical stays standing context in the system prompt). No-op fallback when memory is off.
+let memoryPort: MemoryPort = { recall: async () => [] };
 const audit = new AuditLedger("workspace/logs/audit.jsonl");
 try {
   memory = openMemory({ path: process.env.ALIL_DB ?? "workspace/memory.db" });
   await seedMemoryInstructions(memory.store);
+  memoryPort = new MemoryRecall(memory.store, { includeCanonical: false });
   knowledge = new CanonicalKnowledge(memory.store);
   // Phase 1.5: canonical writes are model-driven + permissioned (memory.write tool); the
   // silent auto-promoter is retired. Episode distillation still runs.
@@ -106,6 +109,8 @@ const approvals: ApprovalPort = {
 };
 
 const sandboxRoot = process.env.ALIL_SANDBOX_ROOT ?? "workspace";
+// Present-tense world-model: durable JSON + human-readable WORLD.md mirror under workspace/.
+const world = new WorldStore({ path: "workspace/.alil/world.json", markdownPath: "workspace/WORLD.md" });
 const boundary = new PolicyBoundary({
   rules: new YamlRuleSource("config/policy.yaml"),
   tools: new ToolRegistry(),
@@ -114,9 +119,11 @@ const boundary = new PolicyBoundary({
     sandbox: new Sandbox(sandboxRoot),
     reads: new ReadTracker(),
     ...(memory ? { memory: { store: memory.store } } : {}),
+    world: { store: world },
   }),
   approvals,
   grants: new GrantStore(),
+  workspaceRoot: sandboxRoot,
 });
 
 // One shared observer; the TurnQueue guarantees a single in-flight turn, so a module-level
@@ -140,6 +147,7 @@ const ports: BrainPorts = {
   tools: new RegistryToolCatalog(DEFAULT_TOOLS),
   prompt: new PromptAssembler(new FilePersonaSource(), { env: { now: () => new Date() }, knowledge }),
   actions: boundary,
+  world,
   observer,
 };
 
