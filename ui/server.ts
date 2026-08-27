@@ -6,8 +6,9 @@
  * Run:  npm run ui   (then open http://localhost:8787)
  *
  * "Just chat": the model answers and can READ under the sandbox (reads run automatically);
- * write/high-risk tools are fail-closed denied here (no approval affordance in the browser
- * yet) and surfaced as a note. Turns are serialized through the gateway TurnQueue.
+ * write/high-risk tools prompt for consent in the page — the approval parks server-side while
+ * the client polls /api/approvals and answers via /api/approval. Turns serialize through the
+ * gateway TurnQueue.
  */
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
@@ -60,10 +61,47 @@ try {
   console.warn(`memory disabled: ${(e as Error).message}`);
 }
 
-// Browser channel has no approval UI yet → fail closed on anything needing consent.
+// Browser HITL: an approval parks here until the user taps Approve/Reject in the page. The
+// chat POST is still awaiting the turn, so the client polls GET /api/approvals to discover the
+// pending request and POSTs /api/approval to answer it. Fail-closed on timeout (no answer ⇒ deny).
+const APPROVAL_TIMEOUT_MS = 5 * 60_000;
+interface PendingApproval {
+  id: string;
+  tool: string;
+  effect: string;
+  risk: string;
+  argsPreview: string;
+  reason: string;
+  resolve: (d: ApprovalDecision) => void;
+}
+const pendingApprovals = new Map<string, PendingApproval>();
+
 const approvals: ApprovalPort = {
-  async request(_req: ApprovalRequest): Promise<ApprovalDecision> {
-    return { approved: false, reason: "browser channel is read-only for now (approve from the terminal)" };
+  request(req: ApprovalRequest): Promise<ApprovalDecision> {
+    const a = req.action;
+    return new Promise<ApprovalDecision>((resolve) => {
+      let settled = false;
+      const done = (d: ApprovalDecision) => {
+        if (settled) return;
+        settled = true;
+        pendingApprovals.delete(req.id);
+        clearTimeout(timer);
+        resolve(d);
+      };
+      const timer = setTimeout(
+        () => done({ approved: false, reason: "no response in the browser (timed out)" }),
+        APPROVAL_TIMEOUT_MS,
+      );
+      pendingApprovals.set(req.id, {
+        id: req.id,
+        tool: a.tool,
+        effect: a.effect,
+        risk: a.risk,
+        argsPreview: JSON.stringify(a.args).slice(0, 300),
+        reason: req.reason,
+        resolve: done,
+      });
+    });
   },
 };
 
@@ -268,6 +306,41 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // ── HITL: pending approvals for the browser channel ─────────────────────────
+  if (req.method === "GET" && url.pathname === "/api/approvals") {
+    const items = [...pendingApprovals.values()].map((p) => ({
+      id: p.id, tool: p.tool, effect: p.effect, risk: p.risk, args: p.argsPreview, reason: p.reason,
+    }));
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ items }));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/approval") {
+    try {
+      const body = JSON.parse((await readBody(req)) || "{}") as { id?: string; approved?: boolean };
+      const pending = body.id ? pendingApprovals.get(body.id) : undefined;
+      if (!pending) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "no such pending approval (it may have expired)" }));
+        return;
+      }
+      // Browser grants nothing: execute/high-risk aren't grantable anyway, and one-tap-at-a-time
+      // keeps the affordance honest. Approve = once; reject = deny.
+      pending.resolve(
+        body.approved
+          ? { approved: true }
+          : { approved: false, reason: "declined in the browser" },
+      );
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    } catch (e) {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: (e as Error).message }));
+    }
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/api/chat") {
     try {
       const body = JSON.parse((await readBody(req)) || "{}") as { message?: string };
@@ -309,5 +382,5 @@ server.listen(PORT, () => {
   console.log(`Alil browser channel → http://localhost:${PORT}`);
   console.log(`  model: ${modelId}`);
   console.log(`  memory: ${memory ? (process.env.ALIL_DB ?? "workspace/memory.db") + " (shared with the terminal)" : "off"}`);
-  console.log(`  note: reads run automatically; writes are denied in the browser (approve from the terminal)`);
+  console.log(`  note: reads run automatically; writes/high-risk tools prompt for Approve/Reject in the page`);
 });

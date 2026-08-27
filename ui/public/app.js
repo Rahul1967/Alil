@@ -63,11 +63,69 @@ async function health() {
   }
 }
 
+// ── HITL approvals ────────────────────────────────────────────────────────────
+// While a turn is in flight the server may park an approval; we poll for it and render
+// Approve/Reject buttons inline. Answered by POST /api/approval.
+const shownApprovals = new Set();
+
+function renderApproval(a) {
+  if (empty) empty.remove();
+  const card = document.createElement("div");
+  card.className = "approval";
+  card.dataset.id = a.id;
+  const head = document.createElement("div");
+  head.className = "approval-head";
+  head.textContent = `⚠ approval needed — ${a.tool} (${a.effect}/${a.risk})`;
+  card.appendChild(head);
+  if (a.reason) card.appendChild(Object.assign(document.createElement("div"), { className: "approval-reason", textContent: a.reason }));
+  card.appendChild(Object.assign(document.createElement("div"), { className: "approval-args", textContent: a.args }));
+  const btns = document.createElement("div");
+  btns.className = "approval-btns";
+  const approve = Object.assign(document.createElement("button"), { className: "approve", textContent: "✅ Approve" });
+  const reject = Object.assign(document.createElement("button"), { className: "reject", textContent: "❌ Reject" });
+  const answer = async (approved) => {
+    approve.disabled = reject.disabled = true;
+    try {
+      await fetch("/api/approval", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: a.id, approved }),
+      });
+    } catch (e) {
+      addNote("approval failed: " + e.message);
+    }
+    card.classList.add("resolved");
+    head.textContent = (approved ? "✅ approved" : "❌ rejected") + ` — ${a.tool}`;
+    btns.remove();
+  };
+  approve.addEventListener("click", () => answer(true));
+  reject.addEventListener("click", () => answer(false));
+  btns.appendChild(approve);
+  btns.appendChild(reject);
+  card.appendChild(btns);
+  log.appendChild(card);
+  scrollDown();
+}
+
+async function pollApprovals() {
+  try {
+    const { items } = await (await fetch("/api/approvals")).json();
+    for (const a of items || []) {
+      if (shownApprovals.has(a.id)) continue;
+      shownApprovals.add(a.id);
+      renderApproval(a);
+    }
+  } catch {
+    /* transient — try again next tick */
+  }
+}
+
 async function submit(text) {
   addMessage("user", text);
   send.disabled = true;
   input.disabled = true;
   const typing = addTyping();
+  const approvalPoll = setInterval(pollApprovals, 1000);
   try {
     const r = await fetch("/api/chat", {
       method: "POST",
@@ -75,6 +133,7 @@ async function submit(text) {
       body: JSON.stringify({ message: text }),
     });
     const j = await r.json();
+    clearInterval(approvalPoll);
     typing.remove();
     if (!r.ok) {
       addNote("error: " + (j.error || r.status));
@@ -84,9 +143,11 @@ async function submit(text) {
       if (j.stopReason && j.stopReason !== "complete") addNote("turn " + j.stopReason);
     }
   } catch (e) {
+    clearInterval(approvalPoll);
     typing.remove();
     addNote("network error: " + e.message);
   } finally {
+    clearInterval(approvalPoll);
     send.disabled = false;
     input.disabled = false;
     input.focus();
