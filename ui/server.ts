@@ -55,7 +55,19 @@ const observer: BrainObserver = {
   onToolResult(e) { activeTrace.push(`  ${e.outcome === "ok" ? "✓" : e.outcome === "denied" ? "⛔" : "✗"} ${e.summary}`); },
 };
 
-const binding: ChannelBinding = { channel: CHANNEL, approvals, observer };
+// Proactive (scheduled reminders + ambient wakes) surfaced to the page via GET /api/proactive.
+interface Proactive { id: number; text: string; source: string; label: string; at: string }
+const proactive: Proactive[] = [];
+let proactiveSeq = 0;
+const binding: ChannelBinding = {
+  channel: CHANNEL,
+  approvals,
+  observer,
+  notify: async (text, meta) => {
+    proactive.push({ id: ++proactiveSeq, text, source: meta.source, label: meta.label ?? "", at: new Date().toISOString() });
+    if (proactive.length > 50) proactive.shift();
+  },
+};
 const alil = createAlil({ modelId }, binding);
 alil.start();
 
@@ -87,6 +99,12 @@ const server = createServer(async (req, res) => {
 
   if (req.method === "GET" && url.pathname === "/api/health") {
     return json(200, { ok: true, model: modelId, memory: alil.memoryOn ? "on" : "off" });
+  }
+
+  // Proactive messages (scheduled reminders + ambient wakes) newer than ?since=<id>.
+  if (req.method === "GET" && url.pathname === "/api/proactive") {
+    const since = Number(url.searchParams.get("since") ?? 0) || 0;
+    return json(200, { items: proactive.filter((p) => p.id > since) });
   }
 
   // ── Memory dashboard (read-only inspection) ─────────────────────────────────

@@ -195,6 +195,35 @@
     .typing i:nth-child(2){ animation-delay: .16s } .typing i:nth-child(3){ animation-delay: .32s }
     @keyframes b { 0%,60%,100%{opacity:.28; transform: translateY(0)} 30%{opacity:1; transform: translateY(-2px)} }
 
+    /* ── Plan view ── */
+    #planView { display: none; max-width: 720px; margin: 0 auto; }
+    #planView.show { display: block; }
+    .panel { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); box-shadow: var(--shadow); padding: 16px 17px; margin-bottom: 18px; }
+    .panel-title { font: 600 15px/1.2 "Space Grotesk", "IBM Plex Sans", sans-serif; color: var(--ink); margin-bottom: 5px; }
+    .panel-sub { font-size: 12.5px; color: var(--ink-soft); margin: 0 0 12px; }
+    .panel textarea, .panel input {
+      width: 100%; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 10px;
+      background: var(--ground); color: var(--ink); font: 14px/1.5 "IBM Plex Sans", sans-serif; margin-bottom: 10px;
+    }
+    .panel textarea { resize: vertical; min-height: 46px; }
+    .panel textarea:focus, .panel input:focus { outline: none; border-color: var(--mind); box-shadow: 0 0 0 3px color-mix(in srgb, var(--mind) 20%, transparent); }
+    .evt-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .panel-btns { display: flex; gap: 10px; margin-bottom: 4px; }
+    .panel-btns button { padding: 9px 16px; border-radius: 10px; cursor: pointer; font: 600 13.5px/1 "IBM Plex Sans", sans-serif; border: 1px solid transparent; transition: .12s; }
+    .panel-btns .primary { background: var(--send); color: var(--send-ink); }
+    .panel-btns .primary:hover:not(:disabled) { filter: brightness(1.06); }
+    .panel-btns .ghost { background: var(--panel); color: var(--ink); border-color: var(--line-strong); }
+    .panel-btns .ghost:hover:not(:disabled) { border-color: var(--mind); color: var(--mind); }
+    .panel-btns button:disabled { opacity: .45; cursor: default; filter: none; }
+    .pnode { border: 1px solid var(--line); border-left: 2.5px solid var(--model); border-radius: 4px 10px 10px 4px; background: var(--panel); padding: 10px 13px; }
+    .pnode .id { font: 600 11px/1.5 "IBM Plex Mono", monospace; color: var(--model); }
+    .pnode .deps { font: 500 11px/1.5 "IBM Plex Mono", monospace; color: var(--ink-faint); }
+    .pnode.done { border-left-color: var(--op); } .pnode.failed { border-left-color: var(--taint); }
+    .pnode .st { float: right; font: 600 11px/1.5 "IBM Plex Mono", monospace; }
+    .pnode.done .st { color: var(--op); } .pnode.failed .st { color: var(--taint); } .pnode.pending .st { color: var(--ink-faint); }
+    /* Proactive (ambient / scheduled) note in the chat stream */
+    .note.proactive { background: var(--signal-soft); border-color: var(--signal-line); color: var(--ink); max-width: 560px; white-space: pre-wrap; text-align: left; }
+
     /* ── Memory dashboard ── */
     #memoryView { display: none; max-width: 860px; margin: 0 auto; }
     #memoryView.show { display: block; }
@@ -242,6 +271,7 @@
     <span class="spacer"></span>
     <div class="toggle">
       <button id="tabChat" class="active">Chat</button>
+      <button id="tabPlan">Plan</button>
       <button id="tabMemory">Memory</button>
     </div>
   </header>
@@ -253,6 +283,30 @@
           This window shares memory with the terminal. When Alil needs to touch
           something real, it stops and asks you right here. Say something to begin.
         </div>
+      </div>
+    </div>
+    <div id="planView">
+      <div class="panel">
+        <div class="panel-title">Plan a goal</div>
+        <p class="panel-sub">Alil decomposes the goal into steps and runs each as a scoped subagent — independent steps in parallel. Preview first; running still prompts you to approve each real action.</p>
+        <textarea id="planGoal" placeholder="e.g. Summarize every .md file in the workspace into notes/summary.md"></textarea>
+        <div class="panel-btns">
+          <button id="planPreview" class="ghost">Preview plan</button>
+          <button id="planRun" class="primary">Run</button>
+        </div>
+        <div class="rows" id="planNodes"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-title">Inject an ambient event</div>
+        <p class="panel-sub">Simulate a webhook / sensor. The event is recorded in the world-model (as untrusted), and if it matches a watch (e.g. contains “urgent”) it wakes an unprompted, gated turn — surfaced in Chat as 🔔.</p>
+        <div class="evt-grid">
+          <input id="evtChannel" placeholder="channel (e.g. email)" />
+          <input id="evtFrom" placeholder="from (optional)" />
+        </div>
+        <input id="evtSubject" placeholder="subject (e.g. URGENT: disk almost full)" />
+        <textarea id="evtText" placeholder="body text (optional)"></textarea>
+        <div class="panel-btns"><button id="evtInject" class="primary">Inject event</button></div>
+        <div id="evtResult" class="panel-sub"></div>
       </div>
     </div>
     <div id="memoryView">

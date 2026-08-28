@@ -177,9 +177,11 @@ input.addEventListener("input", () => {
 
 // ── Memory dashboard ──────────────────────────────────────────────────────────
 const chatView = document.getElementById("chatView");
+const planView = document.getElementById("planView");
 const memoryView = document.getElementById("memoryView");
 const footer = document.querySelector("footer");
 const tabChat = document.getElementById("tabChat");
+const tabPlan = document.getElementById("tabPlan");
 const tabMemory = document.getElementById("tabMemory");
 const memContent = document.getElementById("memContent");
 let memView = "timeline";
@@ -209,22 +211,18 @@ function shortTime(iso) {
   try { return new Date(iso).toLocaleString(); } catch { return iso; }
 }
 
-function showChat() {
-  memView && (memoryView.classList.remove("show"));
-  chatView.style.display = "";
-  footer.style.display = "";
-  tabChat.classList.add("active"); tabMemory.classList.remove("active");
+function setView(which) {
+  chatView.style.display = which === "chat" ? "" : "none";
+  footer.style.display = which === "chat" ? "" : "none";
+  planView.classList.toggle("show", which === "plan");
+  memoryView.classList.toggle("show", which === "memory");
+  tabChat.classList.toggle("active", which === "chat");
+  tabPlan.classList.toggle("active", which === "plan");
+  tabMemory.classList.toggle("active", which === "memory");
 }
-function showMemory() {
-  chatView.style.display = "none";
-  footer.style.display = "none";
-  memoryView.classList.add("show");
-  tabMemory.classList.add("active"); tabChat.classList.remove("active");
-  loadStats();
-  loadMemory(memView);
-}
-tabChat.addEventListener("click", showChat);
-tabMemory.addEventListener("click", showMemory);
+tabChat.addEventListener("click", () => setView("chat"));
+tabPlan.addEventListener("click", () => setView("plan"));
+tabMemory.addEventListener("click", () => { setView("memory"); loadStats(); loadMemory(memView); });
 
 document.querySelectorAll(".tabs button").forEach((b) => {
   b.addEventListener("click", () => {
@@ -360,5 +358,97 @@ function renderCanonical(f) {
   card.appendChild(el("div", "body", f.text));
   memContent.appendChild(card);
 }
+
+// ── Plan view ──────────────────────────────────────────────────────────────────
+const planGoal = document.getElementById("planGoal");
+const planPreview = document.getElementById("planPreview");
+const planRun = document.getElementById("planRun");
+const planNodes = document.getElementById("planNodes");
+
+function renderPlanNodes(nodes, status, replans) {
+  planNodes.innerHTML = "";
+  if (status) {
+    const head = el("div", "panel-sub");
+    head.textContent = status === "planned" ? `preview — ${nodes.length} steps (nothing executed)` : `plan ${status} · ${replans} replan${replans === 1 ? "" : "s"}`;
+    planNodes.appendChild(head);
+  }
+  nodes.forEach((n) => {
+    const card = el("div", "pnode " + (n.status || "pending"));
+    const st = el("span", "st", n.status || "pending");
+    card.appendChild(st);
+    card.appendChild(el("span", "id", n.id + " "));
+    card.appendChild(document.createTextNode(n.description));
+    if (n.deps && n.deps.length) card.appendChild(el("div", "deps", "after: " + n.deps.join(", ")));
+    if (n.summary) card.appendChild(el("div", "deps", "→ " + n.summary));
+    planNodes.appendChild(card);
+  });
+}
+
+async function runPlan(execute) {
+  const goal = planGoal.value.trim();
+  if (!goal) return;
+  planPreview.disabled = planRun.disabled = true;
+  planNodes.innerHTML = "";
+  planNodes.appendChild(el("div", "empty-tab", execute ? "running…" : "planning…"));
+  const approvalPoll = execute ? setInterval(pollApprovals, 1000) : null;
+  try {
+    const r = await fetch("/api/plan", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ goal, execute }) });
+    const j = await r.json();
+    if (approvalPoll) clearInterval(approvalPoll);
+    if (!r.ok) { planNodes.innerHTML = ""; planNodes.appendChild(el("div", "empty-tab", "error: " + (j.error || r.status))); return; }
+    renderPlanNodes(j.nodes || [], j.status, j.replans);
+  } catch (e) {
+    if (approvalPoll) clearInterval(approvalPoll);
+    planNodes.innerHTML = ""; planNodes.appendChild(el("div", "empty-tab", "network error: " + e.message));
+  } finally {
+    planPreview.disabled = planRun.disabled = false;
+  }
+}
+planPreview.addEventListener("click", () => runPlan(false));
+planRun.addEventListener("click", () => runPlan(true));
+
+// ── Event inject ─────────────────────────────────────────────────────────────
+const evtInject = document.getElementById("evtInject");
+const evtResult = document.getElementById("evtResult");
+evtInject.addEventListener("click", async () => {
+  const body = {
+    channel: (document.getElementById("evtChannel").value.trim() || "manual"),
+    from: document.getElementById("evtFrom").value.trim() || undefined,
+    subject: document.getElementById("evtSubject").value.trim() || undefined,
+    text: document.getElementById("evtText").value.trim() || undefined,
+  };
+  evtInject.disabled = true;
+  evtResult.textContent = "ingesting…";
+  const approvalPoll = setInterval(pollApprovals, 1000);
+  try {
+    const r = await fetch("/api/event", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const j = await r.json();
+    clearInterval(approvalPoll);
+    evtResult.textContent = r.ok ? "event ingested — if it matched a watch, the 🔔 reply appears in Chat." : ("error: " + (j.error || r.status));
+  } catch (e) {
+    clearInterval(approvalPoll);
+    evtResult.textContent = "network error: " + e.message;
+  } finally {
+    evtInject.disabled = false;
+  }
+});
+
+// ── Proactive (scheduled + ambient) messages → surfaced in the chat stream ──────
+let lastProactive = 0;
+async function pollProactive() {
+  try {
+    const { items } = await (await fetch("/api/proactive?since=" + lastProactive)).json();
+    for (const p of items || []) {
+      lastProactive = Math.max(lastProactive, p.id);
+      const icon = p.source === "scheduled" ? "⏰" : "🔔";
+      if (empty && empty.parentNode) empty.remove();
+      const n = el("div", "note proactive");
+      n.textContent = `${icon} ${p.label ? p.label + " · " : ""}${p.text}`;
+      log.appendChild(n);
+      scrollDown();
+    }
+  } catch { /* transient */ }
+}
+setInterval(pollProactive, 3000);
 
 health();
