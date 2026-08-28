@@ -1,87 +1,35 @@
 /**
- * Browser chat channel (Zone 1) — a thin HTTP transport onto the SAME Brain + memory as
- * the REPL. Because both use workspace/memory.db, the browser and terminal are windows onto
- * one continuous mind (MEMORY.md §1): what you say here is recalled there and vice versa.
+ * Browser channel — a thin HTTP transport over the shared Alil core (src/app/core.ts). It supplies
+ * only browser-specific bits: the HTTP server, an in-page approval flow (a gated action parks
+ * server-side while the client polls /api/approvals and answers via /api/approval), a per-turn
+ * trace, and read-only memory-dashboard endpoints. Brain, policy, memory, world-model, planner,
+ * subagents and ambient ingestion all come from createAlil, so this channel matches the terminal
+ * and telegram channels by construction.
  *
  * Run:  npm run ui   (then open http://localhost:8787)
- *
- * "Just chat": the model answers and can READ under the sandbox (reads run automatically);
- * write/high-risk tools prompt for consent in the page — the approval parks server-side while
- * the client polls /api/approvals and answers via /api/approval. Turns serialize through the
- * gateway TurnQueue.
  */
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { join, extname, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
-import { Brain } from "../src/runtime/loop.ts";
-import type { BrainPorts } from "../src/runtime/loop.ts";
-import { DEFAULT_GUARDS } from "../src/runtime/types.ts";
-import type { BrainInput, MemoryPort, BrainObserver } from "../src/runtime/types.ts";
-import type { TranscriptLine } from "../src/core/types.ts";
-import { ProviderRegistry, BedrockProvider } from "../src/providers/index.ts";
-import { PromptAssembler, FilePersonaSource } from "../src/prompts/index.ts";
-import { PolicyBoundary, YamlRuleSource, credentialBlock, GrantStore } from "../src/policy/index.ts";
+import type { BrainObserver } from "../src/runtime/types.ts";
 import type { ApprovalPort, ApprovalRequest, ApprovalDecision } from "../src/policy/index.ts";
-import { ToolRegistry, Executor, Sandbox, ReadTracker, RegistryToolCatalog, DEFAULT_TOOLS } from "../src/execution/index.ts";
-import { openMemory, EpisodeManager, ExtractiveSummarizer, CanonicalKnowledge, seedMemoryInstructions, MemoryRecall } from "../src/memory/index.ts";
-import type { MemorySystem } from "../src/memory/index.ts";
-import { WorldStore } from "../src/world/index.ts";
-import type { KnowledgeSource } from "../src/prompts/types.ts";
-import { TurnQueue, AuditLedger } from "../src/gateway/index.ts";
-import type { WakeRequest } from "../src/gateway/index.ts";
-import { PlanService, createAmbientBus, toIncomingEvent } from "../src/app/index.ts";
-import type { PlanNode } from "../src/runtime/index.ts";
+import { createAlil } from "../src/app/index.ts";
+import type { ChannelBinding } from "../src/app/index.ts";
 
 const PORT = Number(process.env.PORT ?? 8787);
 const PUBLIC = join(dirname(fileURLToPath(import.meta.url)), "public");
 const CHANNEL = "browser";
 const modelId = process.env.BEDROCK_MODEL_ID ?? "us.anthropic.claude-sonnet-4-5-20250929-v1:0";
 
-// ── Wire the brain + persistent memory (mirrors scripts/chat.ts) ──────────────
-const registry = new ProviderRegistry().register(new BedrockProvider());
-
-let memory: MemorySystem | null = null;
-let episodes: EpisodeManager | null = null;
-let knowledge: KnowledgeSource | undefined;
-// Situational recall is ON: recent episodes + query-relevant semantic hits are pushed each turn
-// (canonical stays standing context in the system prompt). No-op fallback when memory is off.
-let memoryPort: MemoryPort = { recall: async () => [] };
-const audit = new AuditLedger("workspace/logs/audit.jsonl");
-try {
-  memory = openMemory({ path: process.env.ALIL_DB ?? "workspace/memory.db" });
-  await seedMemoryInstructions(memory.store);
-  memoryPort = new MemoryRecall(memory.store, { includeCanonical: false });
-  knowledge = new CanonicalKnowledge(memory.store);
-  // Phase 1.5: canonical writes are model-driven + permissioned (memory.write tool); the
-  // silent auto-promoter is retired. Episode distillation still runs.
-  episodes = new EpisodeManager({
-    db: memory.db,
-    timeline: memory.timeline,
-    store: memory.store,
-    summarizer: new ExtractiveSummarizer(),
-    onMemoryWrite: (e) => audit.append("episode.distill", { episodeId: e.episodeId, lines: e.lines }),
-  });
-} catch (e) {
-  console.warn(`memory disabled: ${(e as Error).message}`);
-}
-
-// Browser HITL: an approval parks here until the user taps Approve/Reject in the page. The
-// chat POST is still awaiting the turn, so the client polls GET /api/approvals to discover the
-// pending request and POSTs /api/approval to answer it. Fail-closed on timeout (no answer ⇒ deny).
+// ── Browser HITL: an approval parks here until the user taps Approve/Reject in the page ─────────
 const APPROVAL_TIMEOUT_MS = 5 * 60_000;
 interface PendingApproval {
-  id: string;
-  tool: string;
-  effect: string;
-  risk: string;
-  argsPreview: string;
-  reason: string;
+  id: string; tool: string; effect: string; risk: string; argsPreview: string; reason: string;
   resolve: (d: ApprovalDecision) => void;
 }
 const pendingApprovals = new Map<string, PendingApproval>();
-
 const approvals: ApprovalPort = {
   request(req: ApprovalRequest): Promise<ApprovalDecision> {
     const a = req.action;
@@ -94,137 +42,28 @@ const approvals: ApprovalPort = {
         clearTimeout(timer);
         resolve(d);
       };
-      const timer = setTimeout(
-        () => done({ approved: false, reason: "no response in the browser (timed out)" }),
-        APPROVAL_TIMEOUT_MS,
-      );
-      pendingApprovals.set(req.id, {
-        id: req.id,
-        tool: a.tool,
-        effect: a.effect,
-        risk: a.risk,
-        argsPreview: JSON.stringify(a.args).slice(0, 300),
-        reason: req.reason,
-        resolve: done,
-      });
+      const timer = setTimeout(() => done({ approved: false, reason: "no response in the browser (timed out)" }), APPROVAL_TIMEOUT_MS);
+      pendingApprovals.set(req.id, { id: req.id, tool: a.tool, effect: a.effect, risk: a.risk, argsPreview: JSON.stringify(a.args).slice(0, 300), reason: req.reason, resolve: done });
     });
   },
 };
 
-const sandboxRoot = process.env.ALIL_SANDBOX_ROOT ?? "workspace";
-// Present-tense world-model: durable JSON + human-readable WORLD.md mirror under workspace/.
-const world = new WorldStore({ path: "workspace/.alil/world.json", markdownPath: "workspace/WORLD.md" });
-const boundary = new PolicyBoundary({
-  rules: new YamlRuleSource("config/policy.yaml"),
-  tools: new ToolRegistry(),
-  hooks: [credentialBlock],
-  executor: new Executor({
-    sandbox: new Sandbox(sandboxRoot),
-    reads: new ReadTracker(),
-    ...(memory ? { memory: { store: memory.store } } : {}),
-    world: { store: world },
-  }),
-  approvals,
-  grants: new GrantStore(),
-  workspaceRoot: sandboxRoot,
-  audit, // record every policy decision (allow/ask/deny + resolution + provenance)
-});
-
-// One shared observer; the TurnQueue guarantees a single in-flight turn, so a module-level
-// trace buffer is safe to reuse per request.
+// Per-turn trace: the TurnQueue serializes turns, so a module-level buffer is safe to reuse.
 let activeTrace: string[] = [];
 const observer: BrainObserver = {
-  onToolCall(e) {
-    activeTrace.push(`→ ${e.tool}`);
-  },
-  onToolResult(e) {
-    activeTrace.push(`  ${e.outcome === "ok" ? "✓" : e.outcome === "denied" ? "⛔" : "✗"} ${e.summary}`);
-    if (e.tool.startsWith("memory.") && e.tool !== "memory.read") {
-      audit.append("canonical.tool", { tool: e.tool, outcome: e.outcome, summary: e.summary, channel: CHANNEL });
-    }
-  },
+  onToolCall(e) { activeTrace.push(`→ ${e.tool}`); },
+  onToolResult(e) { activeTrace.push(`  ${e.outcome === "ok" ? "✓" : e.outcome === "denied" ? "⛔" : "✗"} ${e.summary}`); },
 };
 
-const ports: BrainPorts = {
-  memory: memoryPort,
-  skills: { eligible: async () => [] },
-  tools: new RegistryToolCatalog(DEFAULT_TOOLS),
-  prompt: new PromptAssembler(new FilePersonaSource(), { env: { now: () => new Date() }, knowledge }),
-  actions: boundary,
-  world,
-  observer,
-};
+const binding: ChannelBinding = { channel: CHANNEL, approvals, observer };
+const alil = createAlil({ modelId }, binding);
+alil.start();
 
-const brain = new Brain({ modelId, guards: DEFAULT_GUARDS }, registry, ports);
-const queue = new TurnQueue();
-
-// Shared plan (subagent-backed, parallel) + ambient services, same as the REPL.
-const catalog = new RegistryToolCatalog(DEFAULT_TOOLS);
-const planService = new PlanService({ registry, modelId, catalog, boundary, world, maxParallel: 2 });
-
-// Ambient: an unprompted turn runs through the same queue + boundary, starts tainted, and is
-// recorded so the page shows it in history. Inject events at POST /api/event.
-async function onWake(w: WakeRequest): Promise<void> {
-  await queue.submit(async (signal) => {
-    const at = new Date().toISOString();
-    const episodeId = episodes ? await episodes.beginTurn(at) : "ep_browser";
-    activeTrace = [];
-    const turn = await brain.run({ sessionId: "browser", message: { text: w.instruction, provenance: w.event.provenance }, history: loadHistory() }, { signal });
-    if (turn.stopReason === "complete" && memory) {
-      memory.timeline.append({ at, channel: CHANNEL, provenance: w.event.provenance, episodeId, role: "user", text: `(ambient · ${w.rule}) ${w.instruction}` });
-      if (turn.assistantText !== undefined) memory.timeline.append({ at, channel: CHANNEL, provenance: { origin: "model" }, episodeId, role: "assistant", text: turn.assistantText });
-    }
-    audit.append("turn", { channel: CHANNEL, episodeId, iterations: turn.iterations, source: "ambient", rule: w.rule });
-  });
-}
-const eventBus = createAmbientBus({ world, audit, onWake });
-
-function loadHistory(): TranscriptLine[] {
-  if (!memory) return [];
-  return memory.timeline.workingSet(40).flatMap((l): TranscriptLine[] => {
-    if (l.role === "user" && l.text !== undefined) {
-      return [{ t: "user", at: l.at, channel: l.channel, provenanceId: l.provenance.origin, text: l.text }];
-    }
-    if (l.role === "assistant" && l.text !== undefined) return [{ t: "model", at: l.at, text: l.text }];
-    return [];
-  });
-}
-
-interface ChatReply {
-  reply: string;
-  trace: string[];
-  iterations: number;
-  stopReason: string;
-}
-
+interface ChatReply { reply: string; trace: string[]; iterations: number; stopReason: string }
 async function runTurn(text: string): Promise<ChatReply> {
-  // Serialize through the gateway: one mind, one timeline.
-  return queue.submit(async (signal): Promise<ChatReply> => {
-    const episodeId = episodes ? await episodes.beginTurn(new Date().toISOString()) : "ep_browser";
-    activeTrace = [];
-    const input: BrainInput = {
-      sessionId: "browser",
-      message: { text, provenance: { origin: "operator", channel: CHANNEL } },
-      history: loadHistory(),
-    };
-    const turn = await brain.run(input, { signal });
-
-    if (turn.stopReason === "complete" && memory) {
-      const at = new Date().toISOString();
-      memory.timeline.append({ at, channel: CHANNEL, provenance: { origin: "operator", channel: CHANNEL }, episodeId, role: "user", text });
-      if (turn.assistantText !== undefined) {
-        memory.timeline.append({ at, channel: CHANNEL, provenance: { origin: "model" }, episodeId, role: "assistant", text: turn.assistantText });
-      }
-      audit.append("turn", { channel: CHANNEL, episodeId, iterations: turn.iterations });
-    }
-
-    return {
-      reply: turn.assistantText ?? "",
-      trace: [...activeTrace],
-      iterations: turn.iterations,
-      stopReason: turn.stopReason,
-    };
-  });
+  activeTrace = [];
+  const turn = await alil.runTurn(text, { origin: "operator", channel: CHANNEL });
+  return { reply: turn.assistantText ?? "", trace: [...activeTrace], iterations: turn.iterations, stopReason: turn.stopReason };
 }
 
 // ── HTTP ──────────────────────────────────────────────────────────────────────
@@ -233,7 +72,6 @@ const MIME: Record<string, string> = {
   ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
 };
-
 function readBody(req: import("node:http").IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = "";
@@ -245,205 +83,105 @@ function readBody(req: import("node:http").IncomingMessage): Promise<string> {
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://localhost:${PORT}`);
+  const json = (code: number, body: unknown) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
 
   if (req.method === "GET" && url.pathname === "/api/health") {
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true, model: modelId, memory: memory ? "on" : "off" }));
-    return;
+    return json(200, { ok: true, model: modelId, memory: alil.memoryOn ? "on" : "off" });
   }
 
   // ── Memory dashboard (read-only inspection) ─────────────────────────────────
   if (req.method === "GET" && url.pathname.startsWith("/api/memory/")) {
-    if (!memory) {
-      res.writeHead(503, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "memory off" }));
-      return;
-    }
+    const memory = alil.memory;
+    if (!memory) return json(503, { error: "memory off" });
     const which = url.pathname.slice("/api/memory/".length);
-    const parseProv = (s: string) => {
-      try {
-        return JSON.parse(s);
-      } catch {
-        return { origin: "?" };
-      }
-    };
+    const parseProv = (s: string) => { try { return JSON.parse(s); } catch { return { origin: "?" }; } };
     try {
-      // Clamp a paging window from ?limit=&offset=.
       const paging = (defLimit: number, maxLimit: number) => {
         const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") ?? defLimit), maxLimit));
         const offset = Math.max(0, Number(url.searchParams.get("offset") ?? 0) || 0);
         return { limit, offset };
       };
-      const count = (t: string) => (memory!.db.prepare(`SELECT count(*) c FROM ${t}`).get() as { c: number }).c;
-
+      const count = (t: string) => (memory.db.prepare(`SELECT count(*) c FROM ${t}`).get() as { c: number }).c;
       let payload: unknown;
       if (which === "timeline") {
         const { limit, offset } = paging(50, 1000);
-        const rows = memory.db
-          .prepare("SELECT seq, at, channel, role, provenance, text FROM timeline ORDER BY seq DESC LIMIT ? OFFSET ?")
-          .all(limit, offset) as { seq: number; at: string; channel: string; role: string; provenance: string; text: string | null }[];
-        payload = {
-          items: rows.map((r) => ({ seq: r.seq, at: r.at, channel: r.channel, role: r.role, provenance: parseProv(r.provenance), text: r.text })),
-          total: count("timeline"),
-          limit,
-          offset,
-        };
+        const rows = memory.db.prepare("SELECT seq, at, channel, role, provenance, text FROM timeline ORDER BY seq DESC LIMIT ? OFFSET ?").all(limit, offset) as { seq: number; at: string; channel: string; role: string; provenance: string; text: string | null }[];
+        payload = { items: rows.map((r) => ({ seq: r.seq, at: r.at, channel: r.channel, role: r.role, provenance: parseProv(r.provenance), text: r.text })), total: count("timeline"), limit, offset };
       } else if (which === "episodes") {
         const { limit, offset } = paging(20, 500);
-        const rows = memory.db
-          .prepare("SELECT id, start_seq, end_seq, started_at, ended_at, summary, salient_facts FROM episodes ORDER BY start_seq DESC LIMIT ? OFFSET ?")
-          .all(limit, offset) as { id: string; start_seq: number; end_seq: number | null; started_at: string; ended_at: string | null; summary: string | null; salient_facts: string | null }[];
-        payload = {
-          items: rows.map((r) => ({
-            id: r.id,
-            startSeq: r.start_seq,
-            endSeq: r.end_seq,
-            startedAt: r.started_at,
-            endedAt: r.ended_at,
-            open: r.end_seq === null,
-            summary: r.summary,
-            salientFacts: r.salient_facts ? (JSON.parse(r.salient_facts) as string[]) : [],
-          })),
-          total: count("episodes"),
-          limit,
-          offset,
-        };
+        const rows = memory.db.prepare("SELECT id, start_seq, end_seq, started_at, ended_at, summary, salient_facts FROM episodes ORDER BY start_seq DESC LIMIT ? OFFSET ?").all(limit, offset) as { id: string; start_seq: number; end_seq: number | null; started_at: string; ended_at: string | null; summary: string | null; salient_facts: string | null }[];
+        payload = { items: rows.map((r) => ({ id: r.id, startSeq: r.start_seq, endSeq: r.end_seq, startedAt: r.started_at, endedAt: r.ended_at, open: r.end_seq === null, summary: r.summary, salientFacts: r.salient_facts ? (JSON.parse(r.salient_facts) as string[]) : [] })), total: count("episodes"), limit, offset };
       } else if (which === "canonical") {
-        const rows = memory.db
-          .prepare("SELECT key, kind, text, provenance, source, created_at FROM canonical ORDER BY kind ASC, created_at DESC")
-          .all() as { key: string | null; kind: string; text: string; provenance: string; source: string | null; created_at: string }[];
+        const rows = memory.db.prepare("SELECT key, kind, text, provenance, source, created_at FROM canonical ORDER BY kind ASC, created_at DESC").all() as { key: string | null; kind: string; text: string; provenance: string; source: string | null; created_at: string }[];
         payload = rows.map((r) => ({ key: r.key, kind: r.kind, text: r.text, provenance: parseProv(r.provenance), source: r.source, createdAt: r.created_at }));
       } else if (which === "procedures") {
-        const rows = memory.db
-          .prepare("SELECT name, trigger, abstract_method, verbatim_steps, evidence, uses, score, last_used_at, version, provenance, updated_at FROM procedure ORDER BY updated_at DESC")
-          .all() as { name: string; trigger: string; abstract_method: string; verbatim_steps: string; evidence: string; uses: number; score: number; last_used_at: string | null; version: number; provenance: string; updated_at: string }[];
-        payload = rows.map((r) => ({
-          name: r.name, trigger: r.trigger, method: r.abstract_method, steps: r.verbatim_steps,
-          evidence: r.evidence, uses: r.uses, score: r.score, lastUsedAt: r.last_used_at,
-          version: r.version, provenance: parseProv(r.provenance), updatedAt: r.updated_at,
-        }));
+        const rows = memory.db.prepare("SELECT name, trigger, abstract_method, verbatim_steps, evidence, uses, score, last_used_at, version, provenance, updated_at FROM procedure ORDER BY updated_at DESC").all() as { name: string; trigger: string; abstract_method: string; verbatim_steps: string; evidence: string; uses: number; score: number; last_used_at: string | null; version: number; provenance: string; updated_at: string }[];
+        payload = rows.map((r) => ({ name: r.name, trigger: r.trigger, method: r.abstract_method, steps: r.verbatim_steps, evidence: r.evidence, uses: r.uses, score: r.score, lastUsedAt: r.last_used_at, version: r.version, provenance: parseProv(r.provenance), updatedAt: r.updated_at }));
       } else if (which === "stats") {
-        const c = (t: string) => (memory!.db.prepare(`SELECT count(*) c FROM ${t}`).get() as { c: number }).c;
-        payload = { timeline: c("timeline"), episodes: c("episodes"), canonical: c("canonical"), procedures: c("procedure"), chunks: c("recall_chunk") };
+        payload = { timeline: count("timeline"), episodes: count("episodes"), canonical: count("canonical"), procedures: count("procedure"), chunks: count("recall_chunk") };
       } else {
-        res.writeHead(404, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: "unknown memory view" }));
-        return;
+        return json(404, { error: "unknown memory view" });
       }
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(payload));
+      return json(200, payload);
     } catch (e) {
-      res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: (e as Error).message }));
+      return json(500, { error: (e as Error).message });
     }
-    return;
   }
 
-  // ── HITL: pending approvals for the browser channel ─────────────────────────
+  // ── HITL ────────────────────────────────────────────────────────────────────
   if (req.method === "GET" && url.pathname === "/api/approvals") {
-    const items = [...pendingApprovals.values()].map((p) => ({
-      id: p.id, tool: p.tool, effect: p.effect, risk: p.risk, args: p.argsPreview, reason: p.reason,
-    }));
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ items }));
-    return;
+    return json(200, { items: [...pendingApprovals.values()].map((p) => ({ id: p.id, tool: p.tool, effect: p.effect, risk: p.risk, args: p.argsPreview, reason: p.reason })) });
   }
-
   if (req.method === "POST" && url.pathname === "/api/approval") {
     try {
       const body = JSON.parse((await readBody(req)) || "{}") as { id?: string; approved?: boolean };
       const pending = body.id ? pendingApprovals.get(body.id) : undefined;
-      if (!pending) {
-        res.writeHead(404, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: "no such pending approval (it may have expired)" }));
-        return;
-      }
-      // Browser grants nothing: execute/high-risk aren't grantable anyway, and one-tap-at-a-time
-      // keeps the affordance honest. Approve = once; reject = deny.
-      pending.resolve(
-        body.approved
-          ? { approved: true }
-          : { approved: false, reason: "declined in the browser" },
-      );
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ok: true }));
+      if (!pending) return json(404, { error: "no such pending approval (it may have expired)" });
+      pending.resolve(body.approved ? { approved: true } : { approved: false, reason: "declined in the browser" });
+      return json(200, { ok: true });
     } catch (e) {
-      res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: (e as Error).message }));
+      return json(500, { error: (e as Error).message });
     }
-    return;
   }
 
-  // Ambient: inject an external event (webhook/poller stand-in). Recorded in the world-model and
-  // may wake an unprompted, gated turn. body: {channel?, type?, from?, subject?, text?}
+  // ── Ambient inject: recorded (tainted) in the world-model, may wake an unprompted gated turn ──
   if (req.method === "POST" && url.pathname === "/api/event") {
     try {
-      const raw = JSON.parse((await readBody(req)) || "{}") as Record<string, unknown>;
-      await eventBus.ingest(toIncomingEvent(raw));
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ok: true }));
+      await alil.ingestEvent(JSON.parse((await readBody(req)) || "{}") as Record<string, unknown>);
+      return json(200, { ok: true });
     } catch (e) {
-      res.writeHead(400, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: (e as Error).message }));
+      return json(400, { error: (e as Error).message });
     }
-    return;
   }
 
-  // Plan a goal. body: {goal, execute?}. Without execute ⇒ dry run (returns the plan). With
-  // execute:true ⇒ run it (nodes run as scoped subagents, in parallel; actions still gated in-page).
+  // ── Plan: {goal, execute?}. No execute ⇒ dry run; execute:true ⇒ run (parallel subagents). ──
   if (req.method === "POST" && url.pathname === "/api/plan") {
     try {
       const body = JSON.parse((await readBody(req)) || "{}") as { goal?: string; execute?: boolean };
       const goal = (body.goal ?? "").trim();
-      if (!goal) {
-        res.writeHead(400, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: "empty goal" }));
-        return;
-      }
-      const result = await queue.submit(async () => {
-        activeTrace = [];
-        return planService.run(goal, {
-          dryRun: !body.execute,
-          approvePlan: async (_nodes: PlanNode[]) => true, // preview happens via dry-run; execute confirms
-        });
-      });
-      audit.append("plan", { channel: CHANNEL, goal, status: result.status, nodes: result.nodes.length, replans: result.replans });
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: result.status, replans: result.replans, nodes: result.nodes.map((n) => ({ id: n.id, description: n.description, deps: n.deps, status: n.status, summary: n.summary })) }));
+      if (!goal) return json(400, { error: "empty goal" });
+      const result = await alil.runPlan(goal, { dryRun: !body.execute, approvePlan: async () => true });
+      return json(200, { status: result.status, replans: result.replans, nodes: result.nodes.map((n) => ({ id: n.id, description: n.description, deps: n.deps, status: n.status, summary: n.summary })) });
     } catch (e) {
-      res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: (e as Error).message }));
+      return json(500, { error: (e as Error).message });
     }
-    return;
   }
 
   if (req.method === "POST" && url.pathname === "/api/chat") {
     try {
       const body = JSON.parse((await readBody(req)) || "{}") as { message?: string };
       const text = (body.message ?? "").trim();
-      if (!text) {
-        res.writeHead(400, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: "empty message" }));
-        return;
-      }
-      const out = await runTurn(text);
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(out));
+      if (!text) return json(400, { error: "empty message" });
+      return json(200, await runTurn(text));
     } catch (e) {
-      res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: (e as Error).message }));
+      return json(500, { error: (e as Error).message });
     }
-    return;
   }
 
   // Static files from ui/public (path-traversal safe).
   const rel = url.pathname === "/" ? "index.html" : normalize(url.pathname).replace(/^(\.\.[/\\])+/, "").replace(/^\/+/, "");
   const file = join(PUBLIC, rel);
-  if (!file.startsWith(PUBLIC)) {
-    res.writeHead(403);
-    res.end("forbidden");
-    return;
-  }
+  if (!file.startsWith(PUBLIC)) { res.writeHead(403); res.end("forbidden"); return; }
   try {
     const content = await readFile(file);
     res.writeHead(200, { "content-type": MIME[extname(file)] ?? "application/octet-stream" });
@@ -456,7 +194,6 @@ const server = createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`Alil browser channel → http://localhost:${PORT}`);
-  console.log(`  model: ${modelId}`);
-  console.log(`  memory: ${memory ? (process.env.ALIL_DB ?? "workspace/memory.db") + " (shared with the terminal)" : "off"}`);
-  console.log(`  note: reads run automatically; writes/high-risk tools prompt for Approve/Reject in the page`);
+  console.log(`  model: ${modelId} · memory: ${alil.memoryOn ? "on" : "off"}`);
+  console.log(`  reads run automatically; writes/high-risk tools prompt for Approve/Reject in the page`);
 });
