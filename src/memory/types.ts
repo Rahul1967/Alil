@@ -196,6 +196,9 @@ export interface EventMatch {
   from?: string; // sender contains (case-insensitive)
   subject?: string; // subject contains
   contains?: string; // body/text contains
+  // Time window (epoch ms) gating WHEN the predicate is live — for "on Oct 5, when we chat".
+  after?: number; // only match events at/after this instant
+  before?: number; // only match events strictly before this instant
 }
 
 /** An event delivered from a channel adapter, evaluated against pending event intentions. */

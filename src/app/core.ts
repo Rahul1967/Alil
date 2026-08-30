@@ -118,6 +118,14 @@ export class Alil {
 
   /** Run one turn on the shared queue: assemble context, think, record to timeline + audit. */
   async runTurn(text: string, provenance: Provenance, opts: RunTurnOptions = {}): Promise<BrainTurn> {
+    // An inbound operator message is itself an event: fire any matching event-intentions so a
+    // reminder gated to "when we chat on Oct 5" can trigger. Fire-and-forget — the delivered
+    // reminder turn (system provenance, so it won't re-fire) queues behind this one.
+    if (this.#scheduler && (provenance.origin === "operator" || provenance.origin === "user_channel")) {
+      void this.#scheduler
+        .fireEvent({ channel: this.channel, text, ...(provenance.sender ? { from: provenance.sender } : {}), provenance })
+        .catch(() => {});
+    }
     return this.#queue.submit(async (queueSignal): Promise<BrainTurn> => {
       const at = new Date().toISOString();
       const episodeId = this.#episodes ? await this.#episodes.beginTurn(at) : "ep";

@@ -90,6 +90,48 @@ test("matchEvent matches on case-insensitive substrings across fields", () => {
   } finally { cleanup(); }
 });
 
+test("matchEvent honors the after/before window — the 'remind me if we chat on Oct 5' case", () => {
+  const { store, cleanup } = fresh();
+  try {
+    const after = Date.parse("2026-10-05T00:00:00+05:30");
+    const before = Date.parse("2026-10-06T00:00:00+05:30");
+    // A date-only predicate: fires on ANY event within the window (an inbound message).
+    store.create({ title: "EMI", action: "remind EMI", trigger: "event", eventMatch: { after, before }, provenance: { origin: "operator" } });
+    const msg: IncomingEvent = { channel: "terminal", text: "hi", provenance: { origin: "user_channel" } };
+
+    // A chat on Oct 4 (before the window) → no match.
+    assert.equal(store.matchEvent(msg, Date.parse("2026-10-04T12:00:00+05:30")).length, 0);
+    // A chat on Oct 5 (inside) → matches.
+    assert.equal(store.matchEvent(msg, Date.parse("2026-10-05T09:15:00+05:30")).length, 1);
+    // A chat on Oct 6 (after) → no match.
+    assert.equal(store.matchEvent(msg, Date.parse("2026-10-06T09:00:00+05:30")).length, 0);
+  } finally { cleanup(); }
+});
+
+test("remind.create accepts a windowed event trigger and self-expires at `before`", () => {
+  const { store, ctx, cleanup } = fresh();
+  try {
+    const r = remindCreate.validate({
+      title: "EMI", action: "remind EMI",
+      event: { after: "2026-10-05T00:00:00+05:30", before: "2026-10-06T00:00:00+05:30" },
+    });
+    assert.equal(r.ok, true);
+    // before must be later than after
+    assert.equal(remindCreate.validate({ title: "t", action: "a", event: { after: "2026-10-06T00:00:00Z", before: "2026-10-05T00:00:00Z" } }).ok, false);
+    // bad ISO rejected
+    assert.equal(remindCreate.validate({ title: "t", action: "a", event: { after: "5pm" } }).ok, false);
+
+    return remindCreate.run((r as { value: Parameters<typeof remindCreate.run>[0] }).value, ctx).then((out) => {
+      const id = (out.data as { id: string }).id;
+      const stored = store.get(id)!;
+      assert.equal(stored.trigger, "event");
+      assert.equal(stored.eventMatch!.after, Date.parse("2026-10-05T00:00:00+05:30"));
+      // auto-expiry set to `before` so it lapses if the user never chats that day
+      assert.equal(stored.expiresAt, Date.parse("2026-10-06T00:00:00+05:30"));
+    }).finally(cleanup);
+  } catch (e) { cleanup(); throw e; }
+});
+
 // ─── scheduler ───
 
 function schedulerWith(store: ProspectiveStore, fired: Intention[], now: () => number, cronNext?: (e: string, a: number) => number | null) {

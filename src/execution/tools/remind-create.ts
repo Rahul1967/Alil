@@ -12,7 +12,8 @@ interface RemindCreateArgs {
   dedupKey?: string;
 }
 
-const EVENT_KEYS = new Set(["channel", "type", "from", "subject", "contains"]);
+const EVENT_KEYS = new Set(["channel", "type", "from", "subject", "contains", "after", "before"]);
+const EVENT_TIME_KEYS = new Set(["after", "before"]);
 
 /**
  * remind.create — schedule a future intention (prospective memory). effect=write, so it goes
@@ -33,10 +34,17 @@ export const remindCreate: ToolImpl<RemindCreateArgs> = {
       cron: { type: "string", description: "Recurring schedule, 5-field cron (e.g. \"0 9 * * 1\" = Mondays 9am)." },
       event: {
         type: "object",
-        description: "Fire when a matching event arrives.",
+        description:
+          "Fire when a matching event arrives (e.g. an inbound message, or an injected webhook). " +
+          "Match on channel/type/from/subject/contains (case-insensitive substrings), and/or a time " +
+          "window after/before (ISO 8601) that gates WHEN the predicate is live. Use the window for " +
+          "\"remind me when we talk on Oct 5\": {after:\"2026-10-05T00:00:00+05:30\", before:\"2026-10-06T00:00:00+05:30\"} " +
+          "— it fires on the first message that day and lapses if none comes. An inbound user message counts as an event.",
         properties: {
           channel: { type: "string" }, type: { type: "string" }, from: { type: "string" },
           subject: { type: "string" }, contains: { type: "string" },
+          after: { type: "string", description: "ISO 8601 — predicate live at/after this instant." },
+          before: { type: "string", description: "ISO 8601 — predicate live until this instant (auto-expires here)." },
         },
         additionalProperties: false,
       },
@@ -77,12 +85,23 @@ export const remindCreate: ToolImpl<RemindCreateArgs> = {
       if (typeof event !== "object" || event === null || Array.isArray(event)) return { ok: false, error: "`event` must be an object predicate" };
       const e = event as Record<string, unknown>;
       const keys = Object.keys(e);
-      if (keys.length === 0) return { ok: false, error: "`event` needs at least one field (channel/from/subject/contains/type)" };
+      if (keys.length === 0) return { ok: false, error: "`event` needs at least one field (channel/from/subject/contains/type/after/before)" };
+      const match: Record<string, unknown> = {};
       for (const k of keys) {
         if (!EVENT_KEYS.has(k)) return { ok: false, error: `unknown event field "${k}"` };
-        if (typeof e[k] !== "string") return { ok: false, error: `event.${k} must be a string` };
+        if (EVENT_TIME_KEYS.has(k)) {
+          // after/before come in as ISO strings and are stored as epoch ms (the match window).
+          if (typeof e[k] !== "string" || Number.isNaN(Date.parse(e[k] as string))) return { ok: false, error: `event.${k} must be an ISO 8601 date-time` };
+          match[k] = Date.parse(e[k] as string);
+        } else {
+          if (typeof e[k] !== "string") return { ok: false, error: `event.${k} must be a string` };
+          match[k] = e[k];
+        }
       }
-      value.event = e as EventMatch;
+      if (typeof match["after"] === "number" && typeof match["before"] === "number" && match["before"] <= match["after"]) {
+        return { ok: false, error: "event.before must be later than event.after" };
+      }
+      value.event = match as EventMatch;
     }
 
     const expiresAt = args["expiresAt"];
@@ -111,7 +130,9 @@ export const remindCreate: ToolImpl<RemindCreateArgs> = {
       ...(args.at ? { fireAt: Date.parse(args.at) } : {}),
       ...(args.cron ? { fireAt: new Cron(args.cron).nextRun()?.getTime() ?? null, cronExpr: args.cron } : {}),
       ...(args.event ? { eventMatch: args.event } : {}),
-      ...(args.expiresAt ? { expiresAt: Date.parse(args.expiresAt) } : {}),
+      // A windowed event trigger self-expires at `before`: if no matching event arrives in the
+      // window (e.g. the user never chats on Oct 5), it lapses instead of lingering forever.
+      ...(args.expiresAt ? { expiresAt: Date.parse(args.expiresAt) } : args.event?.before !== undefined ? { expiresAt: args.event.before } : {}),
       ...(args.dedupKey ? { dedupKey: args.dedupKey } : {}),
     };
     const { intention, created } = store.create(n);

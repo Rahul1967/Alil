@@ -131,6 +131,10 @@ export class ProspectiveStore {
     return rows.map(toIntention).filter((i) => {
       const m = i.eventMatch;
       if (!m) return false;
+      // Time window: the predicate is only live within [after, before). Lets an event trigger be
+      // gated to a date ("only when we chat on Oct 5") — outside the window it never matches.
+      if (m.after !== undefined && now < m.after) return false;
+      if (m.before !== undefined && now >= m.before) return false;
       return (
         contains(event.channel, m.channel) &&
         contains(event.type, m.type) &&

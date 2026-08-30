@@ -99,7 +99,13 @@ export const DEFAULT_MEMORY_INSTRUCTIONS: Fact[] = [
   {
     key: "mem.prosp.create",
     kind: "memory_instruction",
-    text: "Use remind.create with exactly one trigger: `at` (an absolute ISO 8601 time you compute from the current date, for one-off reminders like \"in 2 hours\" or \"tomorrow 9am\"), `cron` (a 5-field expression for recurring routines like \"every Monday\"), or `event` (a predicate like {from:\"landlord\", channel:\"email\"} to fire when a matching event arrives). Write the `action` as an instruction to your future self. Scheduling requires the user's approval, so propose it directly.",
+    text: "Use remind.create with exactly one trigger: `at` (an absolute ISO 8601 time you compute from the current date, for one-off reminders like \"in 2 hours\" or \"tomorrow 9am\"), `cron` (a 5-field expression for recurring routines like \"every Monday\"), or `event` (a predicate to fire when a matching event arrives). Write the `action` as an instruction to your future self. Scheduling requires the user's approval, so propose it directly.",
+    provenance: { origin: "system" },
+  },
+  {
+    key: "mem.prosp.event-vs-time",
+    kind: "memory_instruction",
+    text: "Choose the trigger by the user's ACTUAL condition, don't substitute your own. If they want it at a clock time, use `at`. If they want it CONDITIONAL ON PRESENCE — \"remind me if/when we're chatting on Oct 5\", \"next time I talk to you\", \"when I message you tomorrow\" — use an `event` trigger, because an inbound message from the user IS an event. Gate it to the right day with the after/before window, e.g. {after:\"2026-10-05T00:00:00+05:30\", before:\"2026-10-06T00:00:00+05:30\"}: it fires on the first message that day and lapses if none comes — which is exactly \"only if we chat that day\". Do NOT quietly turn a presence-condition into a fixed time; if you must assume a detail (a timezone, a clock time), state the assumption or ask first.",
     provenance: { origin: "system" },
   },
   {

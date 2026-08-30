@@ -63,6 +63,23 @@ test("an ambient event wakes a turn and notifies the channel", async () => {
   assert.equal(ev[0]!.provenance.origin, "ingested");
 });
 
+test("an inbound operator message fires a windowed event-intention (chat = an event)", async () => {
+  const notes: Array<{ text: string; source: string }> = [];
+  // one response for the user's own turn, one for the fired reminder turn
+  const { alil } = await makeAlil({ notify: async (t, m) => { notes.push({ text: t, source: m.source }); } }, endResp("hi there"), endResp("↳ EMI reminder"));
+  // Schedule an event-triggered reminder whose window is open right now.
+  const now = Date.now();
+  // Schedule a windowed event-intention directly in the store the core opened.
+  alil.memory!.prospective.create({
+    title: "EMI", action: "Remind about EMI", trigger: "event",
+    eventMatch: { after: now - 60_000, before: now + 60_000 }, provenance: { origin: "operator" },
+  });
+  // The user chats → this should fire the windowed intention as a second (proactive) turn.
+  await alil.runTurn("just saying hi", { origin: "operator" });
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(notes.some((n) => n.source === "scheduled"), true, "the windowed reminder fired on the inbound message");
+});
+
 test("a non-matching event is recorded but wakes nothing", async () => {
   const notes: string[] = [];
   const { alil } = await makeAlil({ notify: async (t) => { notes.push(t); } });
