@@ -1,10 +1,12 @@
 import { Cron } from "croner";
 import type { ToolImpl, ToolContext, ValidateResult, ToolRunResult } from "./types.ts";
-import type { NewIntention, EventMatch, IntentionTrigger } from "../../memory/types.ts";
+import type { NewIntention, EventMatch, IntentionTrigger, IntentionKind } from "../../memory/types.ts";
+import { INTENTION_KINDS } from "../../memory/types.ts";
 
 interface RemindCreateArgs {
   title: string;
   action: string;
+  kind?: IntentionKind; // what it IS; defaults to "reminder"
   at?: string; // ISO 8601 absolute time → 'once'
   cron?: string; // 5-field cron → recurring
   event?: EventMatch; // predicate → 'event'
@@ -30,6 +32,7 @@ export const remindCreate: ToolImpl<RemindCreateArgs> = {
     properties: {
       title: { type: "string", description: "Short label, e.g. \"call the dentist\"." },
       action: { type: "string", description: "Instruction to your future self, run as a turn when it fires." },
+      kind: { type: "string", enum: [...INTENTION_KINDS], description: "What this IS: 'reminder' (default, tell/do at trigger), 'fact' (surface when relevant), 'decision' (a plan to resume), 'aspiration' (someday/bucket), 'watch' (guard a condition)." },
       at: { type: "string", description: "One-off fire time, ISO 8601 (e.g. \"2026-08-27T17:00:00+05:30\")." },
       cron: { type: "string", description: "Recurring schedule, 5-field cron (e.g. \"0 9 * * 1\" = Mondays 9am)." },
       event: {
@@ -71,6 +74,14 @@ export const remindCreate: ToolImpl<RemindCreateArgs> = {
     if (provided !== 1) return { ok: false, error: "remind.create needs exactly one of `at`, `cron`, or `event`" };
 
     const value: RemindCreateArgs = { title: title.trim(), action: action.trim() };
+
+    const kind = args["kind"];
+    if (kind !== undefined) {
+      if (typeof kind !== "string" || !INTENTION_KINDS.includes(kind as IntentionKind)) {
+        return { ok: false, error: `\`kind\` must be one of ${INTENTION_KINDS.join(", ")}` };
+      }
+      value.kind = kind as IntentionKind;
+    }
 
     if (at !== undefined) {
       if (typeof at !== "string" || Number.isNaN(Date.parse(at))) return { ok: false, error: "`at` must be an ISO 8601 date-time" };
@@ -126,6 +137,7 @@ export const remindCreate: ToolImpl<RemindCreateArgs> = {
       title: args.title,
       action: args.action,
       trigger,
+      ...(args.kind ? { kind: args.kind } : {}),
       provenance: { origin: "operator" },
       ...(args.at ? { fireAt: Date.parse(args.at) } : {}),
       ...(args.cron ? { fireAt: new Cron(args.cron).nextRun()?.getTime() ?? null, cronExpr: args.cron } : {}),

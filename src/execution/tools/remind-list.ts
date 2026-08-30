@@ -45,6 +45,7 @@ export const remindList: ToolImpl<RemindListArgs> = {
     const data = items.map((i) => ({
       id: i.id,
       title: i.title,
+      kind: i.kind,
       trigger: i.trigger,
       status: i.status,
       nextFire: i.fireAt ? new Date(i.fireAt).toISOString() : null,

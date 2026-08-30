@@ -188,6 +188,13 @@ export interface MemoryStore {
 // wake. Firing re-enters as a normal turn, so the policy boundary re-checks at fire time.
 export type IntentionTrigger = "once" | "cron" | "event";
 export type IntentionStatus = "pending" | "firing" | "done" | "cancelled" | "expired";
+/**
+ * What a prospective item IS (vs. what triggers it). Shapes how Alil surfaces it: a `reminder`
+ * is told/done, a `fact` is woven in silently when relevant, a `decision` is offered to resume,
+ * an `aspiration` is review-only, a `watch` notifies on a condition. Storage is uniform.
+ */
+export type IntentionKind = "reminder" | "fact" | "decision" | "aspiration" | "watch";
+export const INTENTION_KINDS: readonly IntentionKind[] = ["reminder", "fact", "decision", "aspiration", "watch"];
 
 /** Predicate for an event-triggered intention ("when an email from X arrives…"). */
 export interface EventMatch {
@@ -215,6 +222,7 @@ export interface Intention {
   id: string;
   title: string; // short human label, e.g. "call mom"
   action: string; // NL instruction replayed to future-self on fire
+  kind: IntentionKind; // what it IS (reminder/fact/decision/aspiration/watch)
   trigger: IntentionTrigger;
   fireAt: number | null; // epoch ms; next fire for once/cron, null for pure event
   cronExpr: string | null; // recurrence, null unless cron
@@ -232,6 +240,7 @@ export interface Intention {
 export interface NewIntention {
   title: string;
   action: string;
+  kind?: IntentionKind; // defaults to "reminder"
   trigger: IntentionTrigger;
   fireAt?: number | null;
   cronExpr?: string | null;

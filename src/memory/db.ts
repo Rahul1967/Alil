@@ -27,4 +27,10 @@ function migrate(db: DB): void {
     db.exec("ALTER TABLE canonical ADD COLUMN kind TEXT NOT NULL DEFAULT 'preference'");
   }
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS canonical_key ON canonical(key) WHERE key IS NOT NULL");
+
+  // Prospective memory generalized from reminders to future-directed cognition (Phase 1).
+  const icols = db.prepare("PRAGMA table_info(intention)").all() as { name: string }[];
+  if (icols.length > 0 && !icols.some((c) => c.name === "kind")) {
+    db.exec("ALTER TABLE intention ADD COLUMN kind TEXT NOT NULL DEFAULT 'reminder'");
+  }
 }

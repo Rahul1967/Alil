@@ -99,7 +99,7 @@ export const DEFAULT_MEMORY_INSTRUCTIONS: Fact[] = [
   {
     key: "mem.prosp.create",
     kind: "memory_instruction",
-    text: "Use remind.create with exactly one trigger: `at` (an absolute ISO 8601 time you compute from the current date, for one-off reminders like \"in 2 hours\" or \"tomorrow 9am\"), `cron` (a 5-field expression for recurring routines like \"every Monday\"), or `event` (a predicate to fire when a matching event arrives). Write the `action` as an instruction to your future self. Scheduling requires the user's approval, so propose it directly.",
+    text: "Use remind.create with exactly one trigger: `at` (an absolute ISO 8601 time you compute from the current date, for one-off reminders like \"in 2 hours\" or \"tomorrow 9am\"), `cron` (a 5-field expression for recurring routines like \"every Monday\"), or `event` (a predicate to fire when a matching event arrives). Write the `action` as an instruction to your future self. Optionally set `kind` to say what the item IS — 'reminder' (default), 'fact' (something to surface later when relevant), 'decision' (a plan to resume), 'aspiration' (a someday/bucket-list item), or 'watch' (guard a condition); it shapes how you surface it later. Scheduling requires the user's approval, so propose it directly.",
     provenance: { origin: "system" },
   },
   {

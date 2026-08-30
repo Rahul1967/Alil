@@ -17,6 +17,7 @@ interface IntentionRow {
   id: string;
   title: string;
   action: string;
+  kind: string;
   trigger: string;
   fire_at: number | null;
   cron_expr: string | null;
@@ -54,9 +55,9 @@ export class ProspectiveStore {
   constructor(db: DB) {
     this.#db = db;
     this.#ins = db.prepare(
-      `INSERT INTO intention(id, title, action, trigger, fire_at, cron_expr, event_match,
+      `INSERT INTO intention(id, title, action, kind, trigger, fire_at, cron_expr, event_match,
                              status, dedup_key, expires_at, created_at, fired_at, attempts, provenance)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, NULL, 0, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, NULL, 0, ?)`,
     );
     this.#get = db.prepare(`SELECT * FROM intention WHERE id = ?`);
     this.#getByDedup = db.prepare(`SELECT * FROM intention WHERE dedup_key = ?`);
@@ -103,6 +104,7 @@ export class ProspectiveStore {
       id,
       n.title,
       n.action,
+      n.kind ?? "reminder",
       n.trigger,
       n.fireAt ?? null,
       n.cronExpr ?? null,
@@ -184,6 +186,7 @@ function toIntention(r: IntentionRow): Intention {
     id: r.id,
     title: r.title,
     action: r.action,
+    kind: (r.kind ?? "reminder") as Intention["kind"],
     trigger: r.trigger as IntentionTrigger,
     fireAt: r.fire_at,
     cronExpr: r.cron_expr,

@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS intention (
   id           TEXT PRIMARY KEY,
   title        TEXT NOT NULL,
   action       TEXT NOT NULL,
+  kind         TEXT NOT NULL DEFAULT 'reminder', -- reminder | fact | decision | aspiration | watch
   trigger      TEXT NOT NULL,              -- 'once' | 'cron' | 'event'
   fire_at      INTEGER,                    -- epoch ms; next fire for once/cron
   cron_expr    TEXT,                       -- recurrence, null unless cron

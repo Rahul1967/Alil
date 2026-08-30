@@ -132,6 +132,38 @@ test("remind.create accepts a windowed event trigger and self-expires at `before
   } catch (e) { cleanup(); throw e; }
 });
 
+// ─── kind (Phase 1: generalized row) ───
+test("kind defaults to reminder and round-trips through the store", () => {
+  const { store, cleanup } = fresh();
+  try {
+    const def = once(store, T0); // no kind → default
+    assert.equal(store.get(def.id)!.kind, "reminder");
+    const fact = store.create({ title: "aisle", action: "prefer aisle", trigger: "event", eventMatch: { contains: "travel" }, kind: "fact", provenance: { origin: "operator" } }).intention;
+    assert.equal(store.get(fact.id)!.kind, "fact");
+  } finally { cleanup(); }
+});
+
+test("remind.create accepts a valid kind and rejects an unknown one", async () => {
+  const { store, ctx, cleanup } = fresh();
+  try {
+    assert.equal(remindCreate.validate({ title: "t", action: "a", at: "2026-10-05T09:00:00Z", kind: "bogus" }).ok, false);
+    const r = remindCreate.validate({ title: "someday", action: "read Thinking in Systems", at: "2026-12-01T09:00:00Z", kind: "aspiration" });
+    assert.equal(r.ok, true);
+    const out = await remindCreate.run((r as { value: Parameters<typeof remindCreate.run>[0] }).value, ctx);
+    assert.equal(store.get((out.data as { id: string }).id)!.kind, "aspiration");
+  } finally { cleanup(); }
+});
+
+test("remind.list surfaces the kind", async () => {
+  const { store, ctx, cleanup } = fresh();
+  try {
+    store.create({ title: "watch build", action: "notify", trigger: "event", eventMatch: { type: "ci" }, kind: "watch", provenance: { origin: "operator" } });
+    const out = await remindList.run({ limit: 10 }, ctx);
+    const rows = out.data as Array<{ kind: string }>;
+    assert.equal(rows.some((r) => r.kind === "watch"), true);
+  } finally { cleanup(); }
+});
+
 // ─── scheduler ───
 
 function schedulerWith(store: ProspectiveStore, fired: Intention[], now: () => number, cronNext?: (e: string, a: number) => number | null) {
