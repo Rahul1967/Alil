@@ -401,7 +401,36 @@ function renderIntention(i) {
   if (i.expiresAt) foot.appendChild(el("span", null, "expires " + shortDate(i.expiresAt)));
   foot.appendChild(el("span", null, "added " + shortDate(i.createdAt)));
   card.appendChild(foot);
+
+  // Lifecycle actions for live items (each is a gated write → in-page Approve/Reject).
+  if (i.status === "pending" || i.status === "firing") {
+    const acts = el("div", "iacts");
+    const mk = (label, cls, fn) => { const b = el("button", cls, label); b.addEventListener("click", fn); return b; };
+    acts.appendChild(mk("Snooze 1h", "ghost", () => laterAction(i.id, "snooze", new Date(Date.now() + 3600e3).toISOString())));
+    acts.appendChild(mk("Snooze 1d", "ghost", () => laterAction(i.id, "snooze", new Date(Date.now() + 86400e3).toISOString())));
+    acts.appendChild(mk("Done", "primary", () => laterAction(i.id, "done")));
+    acts.appendChild(mk("✕", "danger", () => laterAction(i.id, "cancel")));
+    card.appendChild(acts);
+  }
   laterContent.appendChild(card);
+}
+
+async function laterAction(id, op, until) {
+  // The write parks for approval, which surfaces in the chat stream — switch there so it's visible.
+  setView("chat");
+  const poll = setInterval(pollApprovals, 1000);
+  try {
+    const r = await fetch("/api/prospective/" + encodeURIComponent(id) + "/" + op, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: op === "snooze" ? JSON.stringify({ until }) : "{}",
+    });
+    clearInterval(poll);
+    const j = await r.json();
+    addNote(op + ": " + (j.summary || j.outcome || j.error || "done"));
+  } catch (e) {
+    clearInterval(poll);
+    addNote(op + " failed: " + e.message);
+  }
 }
 
 async function loadLater() {

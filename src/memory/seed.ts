@@ -117,7 +117,7 @@ export const DEFAULT_MEMORY_INSTRUCTIONS: Fact[] = [
   {
     key: "mem.prosp.manage",
     kind: "memory_instruction",
-    text: "Use remind.list to review scheduled intentions (and to get an id), and remind.cancel to cancel one the user no longer wants. Before scheduling something that may already exist, list first or pass a dedupKey so you do not create duplicates.",
+    text: "Use remind.list to review scheduled intentions (and to get an id). Manage them by lifecycle: remind.snooze(id, until) defers a reminder to a later time (\"remind me again in an hour\"); remind.done(id) marks it acknowledged/complete once the user has handled it; remind.cancel(id) drops one they no longer want (distinct from done). Before scheduling something that may already exist, list first or pass a dedupKey so you do not create duplicates.",
     provenance: { origin: "system" },
   },
   // ── World-model protocol (present-tense state, §1) ──

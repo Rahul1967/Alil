@@ -48,6 +48,8 @@ export class ProspectiveStore {
   #toDone: Statement;
   #reschedule: Statement;
   #cancel: Statement;
+  #snooze: Statement;
+  #done: Statement;
   #list: Statement;
   #recover: Statement;
   #expire: Statement;
@@ -83,6 +85,13 @@ export class ProspectiveStore {
     this.#cancel = db.prepare(
       `UPDATE intention SET status = 'cancelled' WHERE id = ? AND status IN ('pending','firing')`,
     );
+    // Snooze: re-arm to a new fire time (works from pending/firing, and from done — "remind me
+    // again in an hour" after it already fired). A cron item resumes its schedule after the snooze fire.
+    this.#snooze = db.prepare(
+      `UPDATE intention SET status = 'pending', fire_at = ? WHERE id = ? AND status IN ('pending','firing','done')`,
+    );
+    // Done: acknowledge/complete an intention (distinct from cancel = "don't want it").
+    this.#done = db.prepare(`UPDATE intention SET status = 'done' WHERE id = ? AND status IN ('pending','firing')`);
     this.#list = db.prepare(`SELECT * FROM intention ORDER BY created_at DESC LIMIT ?`);
     this.#recover = db.prepare(
       `UPDATE intention SET status = 'pending' WHERE status = 'firing' AND fired_at < ?`,
@@ -164,6 +173,16 @@ export class ProspectiveStore {
 
   cancel(id: string): boolean {
     return this.#cancel.run(id).changes >= 1;
+  }
+
+  /** Re-arm an intention to fire at `until` (epoch ms). "Remind me again later." */
+  snooze(id: string, until: number): boolean {
+    return this.#snooze.run(until, id).changes >= 1;
+  }
+
+  /** Mark an intention acknowledged/complete. Returns false if it wasn't live. */
+  done(id: string): boolean {
+    return this.#done.run(id).changes >= 1;
   }
 
   list(limit = 100): Intention[] {

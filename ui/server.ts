@@ -148,6 +148,22 @@ const server = createServer(async (req, res) => {
     return json(200, { items });
   }
 
+  // ── Later actions: snooze / done / cancel — routed through the policy boundary ───
+  const pm = url.pathname.match(/^\/api\/prospective\/([^/]+)\/(snooze|done|cancel)$/);
+  if (req.method === "POST" && pm) {
+    const id = decodeURIComponent(pm[1]!);
+    const op = pm[2]!;
+    try {
+      const body = op === "snooze" ? (JSON.parse((await readBody(req)) || "{}") as { until?: string }) : {};
+      const tool = op === "snooze" ? "remind.snooze" : op === "done" ? "remind.done" : "remind.cancel";
+      const args = op === "snooze" ? { id, until: (body as { until?: string }).until } : { id };
+      const result = await alil.submitAction(tool, args); // gated: parks for in-page approval
+      return json(200, { outcome: result.outcome, summary: result.summary });
+    } catch (e) {
+      return json(500, { error: (e as Error).message });
+    }
+  }
+
   // ── Memory dashboard (read-only inspection) ─────────────────────────────────
   if (req.method === "GET" && url.pathname.startsWith("/api/memory/")) {
     const memory = alil.memory;

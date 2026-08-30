@@ -255,6 +255,13 @@
     .kindtag.decision { background: var(--chan-soft); color: var(--chan); }
     .kindtag.watch { background: var(--signal-soft); color: var(--signal); }
     .kindtag.aspiration { background: var(--sys-soft); color: var(--sys); }
+    .iacts { display: flex; gap: 7px; margin-top: 11px; flex-wrap: wrap; }
+    .iacts button { padding: 6px 11px; border-radius: 8px; cursor: pointer; font: 600 12px/1 "IBM Plex Sans", sans-serif; border: 1px solid transparent; transition: .12s; }
+    .iacts .primary { background: var(--send); color: var(--send-ink); }
+    .iacts .ghost { background: var(--panel); color: var(--ink-soft); border-color: var(--line-strong); }
+    .iacts .ghost:hover { color: var(--ink); border-color: var(--mind); }
+    .iacts .danger { background: var(--panel); color: var(--ink-soft); border-color: var(--line-strong); }
+    .iacts .danger:hover { color: var(--taint); border-color: var(--taint); }
 
     /* ── Memory dashboard ── */
     #memoryView { display: none; max-width: 860px; margin: 0 auto; }

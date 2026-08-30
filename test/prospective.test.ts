@@ -10,6 +10,8 @@ import { Sandbox } from "../src/execution/index.ts";
 import { remindCreate } from "../src/execution/tools/remind-create.ts";
 import { remindList } from "../src/execution/tools/remind-list.ts";
 import { remindCancel } from "../src/execution/tools/remind-cancel.ts";
+import { remindSnooze } from "../src/execution/tools/remind-snooze.ts";
+import { remindDone } from "../src/execution/tools/remind-done.ts";
 import type { ProspectiveStore } from "../src/memory/prospective.ts";
 import type { Intention, IncomingEvent, NewIntention } from "../src/memory/types.ts";
 import type { ToolContext } from "../src/execution/tools/types.ts";
@@ -185,6 +187,50 @@ test("remind.create rejects manual combined with another trigger, and no-trigger
   assert.equal(remindCreate.validate({ title: "t", action: "a", manual: true, at: "2026-10-05T09:00:00Z" }).ok, false); // two triggers
   assert.equal(remindCreate.validate({ title: "t", action: "a" }).ok, false); // zero triggers (manual must be explicit)
   assert.equal(remindCreate.validate({ title: "t", action: "a", manual: true }).ok, true); // manual alone is fine
+});
+
+// ─── lifecycle: snooze + done (Phase C) ───
+test("snooze re-arms a fired reminder to a new time", () => {
+  const { store, cleanup } = fresh();
+  try {
+    const i = once(store, T0);
+    store.markDone(i.id); // simulate it fired
+    assert.equal(store.get(i.id)!.status, "done");
+    const until = T0 + 3600_000;
+    assert.equal(store.snooze(i.id, until), true);
+    const after = store.get(i.id)!;
+    assert.equal(after.status, "pending");
+    assert.equal(after.fireAt, until);
+    // now due at the snoozed time
+    assert.equal(store.due(until).some((x) => x.id === i.id), true);
+  } finally { cleanup(); }
+});
+
+test("done marks a live intention acknowledged; cancel is distinct", () => {
+  const { store, cleanup } = fresh();
+  try {
+    const a = once(store, T0), b = once(store, T0);
+    assert.equal(store.done(a.id), true);
+    assert.equal(store.get(a.id)!.status, "done");
+    assert.equal(store.cancel(b.id), true);
+    assert.equal(store.get(b.id)!.status, "cancelled");
+    // done on an already-done item is a no-op
+    assert.equal(store.done(a.id), false);
+  } finally { cleanup(); }
+});
+
+test("remind.snooze / remind.done validate and run through the tools", async () => {
+  const { store, ctx, cleanup } = fresh();
+  try {
+    const i = once(store, T0);
+    assert.equal(remindSnooze.effect, "write");
+    assert.equal(remindDone.effect, "write");
+    assert.equal(remindSnooze.validate({ id: i.id, until: "nope" }).ok, false);
+    await remindSnooze.run({ id: i.id, until: "2026-09-01T09:00:00Z" }, ctx);
+    assert.equal(store.get(i.id)!.fireAt, Date.parse("2026-09-01T09:00:00Z"));
+    await remindDone.run({ id: i.id }, ctx);
+    assert.equal(store.get(i.id)!.status, "done");
+  } finally { cleanup(); }
 });
 
 // ─── scheduler ───

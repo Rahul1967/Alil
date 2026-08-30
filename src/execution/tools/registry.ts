@@ -20,6 +20,8 @@ import { memoryProcedureUpdate } from "./memory-procedure-update.ts";
 import { remindCreate } from "./remind-create.ts";
 import { remindList } from "./remind-list.ts";
 import { remindCancel } from "./remind-cancel.ts";
+import { remindSnooze } from "./remind-snooze.ts";
+import { remindDone } from "./remind-done.ts";
 import { sendFile } from "./send-file.ts";
 import { worldRead } from "./world-read.ts";
 import { worldTrack } from "./world-track.ts";
@@ -64,6 +66,8 @@ export const DEFAULT_TOOLS: AnyTool[] = [
   remindCreate,
   remindList,
   remindCancel,
+  remindSnooze,
+  remindDone,
   sendFile,
   worldRead,
   worldTrack,

@@ -1,8 +1,8 @@
 import { Brain } from "../runtime/loop.ts";
 import type { BrainPorts } from "../runtime/loop.ts";
 import { DEFAULT_GUARDS } from "../runtime/types.ts";
-import type { BrainInput, BrainTurn, BrainObserver, GuardLimits, MemoryPort } from "../runtime/types.ts";
-import type { Provenance, TranscriptLine } from "../core/types.ts";
+import type { BrainInput, BrainTurn, BrainObserver, GuardLimits, MemoryPort, ActionSink } from "../runtime/types.ts";
+import type { Provenance, TranscriptLine, ActionContract, ToolResult } from "../core/types.ts";
 import { ProviderRegistry, BedrockProvider } from "../providers/index.ts";
 import { PromptAssembler, FilePersonaSource } from "../prompts/index.ts";
 import type { KnowledgeSource } from "../prompts/types.ts";
@@ -92,11 +92,13 @@ export class Alil {
   readonly #episodes: EpisodeManager | null;
   readonly #world: WorldStore;
   readonly #scheduler: Scheduler | null;
+  readonly #actions: ActionSink;
 
   constructor(_config: AlilConfig, binding: ChannelBinding, built: BuiltCore) {
     this.channel = binding.channel;
     this.#binding = binding;
     this.#brain = built.brain;
+    this.#actions = built.actions;
     this.#planService = built.planService;
     this.#audit = built.auditSink;
     this.#ledger = built.ledger;
@@ -162,6 +164,21 @@ export class Alil {
     return result;
   }
 
+  /**
+   * Submit an operator-initiated action (e.g. a Later-view button) through the SAME policy
+   * boundary the model's tool calls cross — so a UI-driven write is gated/approved/audited
+   * identically. Not the model: provenance is operator, so it's never a way to bypass approval.
+   */
+  async submitAction(tool: string, args: Record<string, unknown>): Promise<ToolResult> {
+    const action: ActionContract = {
+      id: `ui_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      tool, args,
+      effect: "write", reversible: false, risk: "medium", classified: false,
+      provenance: { origin: "operator", channel: this.channel },
+    };
+    return this.#actions.submit({ action });
+  }
+
   /** Inject an ambient event: recorded (tainted) in the world-model, may wake an unprompted turn. */
   async ingestEvent(raw: Partial<IncomingEvent>): Promise<void> {
     await this.#eventBus.ingest(toIncomingEvent(raw));
@@ -190,6 +207,7 @@ interface AuditSinkLike { append(evt: string, fields?: Record<string, unknown>):
 
 interface BuiltCore {
   brain: Brain;
+  actions: ActionSink;
   planService: PlanService;
   ledger: AuditLedger;
   auditSink: AuditSinkLike;
@@ -312,7 +330,7 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     },
   });
 
-  alil = new Alil(config, binding, { brain, planService, ledger: audit, auditSink, logger, memory, episodes, world, scheduler, eventBus });
+  alil = new Alil(config, binding, { brain, actions: boundary, planService, ledger: audit, auditSink, logger, memory, episodes, world, scheduler, eventBus });
   return alil;
 }
 
