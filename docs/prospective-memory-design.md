@@ -224,7 +224,134 @@ capture), matching the repo's existing discipline.
 | Someday/aspiration list grows unbounded and rots | human factors | Review digest surfaces + prunes; expiry + supersede keep the live set small |
 | Duplicate/contradictory intentions | integrity | Unique `dedup_key` + `supersedes`; "one good intention per thing" |
 
-## 09 · Open questions
+## 09 · UI — the "Later" view (browser)
+
+Prospective memory is future-directed state the user must be able to **see, trust, and manage** —
+the same "grant ledger visible to the user" ethos as approvals. It gets a first-class home in the
+browser console, reusing the existing design system (semantic-trust palette, cards, tags, tabs).
+
+### 09.1 · Placement
+
+A new top-level toggle beside **Chat / Plan / Memory**: **`Later`**. (Also a `remind.list`-backed
+count badge for what's due today.) The Memory dashboard stays *inspection of the past*; **Later** is
+*management of the future* — distinct enough to be its own view, not a 5th Memory tab.
+
+```
+ alil.          [● model · memory on]                 Chat  Plan  Later ⑶  Memory
+```
+
+### 09.2 · The view
+
+```
+┌───────────────────────────────────────────────────────────────────────────┐
+│  Later                                   2 due today · 5 live · 8 someday   │
+│  ┌─ kind ────────────────────────────────┐   ┌─ status ─────────────────┐  │
+│  │ All  Reminders  Facts  Decisions       │   │ ● Live  Fired  Archived  │  │
+│  │      Someday  Watches                  │   └──────────────────────────┘  │
+│  └────────────────────────────────────────┘                                │
+│                                                                             │
+│  DUE TODAY ───────────────────────────────────────────────────────────     │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ ⏰ reminder   ● live            operator        created Aug 26        │   │
+│  │ EMI loan payment                                                     │   │
+│  │ "Remind the user their EMI is due today."                           │   │
+│  │ ⚡ when we chat on Oct 5  ·  window closes Oct 6 00:00 IST           │   │
+│  │                                        [ Snooze ]  [ Done ]  [ ✕ ]   │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  UPCOMING ────────────────────────────────────────────────────────────     │
+│  │ 🔁 reminder  ● live   standup ping   every Mon 9:00   next Sep 1     │   │
+│  │ ⚡ watch      ● live   build passes   when type=ci status=green      │   │
+│                                                                             │
+│  FACTS FOR LATER ─────────────────────────────────────────────────────     │
+│  │ ◎ fact       ● live   aisle seat     ◎ when "booking travel" arises  │   │
+│  │ ⚠ tainted    from a web page — surfaced marked untrusted             │   │
+│                                                                             │
+│  SOMEDAY / DECISIONS ─────────────────────────────────────────────────     │
+│  │ ✦ someday             read "Thinking in Systems"    manual · review  │   │
+│  │ ⌥ decision            revisit pricing model         manual           │   │
+└───────────────────────────────────────────────────────────────────────────┘
+```
+
+### 09.3 · Card anatomy
+
+```
+ <kind-icon> <kind>   <status-dot> <status>        <provenance-tag>   created <date>
+ <title, bold>
+ "<action — the instruction to future-self>"        (dim)
+ <trigger line, rendered human-readably>  ·  <window / next-fire / expiry>
+                                              [ Snooze ▾ ]  [ Done ]  [ ✕ Cancel ]
+```
+
+- **Kind** sets the icon + accent color (below). **Status dot**: live = op-green (pulsing if due
+  today), fired = amber, snoozed = model-blue, done/expired = ink-faint.
+- **Provenance tag** reuses the memory dashboard's `provTag` — `operator` / `model` / `⚠ ingested`.
+  A tainted fact/decision is visibly flagged (it can't drive an action unprompted; the UI says so).
+- **Trigger line** is the human rendering of the trigger params (next section).
+
+### 09.4 · Trigger → human text (one place, shared with `remind.list`)
+
+| Trigger | Rendered as | Icon |
+|---|---|---|
+| time · once | `⏰ Oct 5, 9:00 AM` (relative when near: "in 2h", "tomorrow 9am") | ⏰ |
+| time · cron | `🔁 every Monday 9:00 · next Sep 1` | 🔁 |
+| event · content | `⚡ when landlord emails` | ⚡ |
+| event · windowed | `⚡ when we chat on Oct 5 · window closes Oct 6` | ⚡ |
+| event · threshold | `⚡ when suit.battery < 20` | ⚡ |
+| context | `◎ when "booking travel" comes up` | ◎ |
+| manual | `✦ via review` | ✦ |
+
+### 09.5 · Color language (semantic, reuses the console palette)
+
+| Kind | Accent | Rationale |
+|---|---|---|
+| reminder / action | `--mind` (teal) | the assistant acting for you |
+| fact | `--model` (blue) | information |
+| decision / plan | `--chan` (purple) | a choice to resume |
+| watch | `--signal` (amber) | a condition being guarded |
+| aspiration / someday | `--sys` (muted gold) | low-urgency, review-only |
+| any, tainted | `--taint` (red) `⚠` | untrusted provenance |
+
+### 09.6 · Interactions (all lifecycle actions are gated writes)
+
+- **Snooze ▾** — quick options (1h / tonight / tomorrow / next week / pick…) → `remind.snooze`.
+- **Done** — `remind.done` (acknowledges; a nag-until-done stops nagging).
+- **Cancel ✕** — `remind.cancel`.
+- **Create** — a `+ Add` affordance opens a small form (title, action, kind, trigger), but the
+  primary capture stays conversational ("remind me…"); the form is the manual/someday entry point.
+
+Because these mutate state, each action **crosses the policy boundary like any tool call** — the UI
+shows the same in-page Approve/Reject card the chat uses. (Read/list is free; write asks.) A
+tainted item's actions are boundary-escalated, consistent with the rest of the system.
+
+### 09.7 · API
+
+- `GET /api/prospective?status=live|fired|archived&kind=…` → `ProspectiveStore.list()` mapped to
+  `{ id, kind, title, action, trigger:{type,human}, status, provenance, createdAt, nextFireAt,
+  expiresAt, tainted }`. (Read-only, mirrors `/api/memory/*`.)
+- `POST /api/prospective/:id/{snooze|done|cancel}` → routed through the boundary (approval flow).
+- Reuses the existing `/api/proactive` stream so a fire also lands as a 🔔 in Chat.
+
+### 09.8 · States
+
+- **Empty:** *"Nothing scheduled yet. Ask Alil to 'remind me…', 'save this for later', or 'add to my
+  someday list.'"*
+- **Due-today badge:** the `Later ⑶` count on the toggle; pulses if anything is overdue.
+- **Loading / error:** same `empty-tab` treatment as the memory dashboard.
+
+### 09.9 · Phasing (matches §07)
+
+1. **Read-only list** (`GET /api/prospective` + the Later view, grouped by kind, human trigger text)
+   — ships against *today's* store (once/cron/event), no schema change. Immediate visibility.
+2. **Cancel** (the one lifecycle action that already exists) wired through the boundary.
+3. **Kind grouping + facts/someday sections** — lands with the schema's `kind` (§07 phase 1).
+4. **Snooze/Done** — lands with the lifecycle phase (§07 phase 2).
+
+Parity note: terminal/telegram already have `remind.list` (text) and `remind.cancel`; the Later view
+is the browser's richer surface over the same store — no channel gets a capability the others lack,
+only a nicer rendering.
+
+## 10 · Open questions
 
 - **Timezone home.** Relative/date triggers need a stable user timezone. Store it as a canonical
   fact and resolve absolute times against it (today it's inferred per-call — fragile).
@@ -232,3 +359,6 @@ capture), matching the repo's existing discipline.
   any travel-adjacent chat). Needs a relevance threshold + a "surfaced recently, cool down" guard.
 - **Digest delivery.** Which channel gets the morning/weekly digest when several are connected?
   Likely a user preference; default to the last-active channel.
+- **Later-view edits vs. approval friction.** Every lifecycle tap crossing the boundary is correct
+  but could feel heavy for a snooze. Option: a low-risk `remind.snooze` classified below the ask
+  threshold (it defers, never acts), so only create/cancel prompt.
