@@ -10,6 +10,7 @@ interface RemindCreateArgs {
   at?: string; // ISO 8601 absolute time → 'once'
   cron?: string; // 5-field cron → recurring
   event?: EventMatch; // predicate → 'event'
+  manual?: boolean; // no automatic trigger → 'manual' (someday / review-only)
   expiresAt?: string; // ISO
   dedupKey?: string;
 }
@@ -26,7 +27,7 @@ const EVENT_TIME_KEYS = new Set(["after", "before"]);
 export const remindCreate: ToolImpl<RemindCreateArgs> = {
   name: "remind.create",
   description:
-    "Schedule something to do later (a reminder, a recurring routine, or an event-triggered action). Give a short `title`, an `action` written as an instruction to your future self (e.g. \"Remind the user to call the dentist\"), and exactly ONE trigger: `at` (an absolute ISO 8601 time, for one-off), `cron` (a 5-field cron expression, for recurring), or `event` (a predicate like {from:\"landlord\", channel:\"email\"} to fire when a matching event arrives). Optionally `expiresAt` (ISO) and a `dedupKey` to avoid duplicates. Compute absolute times yourself from the current date. Requires the user's approval.",
+    "Save something for later (a reminder, a recurring routine, an event-triggered action, or a someday/bucket-list item). Give a short `title`, an `action` written as an instruction to your future self (e.g. \"Remind the user to call the dentist\"), and exactly ONE trigger: `at` (an absolute ISO 8601 time, for one-off), `cron` (a 5-field cron expression, for recurring), `event` (a predicate like {from:\"landlord\", channel:\"email\"} to fire when a matching event arrives), or `manual:true` (no automatic trigger — a someday item or a decision to revisit, kept in the list until it comes up). Optionally `kind`, `expiresAt` (ISO), and a `dedupKey` to avoid duplicates. Compute absolute times yourself from the current date. Requires the user's approval.",
   parameters: {
     type: "object",
     properties: {
@@ -51,6 +52,7 @@ export const remindCreate: ToolImpl<RemindCreateArgs> = {
         },
         additionalProperties: false,
       },
+      manual: { type: "boolean", description: "Set true for a someday/review item with NO automatic trigger (bucket list, a decision to revisit) — it just lives in the list until you bring it up. Mutually exclusive with at/cron/event." },
       expiresAt: { type: "string", description: "Drop the intention if it hasn't fired by this ISO time." },
       dedupKey: { type: "string", description: "Stable key to prevent scheduling the same thing twice." },
     },
@@ -70,10 +72,13 @@ export const remindCreate: ToolImpl<RemindCreateArgs> = {
     const at = args["at"];
     const cron = args["cron"];
     const event = args["event"];
-    const provided = [at !== undefined, cron !== undefined, event !== undefined].filter(Boolean).length;
-    if (provided !== 1) return { ok: false, error: "remind.create needs exactly one of `at`, `cron`, or `event`" };
+    const manual = args["manual"] === true;
+    if (args["manual"] !== undefined && typeof args["manual"] !== "boolean") return { ok: false, error: "`manual` must be a boolean" };
+    const provided = [at !== undefined, cron !== undefined, event !== undefined, manual].filter(Boolean).length;
+    if (provided !== 1) return { ok: false, error: "remind.create needs exactly one trigger: `at`, `cron`, `event`, or `manual:true` (a someday/review item with no automatic trigger)" };
 
     const value: RemindCreateArgs = { title: title.trim(), action: action.trim() };
+    if (manual) value.manual = true;
 
     const kind = args["kind"];
     if (kind !== undefined) {
@@ -132,7 +137,7 @@ export const remindCreate: ToolImpl<RemindCreateArgs> = {
     const store = ctx.prospective?.store;
     if (!store) throw new Error("prospective memory is not available");
 
-    const trigger: IntentionTrigger = args.at ? "once" : args.cron ? "cron" : "event";
+    const trigger: IntentionTrigger = args.at ? "once" : args.cron ? "cron" : args.event ? "event" : "manual";
     const n: NewIntention = {
       title: args.title,
       action: args.action,
@@ -153,7 +158,8 @@ export const remindCreate: ToolImpl<RemindCreateArgs> = {
     const whenText =
       trigger === "once" ? `at ${new Date(intention.fireAt!).toISOString()}` :
       trigger === "cron" ? `on schedule "${args.cron}" (next ${intention.fireAt ? new Date(intention.fireAt).toISOString() : "?"})` :
-      `when an event matches ${JSON.stringify(args.event)}`;
+      trigger === "event" ? `when an event matches ${JSON.stringify(args.event)}` :
+      `with no automatic trigger (someday / review-only)`;
     return { summary: `scheduled "${intention.title}" ${whenText}`, data: { id: intention.id, trigger, created: true } };
   },
 };

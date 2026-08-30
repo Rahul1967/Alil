@@ -186,7 +186,7 @@ export interface MemoryStore {
 // Externalized to durable storage because LLMs hold future intentions unreliably (PM-Bench,
 // TriggerBench). The model CREATES an intention via a tool; a scheduler owns the clock and the
 // wake. Firing re-enters as a normal turn, so the policy boundary re-checks at fire time.
-export type IntentionTrigger = "once" | "cron" | "event";
+export type IntentionTrigger = "once" | "cron" | "event" | "manual";
 export type IntentionStatus = "pending" | "firing" | "done" | "cancelled" | "expired";
 /**
  * What a prospective item IS (vs. what triggers it). Shapes how Alil surfaces it: a `reminder`

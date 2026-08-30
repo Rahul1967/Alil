@@ -164,6 +164,29 @@ test("remind.list surfaces the kind", async () => {
   } finally { cleanup(); }
 });
 
+// ─── manual / someday trigger (Phase B) ───
+test("a manual item is created with no trigger and never auto-fires", async () => {
+  const { store, ctx, cleanup } = fresh();
+  try {
+    const r = remindCreate.validate({ title: "read Thinking in Systems", action: "surface in review", manual: true, kind: "aspiration" });
+    assert.equal(r.ok, true);
+    const out = await remindCreate.run((r as { value: Parameters<typeof remindCreate.run>[0] }).value, ctx);
+    const item = store.get((out.data as { id: string }).id)!;
+    assert.equal(item.trigger, "manual");
+    assert.equal(item.kind, "aspiration");
+    assert.equal(item.fireAt, null);
+    // The scheduler ignores it: not time-due, not event-matched.
+    assert.equal(store.due(Date.now() + 1e12).some((i) => i.id === item.id), false);
+    assert.equal(store.matchEvent({ channel: "x", text: "anything", provenance: { origin: "user_channel" } }, Date.now()).some((i) => i.id === item.id), false);
+  } finally { cleanup(); }
+});
+
+test("remind.create rejects manual combined with another trigger, and no-trigger-at-all", () => {
+  assert.equal(remindCreate.validate({ title: "t", action: "a", manual: true, at: "2026-10-05T09:00:00Z" }).ok, false); // two triggers
+  assert.equal(remindCreate.validate({ title: "t", action: "a" }).ok, false); // zero triggers (manual must be explicit)
+  assert.equal(remindCreate.validate({ title: "t", action: "a", manual: true }).ok, true); // manual alone is fine
+});
+
 // ─── scheduler ───
 
 function schedulerWith(store: ProspectiveStore, fired: Intention[], now: () => number, cronNext?: (e: string, a: number) => number | null) {

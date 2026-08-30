@@ -105,6 +105,7 @@ function humanTrigger(i: import("../src/memory/types.ts").Intention): string {
     }
     return s;
   }
+  if (i.trigger === "manual") return "✦ someday · no automatic trigger";
   return i.trigger;
 }
 
