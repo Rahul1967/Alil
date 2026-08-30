@@ -196,7 +196,7 @@ export class Brain {
         const result = await this.#ports.actions.submit(proposed);
         results.push(result);
         roundResults.push(result);
-        observer?.onToolResult?.({ tool: call.tool, outcome: result.outcome, summary: result.summary });
+        observer?.onToolResult?.({ tool: call.tool, outcome: result.outcome, summary: result.summary, ...(result.data !== undefined ? { data: result.data } : {}) });
         toolResults.push({ toolCallId: call.id, content: toolResultContent(result) });
         // Cancelled mid-batch: stop launching further tools and end the turn cleanly.
         if (signal?.aborted) return aborted();

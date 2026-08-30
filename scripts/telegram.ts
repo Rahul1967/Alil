@@ -9,7 +9,7 @@
  *   or: npm run telegram -- <BOT_TOKEN> <USER_ID>
  */
 import { randomUUID } from "node:crypto";
-import { createAlil } from "../src/app/index.ts";
+import { createAlil, debugEnabled } from "../src/app/index.ts";
 import type { ChannelBinding } from "../src/app/index.ts";
 import type { ApprovalPort, ApprovalRequest, ApprovalDecision } from "../src/policy/index.ts";
 import { TelegramClient, runTelegramLoop } from "../src/channels/telegram.ts";
@@ -95,7 +95,7 @@ const binding: ChannelBinding = {
     }
   },
 };
-const alil = createAlil({ modelId }, binding);
+const alil = createAlil({ modelId, debug: debugEnabled() }, binding);
 
 // getUpdates offset persisted in the memory DB so a restart never drops/replays messages.
 function loadOffset(): number {

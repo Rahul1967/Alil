@@ -95,7 +95,7 @@ export interface ToolCatalogPort {
 export interface BrainObserver {
   onModelTurn?(e: { iteration: number; text?: string; toolCalls: number }): void;
   onToolCall?(e: { tool: string; args: Record<string, unknown> }): void;
-  onToolResult?(e: { tool: string; outcome: ToolResult["outcome"]; summary: string }): void;
+  onToolResult?(e: { tool: string; outcome: ToolResult["outcome"]; summary: string; data?: unknown }): void;
   onHalt?(e: { reason: string; kind: "guard" | "error" | "aborted" }): void;
 }
 

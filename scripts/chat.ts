@@ -10,7 +10,7 @@
  */
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import { createAlil } from "../src/app/index.ts";
+import { createAlil, debugEnabled } from "../src/app/index.ts";
 import type { ChannelBinding } from "../src/app/index.ts";
 import type { ApprovalPort, ApprovalRequest, ApprovalDecision } from "../src/policy/index.ts";
 import type { BrainObserver } from "../src/runtime/types.ts";
@@ -67,9 +67,10 @@ const binding: ChannelBinding = {
   },
 };
 
-const alil = createAlil({ modelId }, binding);
+const debug = debugEnabled();
+const alil = createAlil({ modelId, debug }, binding);
 alil.start();
-console.log(`Alil terminal channel · model: ${modelId} · memory: ${alil.memoryOn ? "on" : "off"}`);
+console.log(`Alil terminal channel · model: ${modelId} · memory: ${alil.memoryOn ? "on" : "off"}${debug ? " · debug: on" : ""}`);
 
 // ── REPL loop ───────────────────────────────────────────────────────────────
 let current: AbortController | null = null;

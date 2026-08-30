@@ -21,6 +21,7 @@ import type { EventBus } from "../gateway/index.ts";
 import { TurnQueue } from "../gateway/index.ts";
 import { PlanService, type PlanRunOptions } from "./plan-service.ts";
 import { createAmbientBus, toIncomingEvent } from "./ambient.ts";
+import { DebugLogger, composeObservers, tapRecall, tapWorld, tapAudit } from "./debug.ts";
 import type { PlanResult } from "../runtime/plan-types.ts";
 import type { TriggerRule } from "../gateway/ingest/types.ts";
 import type { RateLimiter } from "../gateway/ingest/rate-limiter.ts";
@@ -61,6 +62,9 @@ export interface AlilConfig {
   ambientLimiter?: RateLimiter;
   /** Injectable for tests; defaults to a Bedrock-backed registry. */
   registry?: ProviderRegistry;
+  /** Debug trace: log recall, world-state, every tool call/response, policy verdicts, and ambient
+   * events to stderr. Channel-agnostic — enabled the same way on every channel. */
+  debug?: boolean;
 }
 
 export interface RunTurnOptions {
@@ -81,24 +85,27 @@ export class Alil {
   readonly #queue = new TurnQueue();
   readonly #planService: PlanService;
   readonly #eventBus: EventBus;
-  readonly #audit: AuditLedger;
+  readonly #audit: AuditSinkLike; // tapped when debug is on
+  readonly #ledger: AuditLedger; // the real ledger (verify/tail)
+  readonly #logger: DebugLogger | null;
   readonly #memory: MemorySystem | null;
   readonly #episodes: EpisodeManager | null;
   readonly #world: WorldStore;
   readonly #scheduler: Scheduler | null;
 
-  constructor(config: AlilConfig, binding: ChannelBinding, built: BuiltCore) {
+  constructor(_config: AlilConfig, binding: ChannelBinding, built: BuiltCore) {
     this.channel = binding.channel;
     this.#binding = binding;
     this.#brain = built.brain;
     this.#planService = built.planService;
-    this.#audit = built.audit;
+    this.#audit = built.auditSink;
+    this.#ledger = built.ledger;
+    this.#logger = built.logger;
     this.#memory = built.memory;
     this.#episodes = built.episodes;
     this.#world = built.world;
     this.#scheduler = built.scheduler;
     this.#eventBus = built.eventBus;
-    void config;
   }
 
   /** The world-model, for channels that want to surface present-tense state. */
@@ -106,7 +113,7 @@ export class Alil {
     return this.#world;
   }
   get audit(): AuditLedger {
-    return this.#audit;
+    return this.#ledger;
   }
   get memoryOn(): boolean {
     return this.#memory !== null;
@@ -130,7 +137,9 @@ export class Alil {
       const at = new Date().toISOString();
       const episodeId = this.#episodes ? await this.#episodes.beginTurn(at) : "ep";
       const input: BrainInput = { sessionId: this.channel, message: { text, provenance }, history: this.loadHistory() };
+      this.#logger?.turnStart(this.channel, opts.label ?? "turn", text, provenance);
       const turn = await this.#brain.run(input, { signal: anySignal(queueSignal, opts.signal) });
+      this.#logger?.turnEnd(turn);
       if (turn.stopReason === "complete" && this.#memory) {
         this.#memory.timeline.append({ at, channel: this.channel, provenance, episodeId, role: "user", text });
         if (turn.assistantText !== undefined) {
@@ -173,10 +182,14 @@ export class Alil {
   }
 }
 
+interface AuditSinkLike { append(evt: string, fields?: Record<string, unknown>): unknown }
+
 interface BuiltCore {
   brain: Brain;
   planService: PlanService;
-  audit: AuditLedger;
+  ledger: AuditLedger;
+  auditSink: AuditSinkLike;
+  logger: DebugLogger | null;
   memory: MemorySystem | null;
   episodes: EpisodeManager | null;
   world: WorldStore;
@@ -192,6 +205,10 @@ interface BuiltCore {
 export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
   const registry = config.registry ?? new ProviderRegistry().register(new BedrockProvider());
   const audit = new AuditLedger(config.auditPath ?? "workspace/logs/audit.jsonl");
+  // Debug: one logger, wired below as the observer + recall/world/audit taps, so every channel
+  // gets the same background trace from `--debug`.
+  const logger = config.debug ? new DebugLogger() : null;
+  const auditSink = logger ? tapAudit(audit, logger) : audit;
   const sandboxRoot = config.sandboxRoot ?? process.env.ALIL_SANDBOX_ROOT ?? "workspace";
   const world = new WorldStore({
     path: config.worldPath ?? "workspace/.alil/world.json",
@@ -218,7 +235,7 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
       timeline: memory.timeline,
       store: memory.store,
       summarizer: new ExtractiveSummarizer(),
-      onMemoryWrite: (e) => audit.append("episode.distill", { episodeId: e.episodeId, lines: e.lines }),
+      onMemoryWrite: (e) => auditSink.append("episode.distill", { episodeId: e.episodeId, lines: e.lines }),
     });
   } catch {
     // Native module / DB unavailable — run without persistence rather than crash.
@@ -240,17 +257,18 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     approvals: binding.approvals,
     grants: new GrantStore(),
     workspaceRoot: sandboxRoot,
-    audit,
+    audit: auditSink,
   });
 
+  const observer = logger ? composeObservers(binding.observer, logger) : binding.observer;
   const ports: BrainPorts = {
-    memory: memoryPort,
+    memory: logger ? tapRecall(memoryPort, logger) : memoryPort,
     skills: { eligible: async () => [] },
     tools: new RegistryToolCatalog(DEFAULT_TOOLS),
     prompt: new PromptAssembler(new FilePersonaSource(), { env: { now: () => new Date() }, ...(knowledge ? { knowledge } : {}) }),
     actions: boundary,
-    world,
-    ...(binding.observer ? { observer: binding.observer } : {}),
+    world: logger ? tapWorld(world, logger) : world,
+    ...(observer ? { observer } : {}),
   };
   const brain = new Brain({ modelId: config.modelId, guards: config.guards ?? DEFAULT_GUARDS }, registry, ports);
 
@@ -277,7 +295,7 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     : null;
 
   const eventBus = createAmbientBus({
-    world, audit,
+    world, audit: auditSink,
     ...(scheduler ? { scheduler } : {}),
     ...(config.triggers ? { triggers: config.triggers } : {}),
     ...(config.ambientLimiter ? { limiter: config.ambientLimiter } : {}),
@@ -287,7 +305,7 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     },
   });
 
-  alil = new Alil(config, binding, { brain, planService, audit, memory, episodes, world, scheduler, eventBus });
+  alil = new Alil(config, binding, { brain, planService, ledger: audit, auditSink, logger, memory, episodes, world, scheduler, eventBus });
   return alil;
 }
 

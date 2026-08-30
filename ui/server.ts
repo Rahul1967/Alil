@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
 import type { BrainObserver } from "../src/runtime/types.ts";
 import type { ApprovalPort, ApprovalRequest, ApprovalDecision } from "../src/policy/index.ts";
-import { createAlil } from "../src/app/index.ts";
+import { createAlil, debugEnabled } from "../src/app/index.ts";
 import type { ChannelBinding } from "../src/app/index.ts";
 
 const PORT = Number(process.env.PORT ?? 8787);
@@ -68,7 +68,8 @@ const binding: ChannelBinding = {
     if (proactive.length > 50) proactive.shift();
   },
 };
-const alil = createAlil({ modelId }, binding);
+const debug = debugEnabled();
+const alil = createAlil({ modelId, debug }, binding);
 alil.start();
 
 interface ChatReply { reply: string; trace: string[]; iterations: number; stopReason: string }
@@ -212,6 +213,6 @@ const server = createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`Alil browser channel → http://localhost:${PORT}`);
-  console.log(`  model: ${modelId} · memory: ${alil.memoryOn ? "on" : "off"}`);
+  console.log(`  model: ${modelId} · memory: ${alil.memoryOn ? "on" : "off"}${debug ? " · debug: on" : ""}`);
   console.log(`  reads run automatically; writes/high-risk tools prompt for Approve/Reject in the page`);
 });
