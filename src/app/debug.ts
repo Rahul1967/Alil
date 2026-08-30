@@ -56,8 +56,11 @@ export class DebugLogger implements BrainObserver {
   worldState(block: string | null): void {
     if (!this.#open) return;
     if (!block) { this.#line(mag("⟐ world  ") + dim("(empty)")); return; }
-    const head = block.split("\n").filter((l) => !l.startsWith("  ")).join(" · ");
-    this.#line(mag("⟐ world  ") + dim(clip(head, 120)));
+    // Show the actual state the model saw — section headers AND their items, compactly.
+    const lines = block.split("\n").map((l) => l.trim()).filter(Boolean);
+    this.#line(mag("⟐ world"));
+    for (const l of lines.slice(0, 8)) this.#line(dim("   " + clip(l, 110)));
+    if (lines.length > 8) this.#line(dim(`   …(+${lines.length - 8} more)`));
   }
 
   onModelTurn(e: { iteration: number; text?: string; toolCalls: number }): void {

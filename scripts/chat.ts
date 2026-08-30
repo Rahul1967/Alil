@@ -57,17 +57,18 @@ const observer: BrainObserver = {
   },
 };
 
+const debug = debugEnabled();
 const binding: ChannelBinding = {
   channel: "terminal",
   approvals,
-  observer,
+  // In debug mode the richer debug trace replaces this display observer, so we don't print twice.
+  ...(debug ? {} : { observer }),
   notify: async (text, meta) => {
     const tag = meta.source === "scheduled" ? `⏰ ${meta.label ?? ""}` : `🔔 (ambient · ${meta.label ?? ""})`;
     stdout.write(`\n${tag} › ${text}\n\nyou › `);
   },
 };
 
-const debug = debugEnabled();
 const alil = createAlil({ modelId, debug }, binding);
 alil.start();
 console.log(`Alil terminal channel · model: ${modelId} · memory: ${alil.memoryOn ? "on" : "off"}${debug ? " · debug: on" : ""}`);
