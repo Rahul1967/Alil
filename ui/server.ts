@@ -85,6 +85,29 @@ const MIME: Record<string, string> = {
   ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
 };
+const iso = (ms: number | null): string | null => (ms ? new Date(ms).toISOString() : null);
+
+/** Render an intention's trigger as human-readable text for the Later view. */
+function humanTrigger(i: import("../src/memory/types.ts").Intention): string {
+  if (i.trigger === "once") return `⏰ ${iso(i.fireAt) ?? "?"}`;
+  if (i.trigger === "cron") return `🔁 ${i.cronExpr ?? "?"}${i.fireAt ? ` · next ${iso(i.fireAt)}` : ""}`;
+  if (i.trigger === "event") {
+    const m = i.eventMatch ?? {};
+    const parts: string[] = [];
+    if (m.from) parts.push(`from ${m.from}`);
+    if (m.subject) parts.push(`subject~${m.subject}`);
+    if (m.contains) parts.push(`~"${m.contains}"`);
+    if (m.channel) parts.push(`on ${m.channel}`);
+    if (m.type) parts.push(`type ${m.type}`);
+    let s = `⚡ when ${parts.length ? parts.join(", ") : "an event arrives"}`;
+    if (m.after !== undefined || m.before !== undefined) {
+      s += ` · window ${m.after !== undefined ? iso(m.after) : ""}–${m.before !== undefined ? iso(m.before) : ""}`;
+    }
+    return s;
+  }
+  return i.trigger;
+}
+
 function readBody(req: import("node:http").IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = "";
@@ -106,6 +129,22 @@ const server = createServer(async (req, res) => {
   if (req.method === "GET" && url.pathname === "/api/proactive") {
     const since = Number(url.searchParams.get("since") ?? 0) || 0;
     return json(200, { items: proactive.filter((p) => p.id > since) });
+  }
+
+  // ── Prospective memory (the "Later" view) — read-only list ──────────────────
+  if (req.method === "GET" && url.pathname === "/api/prospective") {
+    const store = alil.prospective;
+    if (!store) return json(503, { error: "memory off" });
+    const items = store.list(200).map((i) => {
+      const tainted = i.provenance.origin === "ingested" || (i.provenance.taintedBy?.length ?? 0) > 0;
+      return {
+        id: i.id, kind: i.kind, title: i.title, action: i.action,
+        trigger: i.trigger, when: humanTrigger(i), status: i.status,
+        provenance: i.provenance, tainted,
+        createdAt: iso(i.createdAt), nextFireAt: iso(i.fireAt), expiresAt: iso(i.expiresAt),
+      };
+    });
+    return json(200, { items });
   }
 
   // ── Memory dashboard (read-only inspection) ─────────────────────────────────

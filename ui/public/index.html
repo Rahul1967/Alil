@@ -224,6 +224,38 @@
     /* Proactive (ambient / scheduled) note in the chat stream */
     .note.proactive { background: var(--signal-soft); border-color: var(--signal-line); color: var(--ink); max-width: 560px; white-space: pre-wrap; text-align: left; }
 
+    /* ── Later view (prospective memory) ── */
+    #laterView { display: none; max-width: 760px; margin: 0 auto; }
+    #laterView.show { display: block; }
+    .later-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+    .later-filters { display: flex; gap: 3px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 3px; }
+    .later-filters button { height: 28px; padding: 0 12px; border: none; border-radius: 7px; background: transparent; color: var(--ink-soft); font: 600 12.5px/1 "IBM Plex Sans", sans-serif; cursor: pointer; transition: .12s; }
+    .later-filters button.active { background: var(--panel); color: var(--ink); box-shadow: var(--shadow); }
+    .later-section { font: 600 12px/1 "IBM Plex Mono", monospace; color: var(--ink-faint); text-transform: uppercase; letter-spacing: .06em; margin: 20px 0 9px; }
+    .later-section:first-child { margin-top: 0; }
+    /* Kind accent on the card's left edge (semantic: kind → palette). */
+    .icard { border: 1px solid var(--line); border-left: 3px solid var(--line-strong); border-radius: 4px 11px 11px 4px; padding: 12px 15px; background: var(--panel); box-shadow: var(--shadow); }
+    .icard.reminder { border-left-color: var(--mind); }
+    .icard.fact { border-left-color: var(--model); }
+    .icard.decision { border-left-color: var(--chan); }
+    .icard.watch { border-left-color: var(--signal); }
+    .icard.aspiration { border-left-color: var(--sys); }
+    .icard.tainted { border-left-color: var(--taint); }
+    .icard .top { display: flex; align-items: center; gap: 9px; margin-bottom: 5px; flex-wrap: wrap; }
+    .icard .title { font: 600 14.5px/1.3 "IBM Plex Sans", sans-serif; }
+    .icard .act { color: var(--ink-soft); font-size: 13px; margin: 2px 0 7px; }
+    .icard .when { font: 500 12.5px/1.5 "IBM Plex Mono", monospace; color: var(--ink); }
+    .icard .foot { font: 500 11px/1.5 "IBM Plex Mono", monospace; color: var(--ink-faint); margin-top: 6px; display: flex; gap: 12px; flex-wrap: wrap; }
+    .sdot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+    .sdot.pending, .sdot.firing { background: var(--op); }
+    .sdot.done, .sdot.cancelled, .sdot.expired { background: var(--ink-faint); }
+    .kindtag { padding: 2px 9px; border-radius: 99px; font: 600 11px/1.5 "IBM Plex Mono", monospace; }
+    .kindtag.reminder { background: var(--mind-soft); color: var(--mind); }
+    .kindtag.fact { background: var(--model-soft); color: var(--model); }
+    .kindtag.decision { background: var(--chan-soft); color: var(--chan); }
+    .kindtag.watch { background: var(--signal-soft); color: var(--signal); }
+    .kindtag.aspiration { background: var(--sys-soft); color: var(--sys); }
+
     /* ── Memory dashboard ── */
     #memoryView { display: none; max-width: 860px; margin: 0 auto; }
     #memoryView.show { display: block; }
@@ -272,6 +304,7 @@
     <div class="toggle">
       <button id="tabChat" class="active">Chat</button>
       <button id="tabPlan">Plan</button>
+      <button id="tabLater">Later</button>
       <button id="tabMemory">Memory</button>
     </div>
   </header>
@@ -308,6 +341,16 @@
         <div class="panel-btns"><button id="evtInject" class="primary">Inject event</button></div>
         <div id="evtResult" class="panel-sub"></div>
       </div>
+    </div>
+    <div id="laterView">
+      <div class="later-head">
+        <div class="later-filters" id="laterStatus">
+          <button data-status="live" class="active">Live</button>
+          <button data-status="archived">Archived</button>
+          <button data-status="all">All</button>
+        </div>
+      </div>
+      <div class="rows" id="laterContent"></div>
     </div>
     <div id="memoryView">
       <div class="tabs">

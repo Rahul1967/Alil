@@ -122,6 +122,10 @@ export class Alil {
   get memory(): MemorySystem | null {
     return this.#memory;
   }
+  /** Prospective memory store (or null), for the browser "Later" view. */
+  get prospective(): ProspectiveStore | null {
+    return this.#memory?.prospective ?? null;
+  }
 
   /** Run one turn on the shared queue: assemble context, think, record to timeline + audit. */
   async runTurn(text: string, provenance: Provenance, opts: RunTurnOptions = {}): Promise<BrainTurn> {

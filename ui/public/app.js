@@ -178,10 +178,12 @@ input.addEventListener("input", () => {
 // ── Memory dashboard ──────────────────────────────────────────────────────────
 const chatView = document.getElementById("chatView");
 const planView = document.getElementById("planView");
+const laterView = document.getElementById("laterView");
 const memoryView = document.getElementById("memoryView");
 const footer = document.querySelector("footer");
 const tabChat = document.getElementById("tabChat");
 const tabPlan = document.getElementById("tabPlan");
+const tabLater = document.getElementById("tabLater");
 const tabMemory = document.getElementById("tabMemory");
 const memContent = document.getElementById("memContent");
 let memView = "timeline";
@@ -215,13 +217,16 @@ function setView(which) {
   chatView.style.display = which === "chat" ? "" : "none";
   footer.style.display = which === "chat" ? "" : "none";
   planView.classList.toggle("show", which === "plan");
+  laterView.classList.toggle("show", which === "later");
   memoryView.classList.toggle("show", which === "memory");
   tabChat.classList.toggle("active", which === "chat");
   tabPlan.classList.toggle("active", which === "plan");
+  tabLater.classList.toggle("active", which === "later");
   tabMemory.classList.toggle("active", which === "memory");
 }
 tabChat.addEventListener("click", () => setView("chat"));
 tabPlan.addEventListener("click", () => setView("plan"));
+tabLater.addEventListener("click", () => { setView("later"); loadLater(); });
 tabMemory.addEventListener("click", () => { setView("memory"); loadStats(); loadMemory(memView); });
 
 document.querySelectorAll(".tabs button").forEach((b) => {
@@ -357,6 +362,72 @@ function renderCanonical(f) {
   card.appendChild(meta);
   card.appendChild(el("div", "body", f.text));
   memContent.appendChild(card);
+}
+
+// ── Later view (prospective memory) ─────────────────────────────────────────────
+const laterContent = document.getElementById("laterContent");
+let laterStatus = "live";
+const KIND_ORDER = ["reminder", "watch", "fact", "decision", "aspiration"];
+const KIND_SECTION = { reminder: "Reminders", watch: "Watches", fact: "Facts for later", decision: "Decisions", aspiration: "Someday" };
+const STATUS_BUCKET = { pending: "live", firing: "live", done: "archived", cancelled: "archived", expired: "archived" };
+
+document.querySelectorAll("#laterStatus button").forEach((b) => {
+  b.addEventListener("click", () => {
+    document.querySelectorAll("#laterStatus button").forEach((x) => x.classList.remove("active"));
+    b.classList.add("active");
+    laterStatus = b.getAttribute("data-status");
+    loadLater();
+  });
+});
+
+function shortDate(iso) {
+  if (!iso) return "";
+  try { return new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }); } catch { return iso; }
+}
+
+function renderIntention(i) {
+  const card = el("div", "icard " + (i.tainted ? "tainted" : i.kind));
+  const top = el("div", "top");
+  top.appendChild(el("span", "sdot " + i.status));
+  top.appendChild(el("span", "kindtag " + i.kind, i.kind));
+  if (i.tainted) top.appendChild(el("span", "tag tainted", i.provenance.origin + " ⚠"));
+  top.appendChild(el("span", "title", i.title));
+  card.appendChild(top);
+  if (i.action) card.appendChild(el("div", "act", "“" + i.action + "”"));
+  // The trigger's leading emoji is data from the server; render as text.
+  card.appendChild(el("div", "when", i.when));
+  const foot = el("div", "foot");
+  foot.appendChild(el("span", null, i.status));
+  if (i.expiresAt) foot.appendChild(el("span", null, "expires " + shortDate(i.expiresAt)));
+  foot.appendChild(el("span", null, "added " + shortDate(i.createdAt)));
+  card.appendChild(foot);
+  laterContent.appendChild(card);
+}
+
+async function loadLater() {
+  laterContent.innerHTML = "";
+  laterContent.appendChild(el("div", "empty-tab", "loading…"));
+  let items;
+  try {
+    items = (await (await fetch("/api/prospective")).json()).items || [];
+  } catch (e) {
+    laterContent.innerHTML = ""; laterContent.appendChild(el("div", "empty-tab", "error: " + e.message)); return;
+  }
+  const filtered = items.filter((i) => laterStatus === "all" || STATUS_BUCKET[i.status] === laterStatus);
+  laterContent.innerHTML = "";
+  if (filtered.length === 0) {
+    laterContent.appendChild(el("div", "empty-tab", laterStatus === "live"
+      ? "Nothing scheduled. Ask Alil to “remind me…”, “save this for later”, or “add to my someday list.”"
+      : "nothing here"));
+    return;
+  }
+  for (const kind of KIND_ORDER) {
+    const group = filtered.filter((i) => i.kind === kind);
+    if (group.length === 0) continue;
+    laterContent.appendChild(el("div", "later-section", KIND_SECTION[kind] + " · " + group.length));
+    group.sort((a, b) => (a.nextFireAt || "9999").localeCompare(b.nextFireAt || "9999"));
+    group.forEach(renderIntention);
+  }
 }
 
 // ── Plan view ──────────────────────────────────────────────────────────────────
