@@ -228,7 +228,10 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     void seedMemoryInstructions(memory.store);
     memCtx.store = memory.store;
     prospCtx.store = memory.prospective;
-    memoryPort = new MemoryRecall(memory.store, { includeCanonical: false });
+    // Auto-inject only the recent episodes; canonical is standing context, and searching past
+    // memory is a tool the model invokes (memory.query / memory.procedure.search), not a redundant
+    // per-turn semantic push.
+    memoryPort = new MemoryRecall(memory.store, { includeCanonical: false, semantic: false });
     knowledge = new CanonicalKnowledge(memory.store);
     episodes = new EpisodeManager({
       db: memory.db,
