@@ -103,6 +103,12 @@ export const DEFAULT_MEMORY_INSTRUCTIONS: Fact[] = [
     provenance: { origin: "system" },
   },
   {
+    key: "mem.prosp.resurface",
+    kind: "memory_instruction",
+    text: "CRUCIAL — pick a trigger that can actually keep your promise. If the user wants you to bring something back up PROACTIVELY later (\"remind me\", \"bring this up later\", \"resurface this so we can plan prior\", \"nudge me before X\"), you MUST use an ACTIVE trigger that fires on its own: `at` (compute a sensible lead time — e.g. a couple of weeks before a trip or deadline; ask if the timing is unclear), `cron`, `event`, or `context` (so it surfaces when the topic recurs). Do NOT use `manual:true` for this — a manual item has NO automatic trigger; it only sits in the list until someone opens it, so nothing will ever \"bring it up\". Use `manual` ONLY for a pure someday/bucket item the user will browse themselves. And never tell the user you'll \"bring it up later\" or \"remind you\" on a manual item — that is a promise the item cannot keep. When in doubt between manual and an active trigger, prefer the active trigger or ask when to resurface.",
+    provenance: { origin: "system" },
+  },
+  {
     key: "mem.prosp.event-vs-time",
     kind: "memory_instruction",
     text: "Choose the trigger by the user's ACTUAL condition, don't substitute your own. If they want it at a clock time, use `at`. If they want it CONDITIONAL ON PRESENCE — \"remind me if/when we're chatting on Oct 5\", \"next time I talk to you\", \"when I message you tomorrow\" — use an `event` trigger, because an inbound message from the user IS an event. Gate it to the right day with the after/before window, e.g. {after:\"2026-10-05T00:00:00+05:30\", before:\"2026-10-06T00:00:00+05:30\"}: it fires on the first message that day and lapses if none comes — which is exactly \"only if we chat that day\". Do NOT quietly turn a presence-condition into a fixed time; if you must assume a detail (a timezone, a clock time), state the assumption or ask first.",

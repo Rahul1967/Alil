@@ -23,7 +23,7 @@ rules:
   # ── ask (always require a human, regardless of mode) ──
   - kind: ask
     match: { effect: write }
-    note: "confirm before writing files"
+    note: "confirm before writing/persisting (files, memory, reminders, world state)"
   - kind: ask
     match: { effect: execute }
     note: "confirm before executing commands"
