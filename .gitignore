@@ -7,6 +7,7 @@ workspace/logs/
 workspace/memory.db
 workspace/memory.db-wal
 workspace/memory.db-shm
+workspace/DOSSIER/
 
 # Claude Code local settings + temp files
 .claude/
