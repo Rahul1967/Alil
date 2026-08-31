@@ -64,7 +64,7 @@ export interface Embedder {
   embed(texts: string[]): Promise<Float32Array[]>;
 }
 
-export type ChunkKind = "turn" | "episode" | "canonical" | "procedure";
+export type ChunkKind = "turn" | "episode" | "canonical" | "procedure" | "intention";
 
 // ─── EpisodeHit: a semantic-search result over past conversations (memory.query) ───
 export interface EpisodeHit {
@@ -169,6 +169,14 @@ export interface MemoryStore {
   /** Index a closed episode's summary + turns for future recall. */
   index(episode: Episode, lines: TimelineLine[]): Promise<void>;
 
+  // ─── Context-triggered intentions (facts-for-later, §D) ───
+  /** Index a context intention's cue so it can be matched against future turns. */
+  indexContextCue(id: string, cue: string, provenance: Provenance): Promise<void>;
+  /** Cues relevant to the current turn (keyword-anchored). The caller filters to live intentions. */
+  searchContextCues(query: string, k: number): Promise<ContextHit[]>;
+  /** Remove a context intention's cue from the index (on cancel/done/expire). */
+  removeContextCue(id: string): void;
+
   // ─── Procedural tier (§7a) ───
   /** Search proven methods for the current task (embeds `trigger`); abstraction returned inline. */
   searchProcedures(query: string, k: number): Promise<ProcedureHit[]>;
@@ -186,7 +194,14 @@ export interface MemoryStore {
 // Externalized to durable storage because LLMs hold future intentions unreliably (PM-Bench,
 // TriggerBench). The model CREATES an intention via a tool; a scheduler owns the clock and the
 // wake. Firing re-enters as a normal turn, so the policy boundary re-checks at fire time.
-export type IntentionTrigger = "once" | "cron" | "event" | "manual";
+export type IntentionTrigger = "once" | "cron" | "event" | "manual" | "context";
+
+/** A context-triggered intention matched against the current turn (facts-for-later). */
+export interface ContextHit {
+  id: string; // intention id (chunk ref)
+  cue: string; // the phrase describing WHEN it's relevant
+  provenance: Provenance;
+}
 export type IntentionStatus = "pending" | "firing" | "done" | "cancelled" | "expired";
 /**
  * What a prospective item IS (vs. what triggers it). Shapes how Alil surfaces it: a `reminder`
@@ -227,6 +242,7 @@ export interface Intention {
   fireAt: number | null; // epoch ms; next fire for once/cron, null for pure event
   cronExpr: string | null; // recurrence, null unless cron
   eventMatch: EventMatch | null; // null unless event
+  contextCue: string | null; // null unless context — the phrase describing WHEN it's relevant
   status: IntentionStatus;
   dedupKey: string | null; // idempotency: a UNIQUE key prevents duplicate scheduling
   expiresAt: number | null; // past this, a never-fired intention is expired
@@ -245,6 +261,7 @@ export interface NewIntention {
   fireAt?: number | null;
   cronExpr?: string | null;
   eventMatch?: EventMatch | null;
+  contextCue?: string | null;
   expiresAt?: number | null;
   dedupKey?: string | null;
   provenance: Provenance;

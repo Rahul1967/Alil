@@ -10,7 +10,7 @@ import type { Database as DB, Statement } from "better-sqlite3";
 import type { Fragment, Provenance } from "../core/types.ts";
 import type {
   Embedder, Episode, EpisodeHit, Fact, MemoryStore, TimelineLine, ChunkKind, CanonicalKind,
-  Procedure, NewProcedure, ProcedureUpdate, ProcedureHit, ProcedureCreateResult,
+  Procedure, NewProcedure, ProcedureUpdate, ProcedureHit, ProcedureCreateResult, ContextHit,
 } from "./types.ts";
 
 /** RRF constant — dampens the weight of any single ranker's top positions. */
@@ -262,6 +262,35 @@ export class SqliteMemoryStore implements MemoryStore {
   async recentEpisodes(limit: number): Promise<Episode[]> {
     const rows = this.#recentEpisodes.all(limit) as EpisodeRow[];
     return rows.map(toEpisode);
+  }
+
+  // ─── Context-triggered intentions (facts-for-later, §D) ───
+  async indexContextCue(id: string, cue: string, provenance: Provenance): Promise<void> {
+    await this.#indexChunk("intention", id, cue, provenance);
+  }
+
+  /**
+   * Cues relevant to the current turn. Keyword-anchored (FTS): a context fact surfaces when the
+   * conversation lexically touches its cue — predictable with the offline embedder, and avoids
+   * surfacing the "nearest" cue on every turn. (A stronger embedder enables true semantic match;
+   * see the design's context-trigger open question.) The caller filters to live intentions.
+   */
+  async searchContextCues(query: string, k: number): Promise<ContextHit[]> {
+    const match = ftsQuery(query);
+    if (!match) return [];
+    const rows = this.#fts.all(match, k * 8) as RankRow[];
+    const out: ContextHit[] = [];
+    for (const { rowid } of rows) {
+      if (out.length >= k) break;
+      const c = this.#getChunk.get(rowid) as ChunkRow | undefined;
+      if (!c || c.kind !== "intention") continue;
+      out.push({ id: c.ref, cue: c.text, provenance: JSON.parse(c.provenance) as Provenance });
+    }
+    return out;
+  }
+
+  removeContextCue(id: string): void {
+    this.#deleteChunkByRef("intention", id);
   }
 
   async index(episode: Episode, lines: TimelineLine[]): Promise<void> {

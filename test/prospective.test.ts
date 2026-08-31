@@ -19,7 +19,7 @@ import type { ToolContext } from "../src/execution/tools/types.ts";
 function fresh() {
   const path = join(tmpdir(), `alil-prosp-${randomUUID()}.db`);
   const m = openMemory({ path });
-  const ctx: ToolContext = { sandbox: new Sandbox(tmpdir()), prospective: { store: m.prospective } };
+  const ctx: ToolContext = { sandbox: new Sandbox(tmpdir()), prospective: { store: m.prospective }, memory: { store: m.store } };
   return { m, store: m.prospective, ctx, cleanup: () => { m.close(); for (const s of ["", "-wal", "-shm"]) rmSync(path + s, { force: true }); } };
 }
 const T0 = Date.parse("2026-08-26T10:00:00Z");
@@ -233,6 +233,35 @@ test("remind.snooze / remind.done validate and run through the tools", async () 
   } finally { cleanup(); }
 });
 
+// ─── context trigger (Phase D: facts-for-later) ───
+test("context cue: index, keyword-match, and remove", async () => {
+  const { m, store, cleanup } = fresh();
+  try {
+    const it = store.create({ title: "aisle", action: "prefers an aisle seat", trigger: "context", contextCue: "booking travel", provenance: { origin: "operator" } }).intention;
+    await m.store.indexContextCue(it.id, "booking travel", { origin: "operator" });
+    // a relevant turn (shares "travel") surfaces it; an unrelated one doesn't.
+    assert.equal((await m.store.searchContextCues("help me book travel to Paris", 4)).some((h) => h.id === it.id), true);
+    assert.equal((await m.store.searchContextCues("what is the weather today", 4)).some((h) => h.id === it.id), false);
+    m.store.removeContextCue(it.id);
+    assert.equal((await m.store.searchContextCues("book travel", 4)).some((h) => h.id === it.id), false);
+  } finally { cleanup(); }
+});
+
+test("remind.create context trigger creates + indexes the cue", async () => {
+  const { m, store, ctx, cleanup } = fresh();
+  try {
+    const r = remindCreate.validate({ title: "aisle", action: "prefers an aisle seat", context: "booking travel", kind: "fact" });
+    assert.equal(r.ok, true);
+    const out = await remindCreate.run((r as { value: Parameters<typeof remindCreate.run>[0] }).value, ctx);
+    const id = (out.data as { id: string }).id;
+    assert.equal(store.get(id)!.trigger, "context");
+    assert.equal(store.get(id)!.contextCue, "booking travel");
+    assert.equal((await m.store.searchContextCues("planning travel", 4)).some((h) => h.id === id), true);
+    // context is mutually exclusive with other triggers
+    assert.equal(remindCreate.validate({ title: "t", action: "a", context: "x", at: "2026-10-05T09:00:00Z" }).ok, false);
+  } finally { cleanup(); }
+});
+
 // ─── scheduler ───
 
 function schedulerWith(store: ProspectiveStore, fired: Intention[], now: () => number, cronNext?: (e: string, a: number) => number | null) {
@@ -323,7 +352,7 @@ test("remind.create + list + cancel round-trip through the tools", async () => {
   try {
     const created = await remindCreate.run({ title: "dentist", action: "remind to call the dentist", at: "2026-08-27T17:00:00Z" }, ctx);
     const id = (created.data as { id: string }).id;
-    assert.match(created.summary, /scheduled "dentist"/);
+    assert.match(created.summary, /saved "dentist"/);
 
     const listed = await remindList.run({ limit: 50 }, ctx);
     assert.match(listed.summary, /1 intention/);

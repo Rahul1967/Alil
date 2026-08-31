@@ -105,6 +105,7 @@ function humanTrigger(i: import("../src/memory/types.ts").Intention): string {
     }
     return s;
   }
+  if (i.trigger === "context") return `◎ when "${i.contextCue ?? "…"}" comes up`;
   if (i.trigger === "manual") return "✦ someday · no automatic trigger";
   return i.trigger;
 }

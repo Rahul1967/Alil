@@ -33,4 +33,7 @@ function migrate(db: DB): void {
   if (icols.length > 0 && !icols.some((c) => c.name === "kind")) {
     db.exec("ALTER TABLE intention ADD COLUMN kind TEXT NOT NULL DEFAULT 'reminder'");
   }
+  if (icols.length > 0 && !icols.some((c) => c.name === "context_cue")) {
+    db.exec("ALTER TABLE intention ADD COLUMN context_cue TEXT");
+  }
 }

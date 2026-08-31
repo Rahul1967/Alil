@@ -2,7 +2,7 @@ import { Brain } from "../runtime/loop.ts";
 import type { BrainPorts } from "../runtime/loop.ts";
 import { DEFAULT_GUARDS } from "../runtime/types.ts";
 import type { BrainInput, BrainTurn, BrainObserver, GuardLimits, MemoryPort, ActionSink } from "../runtime/types.ts";
-import type { Provenance, TranscriptLine, ActionContract, ToolResult } from "../core/types.ts";
+import type { Provenance, TranscriptLine, ActionContract, ToolResult, Fragment } from "../core/types.ts";
 import { ProviderRegistry, BedrockProvider } from "../providers/index.ts";
 import { PromptAssembler, FilePersonaSource } from "../prompts/index.ts";
 import type { KnowledgeSource } from "../prompts/types.ts";
@@ -252,8 +252,16 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     prospCtx.store = memory.prospective;
     // Auto-inject only the recent episodes; canonical is standing context, and searching past
     // memory is a tool the model invokes (memory.query / memory.procedure.search), not a redundant
-    // per-turn semantic push.
-    memoryPort = new MemoryRecall(memory.store, { includeCanonical: false, semantic: false });
+    // per-turn semantic push. PLUS: context-triggered intentions whose cue is relevant to this turn
+    // (facts-for-later), hydrated to what to surface — the §D context trigger.
+    const baseRecall = new MemoryRecall(memory.store, { includeCanonical: false, semantic: false });
+    const mem = memory; // narrow for the closure
+    memoryPort = {
+      async recall(query: string): Promise<Fragment[]> {
+        const [eps, facts] = await Promise.all([baseRecall.recall(query), matchContextFacts(mem, query)]);
+        return [...eps, ...facts];
+      },
+    };
     knowledge = new CanonicalKnowledge(memory.store);
     episodes = new EpisodeManager({
       db: memory.db,
@@ -332,6 +340,26 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
 
   alil = new Alil(config, binding, { brain, actions: boundary, planService, ledger: audit, auditSink, logger, memory, episodes, world, scheduler, eventBus });
   return alil;
+}
+
+/**
+ * Context trigger (§D): find context-intention cues relevant to the current turn and hydrate each
+ * to what it wants surfaced. Only live (pending, trigger=context) items; a tainted cue surfaces
+ * with its ingested provenance so the model treats it as untrusted data.
+ */
+async function matchContextFacts(mem: MemorySystem, query: string): Promise<Fragment[]> {
+  const hits = await mem.store.searchContextCues(query, 4);
+  const out: Fragment[] = [];
+  for (const h of hits) {
+    const it = mem.prospective.get(h.id);
+    if (!it || it.status !== "pending" || it.trigger !== "context") continue;
+    out.push({
+      text: `You saved this for when "${h.cue}" comes up: ${it.action}`,
+      provenance: h.provenance,
+      source: `intention:${h.id}`,
+    });
+  }
+  return out;
 }
 
 /** An AbortSignal that fires when either input signal aborts (for merging queue + caller cancel). */

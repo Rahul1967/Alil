@@ -11,6 +11,7 @@ interface RemindCreateArgs {
   cron?: string; // 5-field cron → recurring
   event?: EventMatch; // predicate → 'event'
   manual?: boolean; // no automatic trigger → 'manual' (someday / review-only)
+  context?: string; // relevance phrase → 'context' (surface when the topic comes up)
   expiresAt?: string; // ISO
   dedupKey?: string;
 }
@@ -53,6 +54,7 @@ export const remindCreate: ToolImpl<RemindCreateArgs> = {
         additionalProperties: false,
       },
       manual: { type: "boolean", description: "Set true for a someday/review item with NO automatic trigger (bucket list, a decision to revisit) — it just lives in the list until you bring it up. Mutually exclusive with at/cron/event." },
+      context: { type: "string", description: "A relevance phrase → surface this LATER when the topic comes up, e.g. context:\"booking travel\" with action \"prefers an aisle seat\". Best for facts-for-later and decisions to resume. Mutually exclusive with at/cron/event/manual." },
       expiresAt: { type: "string", description: "Drop the intention if it hasn't fired by this ISO time." },
       dedupKey: { type: "string", description: "Stable key to prevent scheduling the same thing twice." },
     },
@@ -74,11 +76,14 @@ export const remindCreate: ToolImpl<RemindCreateArgs> = {
     const event = args["event"];
     const manual = args["manual"] === true;
     if (args["manual"] !== undefined && typeof args["manual"] !== "boolean") return { ok: false, error: "`manual` must be a boolean" };
-    const provided = [at !== undefined, cron !== undefined, event !== undefined, manual].filter(Boolean).length;
-    if (provided !== 1) return { ok: false, error: "remind.create needs exactly one trigger: `at`, `cron`, `event`, or `manual:true` (a someday/review item with no automatic trigger)" };
+    const context = args["context"];
+    if (context !== undefined && (typeof context !== "string" || context.trim() === "")) return { ok: false, error: "`context` must be a non-empty relevance phrase" };
+    const provided = [at !== undefined, cron !== undefined, event !== undefined, manual, context !== undefined].filter(Boolean).length;
+    if (provided !== 1) return { ok: false, error: "remind.create needs exactly one trigger: `at`, `cron`, `event`, `context` (surface when a topic comes up), or `manual:true`" };
 
     const value: RemindCreateArgs = { title: title.trim(), action: action.trim() };
     if (manual) value.manual = true;
+    if (typeof context === "string") value.context = context.trim();
 
     const kind = args["kind"];
     if (kind !== undefined) {
@@ -137,7 +142,7 @@ export const remindCreate: ToolImpl<RemindCreateArgs> = {
     const store = ctx.prospective?.store;
     if (!store) throw new Error("prospective memory is not available");
 
-    const trigger: IntentionTrigger = args.at ? "once" : args.cron ? "cron" : args.event ? "event" : "manual";
+    const trigger: IntentionTrigger = args.at ? "once" : args.cron ? "cron" : args.event ? "event" : args.context ? "context" : "manual";
     const n: NewIntention = {
       title: args.title,
       action: args.action,
@@ -147,6 +152,7 @@ export const remindCreate: ToolImpl<RemindCreateArgs> = {
       ...(args.at ? { fireAt: Date.parse(args.at) } : {}),
       ...(args.cron ? { fireAt: new Cron(args.cron).nextRun()?.getTime() ?? null, cronExpr: args.cron } : {}),
       ...(args.event ? { eventMatch: args.event } : {}),
+      ...(args.context ? { contextCue: args.context } : {}),
       // A windowed event trigger self-expires at `before`: if no matching event arrives in the
       // window (e.g. the user never chats on Oct 5), it lapses instead of lingering forever.
       ...(args.expiresAt ? { expiresAt: Date.parse(args.expiresAt) } : args.event?.before !== undefined ? { expiresAt: args.event.before } : {}),
@@ -155,11 +161,17 @@ export const remindCreate: ToolImpl<RemindCreateArgs> = {
     const { intention, created } = store.create(n);
     if (!created) return { summary: `already scheduled (dedup): "${intention.title}"`, data: { id: intention.id, created: false } };
 
+    // Index a context cue so it can be matched against future turns (facts-for-later).
+    if (trigger === "context" && args.context) {
+      await ctx.memory?.store?.indexContextCue(intention.id, args.context, { origin: "operator" });
+    }
+
     const whenText =
       trigger === "once" ? `at ${new Date(intention.fireAt!).toISOString()}` :
       trigger === "cron" ? `on schedule "${args.cron}" (next ${intention.fireAt ? new Date(intention.fireAt).toISOString() : "?"})` :
       trigger === "event" ? `when an event matches ${JSON.stringify(args.event)}` :
+      trigger === "context" ? `when "${args.context}" comes up` :
       `with no automatic trigger (someday / review-only)`;
-    return { summary: `scheduled "${intention.title}" ${whenText}`, data: { id: intention.id, trigger, created: true } };
+    return { summary: `saved "${intention.title}" ${whenText}`, data: { id: intention.id, trigger, created: true } };
   },
 };

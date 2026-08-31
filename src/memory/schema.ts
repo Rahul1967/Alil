@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS intention (
   fire_at      INTEGER,                    -- epoch ms; next fire for once/cron
   cron_expr    TEXT,                       -- recurrence, null unless cron
   event_match  TEXT,                       -- JSON predicate, null unless event
+  context_cue  TEXT,                        -- relevance phrase, null unless trigger='context'
   status       TEXT NOT NULL DEFAULT 'pending',
   dedup_key    TEXT,
   expires_at   INTEGER,

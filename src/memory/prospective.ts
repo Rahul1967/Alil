@@ -22,6 +22,7 @@ interface IntentionRow {
   fire_at: number | null;
   cron_expr: string | null;
   event_match: string | null;
+  context_cue: string | null;
   status: string;
   dedup_key: string | null;
   expires_at: number | null;
@@ -57,9 +58,9 @@ export class ProspectiveStore {
   constructor(db: DB) {
     this.#db = db;
     this.#ins = db.prepare(
-      `INSERT INTO intention(id, title, action, kind, trigger, fire_at, cron_expr, event_match,
+      `INSERT INTO intention(id, title, action, kind, trigger, fire_at, cron_expr, event_match, context_cue,
                              status, dedup_key, expires_at, created_at, fired_at, attempts, provenance)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, NULL, 0, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, NULL, 0, ?)`,
     );
     this.#get = db.prepare(`SELECT * FROM intention WHERE id = ?`);
     this.#getByDedup = db.prepare(`SELECT * FROM intention WHERE dedup_key = ?`);
@@ -118,6 +119,7 @@ export class ProspectiveStore {
       n.fireAt ?? null,
       n.cronExpr ?? null,
       n.eventMatch ? JSON.stringify(n.eventMatch) : null,
+      n.contextCue ?? null,
       n.dedupKey ?? null,
       n.expiresAt ?? null,
       Date.now(),
@@ -210,6 +212,7 @@ function toIntention(r: IntentionRow): Intention {
     fireAt: r.fire_at,
     cronExpr: r.cron_expr,
     eventMatch: r.event_match ? (JSON.parse(r.event_match) as EventMatch) : null,
+    contextCue: r.context_cue ?? null,
     status: r.status as IntentionStatus,
     dedupKey: r.dedup_key,
     expiresAt: r.expires_at,

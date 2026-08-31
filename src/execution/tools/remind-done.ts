@@ -35,6 +35,8 @@ export const remindDone: ToolImpl<RemindDoneArgs> = {
     const store = ctx.prospective?.store;
     if (!store) throw new Error("prospective memory is not available");
     const ok = store.done(args.id);
+    // A context intention that's done should stop surfacing — drop its cue.
+    if (ok) ctx.memory?.store?.removeContextCue(args.id);
     return ok
       ? { summary: `marked done`, data: { id: args.id, ok: true } }
       : { summary: `no live intention with id ${args.id}`, data: { id: args.id, ok: false } };

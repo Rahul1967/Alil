@@ -34,6 +34,8 @@ export const remindCancel: ToolImpl<RemindCancelArgs> = {
     const store = ctx.prospective?.store;
     if (!store) throw new Error("prospective memory is not available");
     const ok = store.cancel(args.id);
+    // A context intention: drop its cue from the recall index so it stops surfacing.
+    if (ok) ctx.memory?.store?.removeContextCue(args.id);
     return { summary: ok ? `cancelled intention ${args.id}` : `no cancellable intention with id ${args.id}` };
   },
 };

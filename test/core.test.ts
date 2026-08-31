@@ -80,6 +80,23 @@ test("an inbound operator message fires a windowed event-intention (chat = an ev
   assert.equal(notes.some((n) => n.source === "scheduled"), true, "the windowed reminder fired on the inbound message");
 });
 
+test("a context fact surfaces in the model's context when its topic comes up (§D)", async () => {
+  const { alil, mock } = await makeAlil({}, endResp("aisle noted"), endResp("weather is fine"));
+  // Save a fact-for-later: surface it when "booking travel" comes up.
+  const it = alil.memory!.prospective.create({ title: "aisle", action: "prefers an aisle seat", trigger: "context", contextCue: "booking travel", provenance: { origin: "operator" } }).intention;
+  await alil.memory!.store.indexContextCue(it.id, "booking travel", { origin: "operator" });
+
+  // A relevant turn → the fact should be injected into the model's context.
+  await alil.runTurn("help me book travel to Paris next week", { origin: "operator" });
+  const relevant = mock.received[0]!.messages.map((m) => (typeof m.content === "string" ? m.content : "")).join("\n");
+  assert.match(relevant, /prefers an aisle seat/);
+
+  // An unrelated turn → the fact should NOT be injected.
+  await alil.runTurn("what's the weather today?", { origin: "operator" });
+  const unrelated = mock.received[1]!.messages.map((m) => (typeof m.content === "string" ? m.content : "")).join("\n");
+  assert.doesNotMatch(unrelated, /prefers an aisle seat/);
+});
+
 test("a non-matching event is recorded but wakes nothing", async () => {
   const notes: string[] = [];
   const { alil } = await makeAlil({ notify: async (t) => { notes.push(t); } });
