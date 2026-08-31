@@ -9,6 +9,7 @@ import type { KnowledgeSource } from "../prompts/types.ts";
 import { PolicyBoundary, YamlRuleSource, credentialBlock, GrantStore } from "../policy/index.ts";
 import type { ApprovalPort } from "../policy/index.ts";
 import { ToolRegistry, Executor, Sandbox, ReadTracker, RegistryToolCatalog, DEFAULT_TOOLS } from "../execution/index.ts";
+import { dossierMigratePreferences } from "../execution/tools/dossier-migrate-prefs.ts";
 import {
   openMemory, EpisodeManager, ExtractiveSummarizer, CanonicalKnowledge, seedMemoryInstructions, MemoryRecall,
 } from "../memory/index.ts";
@@ -97,6 +98,7 @@ export class Alil {
   readonly #dossier: DossierStore;
   readonly #scheduler: Scheduler | null;
   readonly #actions: ActionSink;
+  #prefsMigrationTried = false; // one-time-per-process guard for the canonical→dossier prefs move
 
   constructor(_config: AlilConfig, binding: ChannelBinding, built: BuiltCore) {
     this.channel = binding.channel;
@@ -138,8 +140,35 @@ export class Alil {
     return this.#memory?.prospective ?? null;
   }
 
+  /**
+   * One-time, boundary-gated migration of the operator's standing preferences/rules out of
+   * canonical memory into the dossier `preferences.md`. A SINGLE approval authorizes the whole
+   * move (create + forget happen atomically in the migration tool). Idempotent: a no-op once
+   * preferences.md exists, and only attempted once per process. Returns the tool result, or a
+   * skip note when there's nothing to do.
+   */
+  async migratePreferences(): Promise<ToolResult> {
+    if (!this.#memory || this.#dossier.get("preferences")) {
+      return { actionId: "prefs-migration", outcome: "ok", summary: "no migration needed" };
+    }
+    return this.#actions.submit({
+      action: {
+        id: `prefs_migration_${Date.now()}`,
+        tool: "dossier.migratePreferences", args: {},
+        effect: "write", reversible: false, risk: "medium", classified: false,
+        provenance: { origin: "operator", channel: this.channel },
+      },
+    });
+  }
+
   /** Run one turn on the shared queue: assemble context, think, record to timeline + audit. */
   async runTurn(text: string, provenance: Provenance, opts: RunTurnOptions = {}): Promise<BrainTurn> {
+    // First operator turn on this process: propose the one-time preferences migration through the
+    // boundary (parks for approval like any write). Guarded so a decline doesn't re-propose forever.
+    if (!this.#prefsMigrationTried && this.#memory && (provenance.origin === "operator" || provenance.origin === "user_channel")) {
+      this.#prefsMigrationTried = true;
+      await this.migratePreferences().catch(() => {});
+    }
     // An inbound operator message is itself an event: fire any matching event-intentions so a
     // reminder gated to "when we chat on Oct 5" can trigger. Fire-and-forget — the delivered
     // reminder turn (system provenance, so it won't re-fire) queues behind this one.
@@ -287,7 +316,9 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     // Native module / DB unavailable — run without persistence rather than crash.
   }
 
-  const tools = new ToolRegistry();
+  // Executor registry = the advertised tools PLUS the operator-only migration tool (not in the
+  // model-facing catalog, so the model never sees it; reachable only via alil.migratePreferences()).
+  const tools = new ToolRegistry([...DEFAULT_TOOLS, dossierMigratePreferences]);
   const boundary = new PolicyBoundary({
     rules: new YamlRuleSource(config.policyPath ?? "config/policy.yaml"),
     tools,

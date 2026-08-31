@@ -1,5 +1,7 @@
 export { DossierStore, slugify, normalizeTags, serialize, parse } from "./store.ts";
 export type { DossierStoreOptions } from "./store.ts";
+export { planPreferencesMigration } from "./migration.ts";
+export type { PreferencesMigrationPlan, MigratableFact } from "./migration.ts";
 export {
   DOSSIER_TYPES, TAG_VOCABULARY,
 } from "./types.ts";

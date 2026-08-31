@@ -129,6 +129,40 @@ test("tags are normalized (synonyms collapse, dedupe, lowercase)", () => {
   assert.equal(slugify("Rahul's Bucket List!"), "rahuls-bucket-list");
 });
 
+test("migratePreferences moves canonical prefs into preferences.md and forgets them", async () => {
+  const root = await tmpRoot();
+  const dir = await mkdtemp(join(tmpdir(), "alil-core-"));
+  const end: ModelResponse = { text: "ok", toolCalls: [], stopReason: "end", usage: { inputTokens: 1, outputTokens: 1 } };
+  const registry = new ProviderRegistry().register(new MockProvider().script(end, end)).registerModel(mockSpec);
+  const approveAll: ApprovalPort = { async request() { return { approved: true }; } };
+  const alil = createAlil(
+    { modelId: "mock-model", registry, dbPath: ":memory:", auditPath: join(dir, "audit.jsonl"),
+      worldPath: join(dir, "world.json"), worldMarkdownPath: join(dir, "WORLD.md"), dossierRoot: root },
+    { channel: "test", approvals: approveAll },
+  );
+  // Seed canonical preferences (+ a rule) — the operator-about-self rows.
+  await alil.memory!.store.upsertFact({ key: "user.style", kind: "preference", text: "prefers concise, direct answers", provenance: { origin: "operator" } });
+  await alil.memory!.store.upsertFact({ key: "user.units", kind: "preference", text: "uses metric units", provenance: { origin: "operator" } });
+  await alil.memory!.store.upsertFact({ key: "rule.noEmoji", kind: "rule", text: "never use emoji in code", provenance: { origin: "operator" } });
+
+  const result = await alil.migratePreferences();
+  assert.equal(result.outcome, "ok");
+  // preferences.md now exists with the migrated content.
+  const prefs = alil.dossier.get("preferences")!;
+  assert.match(prefs.body, /prefers concise, direct answers/);
+  assert.match(prefs.body, /uses metric units/);
+  assert.match(prefs.body, /## Rules/);
+  assert.match(prefs.body, /never use emoji in code/);
+  // The canonical rows are gone (they now live in exactly one place).
+  const remaining = (await alil.memory!.store.canonicalList()).filter((r) => r.kind === "preference" || r.kind === "rule");
+  assert.equal(remaining.length, 0);
+  // Idempotent: a second call is a no-op (preferences.md already exists).
+  const again = await alil.migratePreferences();
+  assert.match(again.summary, /no migration needed/);
+  await rm(root, { recursive: true, force: true });
+  await rm(dir, { recursive: true, force: true });
+});
+
 test("createAlil injects the [operator] block from the dossier every turn", async () => {
   const root = await tmpRoot();
   const store = new DossierStore({ root });
