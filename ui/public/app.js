@@ -184,7 +184,9 @@ const footer = document.querySelector("footer");
 const tabChat = document.getElementById("tabChat");
 const tabPlan = document.getElementById("tabPlan");
 const tabLater = document.getElementById("tabLater");
+const tabDossier = document.getElementById("tabDossier");
 const tabMemory = document.getElementById("tabMemory");
+const dossierView = document.getElementById("dossierView");
 const memContent = document.getElementById("memContent");
 let memView = "timeline";
 // Page sizes for the paginated views; other views return a plain array.
@@ -218,14 +220,17 @@ function setView(which) {
   footer.style.display = which === "chat" ? "" : "none";
   planView.classList.toggle("show", which === "plan");
   laterView.classList.toggle("show", which === "later");
+  dossierView.classList.toggle("show", which === "dossier");
   memoryView.classList.toggle("show", which === "memory");
   tabChat.classList.toggle("active", which === "chat");
   tabPlan.classList.toggle("active", which === "plan");
   tabLater.classList.toggle("active", which === "later");
+  tabDossier.classList.toggle("active", which === "dossier");
   tabMemory.classList.toggle("active", which === "memory");
 }
 tabChat.addEventListener("click", () => setView("chat"));
 tabPlan.addEventListener("click", () => setView("plan"));
+tabDossier.addEventListener("click", () => { setView("dossier"); loadDossier(); });
 tabLater.addEventListener("click", () => { setView("later"); loadLater(); });
 tabMemory.addEventListener("click", () => { setView("memory"); loadStats(); loadMemory(memView); });
 
@@ -456,6 +461,87 @@ async function loadLater() {
     laterContent.appendChild(el("div", "later-section", KIND_SECTION[kind] + " · " + group.length));
     group.sort((a, b) => (a.nextFireAt || "9999").localeCompare(b.nextFireAt || "9999"));
     group.forEach(renderIntention);
+  }
+}
+
+// ── Dossier view (operator model) ────────────────────────────────────────────
+const dossierContent = document.getElementById("dossierContent");
+const dossierSearch = document.getElementById("dossierSearch");
+let dossierTypeFilter = "";
+let dossierSearchTimer = null;
+
+document.querySelectorAll("#dossierType button").forEach((b) => {
+  b.addEventListener("click", () => {
+    document.querySelectorAll("#dossierType button").forEach((x) => x.classList.remove("active"));
+    b.classList.add("active");
+    dossierTypeFilter = b.getAttribute("data-type");
+    loadDossier();
+  });
+});
+dossierSearch.addEventListener("input", () => {
+  clearTimeout(dossierSearchTimer);
+  dossierSearchTimer = setTimeout(loadDossier, 200);
+});
+
+const DTYPE_LABEL = {
+  identity: "Identity", preferences: "Preferences", person: "People", account: "Accounts",
+  loan: "Loans", note: "Notes", document: "Documents", event: "Timeline", index: "Indexes",
+};
+const DTYPE_ORDER = ["identity", "preferences", "person", "account", "loan", "note", "document", "event", "index"];
+
+function renderDossierCard(item) {
+  const card = el("div", "dcard " + (item.status === "superseded" ? "superseded" : ""));
+  card.appendChild(el("div", "dtitle", item.title));
+  const meta = el("div", "dmeta");
+  meta.appendChild(el("span", "dtype", item.type));
+  (item.tags || []).forEach((t) => meta.appendChild(el("span", "dchip", t)));
+  if (item.status && item.status !== "active") meta.appendChild(el("span", "dchip", item.status));
+  meta.appendChild(el("span", "", "updated " + item.updated));
+  card.appendChild(meta);
+  if (item.snippet) card.appendChild(el("div", "dsnip", item.snippet));
+  const body = el("div", "dbody");
+  card.appendChild(body);
+  let loaded = false;
+  card.addEventListener("click", async () => {
+    const opening = !card.classList.contains("open");
+    card.classList.toggle("open");
+    if (opening && !loaded) {
+      loaded = true;
+      body.textContent = "loading…";
+      try {
+        const f = await (await fetch("/api/dossier/" + encodeURIComponent(item.slug))).json();
+        body.textContent = "";
+        if (f.frontmatter && f.frontmatter.description) body.appendChild(el("div", "ddesc", f.frontmatter.description));
+        body.appendChild(el("div", "", f.body || "(empty)"));
+      } catch (e) { body.textContent = "error: " + e.message; }
+    }
+  });
+  return card;
+}
+
+async function loadDossier() {
+  dossierContent.innerHTML = "";
+  dossierContent.appendChild(el("div", "empty-tab", "loading…"));
+  const params = new URLSearchParams();
+  if (dossierTypeFilter) params.set("type", dossierTypeFilter);
+  if (dossierSearch.value.trim()) params.set("text", dossierSearch.value.trim());
+  let items;
+  try {
+    items = (await (await fetch("/api/dossier?" + params.toString())).json()).items || [];
+  } catch (e) {
+    dossierContent.innerHTML = ""; dossierContent.appendChild(el("div", "empty-tab", "error: " + e.message)); return;
+  }
+  dossierContent.innerHTML = "";
+  if (items.length === 0) {
+    dossierContent.appendChild(el("div", "empty-tab",
+      "Nothing here yet. As you talk to Alil it builds a model of you — who you are, what you prefer, what you own — one markdown file per thing, each proposed for your approval."));
+    return;
+  }
+  for (const type of DTYPE_ORDER) {
+    const group = items.filter((i) => i.type === type);
+    if (group.length === 0) continue;
+    dossierContent.appendChild(el("div", "later-section", (DTYPE_LABEL[type] || type) + " · " + group.length));
+    group.forEach((i) => dossierContent.appendChild(renderDossierCard(i)));
   }
 }
 

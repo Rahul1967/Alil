@@ -266,6 +266,24 @@
     /* ── Memory dashboard ── */
     #memoryView { display: none; max-width: 860px; margin: 0 auto; }
     #memoryView.show { display: block; }
+
+    /* ── Dossier view (operator model) ── */
+    #dossierView { display: none; max-width: 780px; margin: 0 auto; }
+    #dossierView.show { display: block; }
+    .dossier-search { height: 30px; padding: 0 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); color: var(--ink); font: 500 13px/1 "IBM Plex Sans", sans-serif; min-width: 200px; }
+    .dossier-search:focus { outline: none; border-color: var(--mind); }
+    .dcard { border: 1px solid var(--line); border-radius: 11px; padding: 12px 15px; background: var(--panel); box-shadow: var(--shadow); cursor: pointer; transition: .12s; }
+    .dcard:hover { border-color: var(--mind); }
+    .dcard.superseded { opacity: .6; }
+    .dcard .dtitle { font: 600 14px/1.3 "IBM Plex Sans", sans-serif; color: var(--ink); }
+    .dcard .dmeta { font: 500 11px/1.4 "IBM Plex Mono", monospace; color: var(--ink-soft); display: flex; gap: 9px; flex-wrap: wrap; align-items: center; margin: 5px 0 4px; }
+    .dcard .dtype { color: var(--mind); text-transform: uppercase; letter-spacing: .05em; }
+    .dchip { font: 600 10.5px/1 "IBM Plex Mono", monospace; color: var(--ink-soft); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; }
+    .dcard .dsnip { color: var(--ink-soft); font-size: 12.5px; margin-top: 3px; white-space: pre-wrap; word-wrap: break-word; }
+    .dcard .dbody { display: none; white-space: pre-wrap; word-wrap: break-word; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); font: 400 13px/1.6 "IBM Plex Sans", sans-serif; }
+    .dcard.open .dbody { display: block; }
+    .dcard.open .dsnip { display: none; }
+    .dcard .ddesc { font-style: italic; color: var(--ink-faint); font-size: 12px; margin-top: 8px; }
     .tabs { display: flex; gap: 2px; margin-bottom: 18px; border-bottom: 1px solid var(--line); }
     .tabs button {
       border: none; background: transparent; color: var(--ink-soft);
@@ -312,6 +330,7 @@
       <button id="tabChat" class="active">Chat</button>
       <button id="tabPlan">Plan</button>
       <button id="tabLater">Later</button>
+      <button id="tabDossier">Dossier</button>
       <button id="tabMemory">Memory</button>
     </div>
   </header>
@@ -358,6 +377,21 @@
         </div>
       </div>
       <div class="rows" id="laterContent"></div>
+    </div>
+    <div id="dossierView">
+      <div class="later-head">
+        <div class="later-filters" id="dossierType">
+          <button data-type="" class="active">All</button>
+          <button data-type="identity">Identity</button>
+          <button data-type="preferences">Prefs</button>
+          <button data-type="person">People</button>
+          <button data-type="account">Accounts</button>
+          <button data-type="note">Notes</button>
+          <button data-type="event">Events</button>
+        </div>
+        <input id="dossierSearch" class="dossier-search" placeholder="search title / text…" />
+      </div>
+      <div class="rows" id="dossierContent"></div>
     </div>
     <div id="memoryView">
       <div class="tabs">
