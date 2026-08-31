@@ -1,6 +1,6 @@
 import type { ToolImpl, ToolContext, ValidateResult, ToolRunResult } from "./types.ts";
 import type { DossierQuery, DossierType } from "../../dossier/types.ts";
-import { DOSSIER_TYPES } from "../../dossier/types.ts";
+import { KNOWN_DOSSIER_TYPES } from "../../dossier/types.ts";
 
 /**
  * dossier.query — search the operator dossier by type, tags, status, date, or free text. Read-only,
@@ -15,7 +15,7 @@ export const dossierQuery: ToolImpl<DossierQuery> = {
   parameters: {
     type: "object",
     properties: {
-      type: { type: "string", enum: DOSSIER_TYPES, description: "Restrict to one file type." },
+      type: { type: "string", description: `Restrict to one file type (well-known: ${KNOWN_DOSSIER_TYPES.join(", ")}, or any Alil-invented type).` },
       tagsAny: { type: "array", items: { type: "string" }, description: "Match files having ANY of these tags." },
       tagsAll: { type: "array", items: { type: "string" }, description: "Match only files having ALL of these tags." },
       status: { type: "string", enum: ["active", "superseded", "archived"], description: "Restrict to a lifecycle status." },
@@ -33,7 +33,7 @@ export const dossierQuery: ToolImpl<DossierQuery> = {
   validate(args): ValidateResult<DossierQuery> {
     const q: DossierQuery = {};
     if (args["type"] !== undefined) {
-      if (!DOSSIER_TYPES.includes(args["type"] as DossierType)) return { ok: false, error: `unknown type "${String(args["type"])}"` };
+      if (typeof args["type"] !== "string") return { ok: false, error: "`type` must be a string" };
       q.type = args["type"] as DossierType;
     }
     for (const key of ["tagsAny", "tagsAll"] as const) {

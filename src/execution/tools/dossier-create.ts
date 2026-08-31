@@ -1,6 +1,6 @@
 import type { ToolImpl, ToolContext, ValidateResult, ToolRunResult } from "./types.ts";
 import type { DossierCreate, DossierType } from "../../dossier/types.ts";
-import { DOSSIER_TYPES } from "../../dossier/types.ts";
+import { KNOWN_DOSSIER_TYPES } from "../../dossier/types.ts";
 
 /**
  * dossier.create — create a new dossier file recording something durable about the operator. Effect:
@@ -11,11 +11,11 @@ import { DOSSIER_TYPES } from "../../dossier/types.ts";
 export const dossierCreate: ToolImpl<DossierCreate> = {
   name: "dossier.create",
   description:
-    "Create a new operator-dossier file (a durable fact about the user). `type` ∈ identity|preferences|note|person|account|loan|document|event|index. Provide `title`, topical `tags` (financial, health, family, future-plans, …), a `description` saying how to read/update it, and the markdown `body`. Use `fields` for type-specific frontmatter (institution, relation, when, …). Writing requires approval.",
+    "Create a new operator-dossier file (a durable fact about the user). `type` is an OPEN vocabulary — reach first for a well-known type (identity, preferences, note, person, account, loan, document, event, index), but INVENT a new lowercase type (e.g. vehicle, subscription, project, pet) whenever the operator's life needs a kind that isn't listed. Provide `title`, topical `tags` (financial, health, family, future-plans, …), a `description` saying how to read/update it, and the markdown `body`. Use `fields` for type-specific frontmatter (institution, relation, when, …). Writing requires approval.",
   parameters: {
     type: "object",
     properties: {
-      type: { type: "string", enum: DOSSIER_TYPES, description: "What the file IS." },
+      type: { type: "string", description: `What the file IS (a lowercase slug). Well-known: ${KNOWN_DOSSIER_TYPES.join(", ")} — or invent a new one.` },
       title: { type: "string", description: "Human title, e.g. 'Rahul's Bucket List'." },
       tags: { type: "array", items: { type: "string" }, description: "What it's ABOUT (query key)." },
       description: { type: "string", description: "Self-describing contract: how to read and update this file." },
@@ -33,10 +33,12 @@ export const dossierCreate: ToolImpl<DossierCreate> = {
   reversible: false,
 
   validate(args): ValidateResult<DossierCreate> {
-    if (!DOSSIER_TYPES.includes(args["type"] as DossierType)) return { ok: false, error: `dossier.create requires a valid \`type\`` };
+    const type = args["type"];
+    if (typeof type !== "string" || !/^[a-z][a-z0-9-]*$/.test(type))
+      return { ok: false, error: "dossier.create requires a `type` that is a lowercase slug (letters, digits, hyphens)" };
     const title = args["title"];
     if (typeof title !== "string" || title.length === 0) return { ok: false, error: "dossier.create requires a non-empty string `title`" };
-    const value: DossierCreate = { type: args["type"] as DossierType, title };
+    const value: DossierCreate = { type: type as DossierType, title };
     if (args["tags"] !== undefined) {
       if (!Array.isArray(args["tags"])) return { ok: false, error: "`tags` must be an array of strings" };
       value.tags = (args["tags"] as unknown[]).map(String);

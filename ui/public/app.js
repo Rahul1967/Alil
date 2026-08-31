@@ -537,10 +537,13 @@ async function loadDossier() {
       "Nothing here yet. As you talk to Alil it builds a model of you — who you are, what you prefer, what you own — one markdown file per thing, each proposed for your approval."));
     return;
   }
-  for (const type of DTYPE_ORDER) {
+  // Known types first (in a sensible order), then any Alil-invented types, alphabetically.
+  const invented = [...new Set(items.map((i) => i.type))].filter((t) => !DTYPE_ORDER.includes(t)).sort();
+  for (const type of [...DTYPE_ORDER, ...invented]) {
     const group = items.filter((i) => i.type === type);
     if (group.length === 0) continue;
-    dossierContent.appendChild(el("div", "later-section", (DTYPE_LABEL[type] || type) + " · " + group.length));
+    const label = DTYPE_LABEL[type] || (type.charAt(0).toUpperCase() + type.slice(1));
+    dossierContent.appendChild(el("div", "later-section", label + " · " + group.length));
     group.forEach((i) => dossierContent.appendChild(renderDossierCard(i)));
   }
 }

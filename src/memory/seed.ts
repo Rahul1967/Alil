@@ -182,6 +182,12 @@ export const DEFAULT_MEMORY_INSTRUCTIONS: Fact[] = [
     provenance: { origin: "system" },
   },
   {
+    key: "mem.dossier.types",
+    kind: "memory_instruction",
+    text: "The dossier `type` is an OPEN vocabulary, not a fixed list. Reach first for a well-known type (identity, preferences, note, person, account, loan, document, event, index) when one fits, but INVENT a new lowercase type whenever the operator's life needs a kind that isn't listed — e.g. vehicle, subscription, project, pet, property, medication, credential-hint. Each type is just a slug; new types get their own folder automatically and need no code change. Pick the most specific type that captures what the file IS, and reuse an existing type rather than coining a near-duplicate (car vs vehicle) so the dossier stays queryable.",
+    provenance: { origin: "system" },
+  },
+  {
     key: "mem.dossier.evolve",
     kind: "memory_instruction",
     text: "The user changes over time — keep the dossier honest about it. When a fact CHANGES (a move, a new job, a closed account), do not overwrite it: dossier.supersede the old file (it stays as history) and create the new current one. For life transitions worth remembering as a trajectory, create an `event` file (type: event, with `when` and `domain`) so the arc is reconstructable. Reserve dossier.delete for mistakes or an explicit erase request.",

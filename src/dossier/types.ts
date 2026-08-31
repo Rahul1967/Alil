@@ -11,21 +11,22 @@ import type { Provenance } from "../core/types.ts";
  * and prospective memory (future intentions). Writes cross the policy boundary like any other.
  */
 
-/** What a dossier file IS — the single authoritative discriminator (frontmatter `type`). */
-export type DossierType =
-  | "identity" // who the operator is (singleton, always-fed)
-  | "preferences" // how they like things (singleton, always-fed)
-  | "note" // open-ended list/doc (bucket list, etc.)
-  | "person" // a person/org in their life
-  | "account" // bank/subscription/asset account
-  | "loan" // a debt/liability
-  | "document" // a reference doc/record
-  | "event" // a life-event (the trajectory spine)
-  | "index"; // a curated catalog (e.g. timeline.md)
+/**
+ * What a dossier file IS — the single authoritative discriminator (frontmatter `type`). This is an
+ * OPEN vocabulary: the constants below are the well-known types (which get routing + skeletons +
+ * always-on treatment), but Alil may invent any new type a lowercase slug — e.g. `vehicle`,
+ * `subscription`, `project` — whenever the operator's life needs a kind that isn't listed. Unknown
+ * types route into their own folder and carry no forced skeleton, so nothing is hard-coded.
+ */
+export type DossierType = string;
 
-export const DOSSIER_TYPES: DossierType[] = [
+/** The well-known types Alil should reach for first (routing + skeletons defined for these). */
+export const KNOWN_DOSSIER_TYPES = [
   "identity", "preferences", "note", "person", "account", "loan", "document", "event", "index",
-];
+] as const;
+
+/** @deprecated use KNOWN_DOSSIER_TYPES — kept as an alias for the well-known set. */
+export const DOSSIER_TYPES = KNOWN_DOSSIER_TYPES;
 
 /** Lifecycle of a file's content. Supersede, don't hard-delete — the trajectory stays intact. */
 export type DossierStatus = "active" | "superseded" | "archived";

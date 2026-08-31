@@ -123,6 +123,17 @@ test("low-confidence preferences are excluded from the always-on preamble", asyn
   await rm(root, { recursive: true, force: true });
 });
 
+test("an invented (unknown) type routes to its own folder and stays queryable", async () => {
+  const root = await tmpRoot();
+  const store = new DossierStore({ root });
+  const f = store.create({ type: "vehicle", title: "Honda City", tags: ["personal"], fields: { plate: "KA01" } }, OP);
+  assert.equal(f.frontmatter.type, "vehicle");
+  assert.equal(f.relPath, "vehicles/honda-city.md"); // <type>s/ folder, no code change needed
+  assert.equal(f.frontmatter["plate"], "KA01");
+  assert.equal(store.query({ type: "vehicle" }).length, 1);
+  await rm(root, { recursive: true, force: true });
+});
+
 test("tags are normalized (synonyms collapse, dedupe, lowercase)", () => {
   assert.deepEqual(normalizeTags(["Finance", "money", "financial", "Health"]), ["financial", "health"]);
   assert.deepEqual(normalizeTags(["Future Plans"]), ["future-plans"]);

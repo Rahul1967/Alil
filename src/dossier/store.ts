@@ -15,8 +15,9 @@ export interface DossierStoreOptions {
   preambleMaxChars?: number;
 }
 
-/** Which subdirectory a type routes into. Singletons + indexes sit at the root. */
-const TYPE_DIR: Record<DossierType, string> = {
+/** Which subdirectory a well-known type routes into. Singletons + indexes sit at the root. Unknown
+ * (Alil-invented) types route into their own `<type>s/` folder — see #relPathFor. */
+const TYPE_DIR: Record<string, string> = {
   identity: "", preferences: "", index: "",
   note: "notes", person: "people", account: "finance", loan: "finance",
   document: "documents", event: "events",
@@ -161,7 +162,9 @@ export class DossierStore {
   }
 
   #relPathFor(type: DossierType, slug: string): string {
-    const dir = TYPE_DIR[type];
+    // Well-known types have a fixed home; an Alil-invented type gets its own `<type>s/` folder so
+    // new document kinds stay organized without any hard-coded list.
+    const dir = Object.hasOwn(TYPE_DIR, type) ? TYPE_DIR[type]! : `${slugify(type)}s`;
     const name = isSingleton(type) ? `${type}.md` : `${slug}.md`;
     return dir ? join(dir, name) : name;
   }
