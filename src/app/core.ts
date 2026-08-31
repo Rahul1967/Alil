@@ -347,17 +347,23 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
  * to what it wants surfaced. Only live (pending, trigger=context) items; a tainted cue surfaces
  * with its ingested provenance so the model treats it as untrusted data.
  */
+const CONTEXT_COOLDOWN_MS = 30 * 60_000; // don't re-surface the same fact within this window
+
 async function matchContextFacts(mem: MemorySystem, query: string): Promise<Fragment[]> {
+  const now = Date.now();
   const hits = await mem.store.searchContextCues(query, 4);
   const out: Fragment[] = [];
   for (const h of hits) {
     const it = mem.prospective.get(h.id);
     if (!it || it.status !== "pending" || it.trigger !== "context") continue;
+    // Cooldown: skip a fact surfaced very recently, so it doesn't repeat on every turn of a burst.
+    if (it.lastSurfacedAt !== null && now - it.lastSurfacedAt < CONTEXT_COOLDOWN_MS) continue;
     out.push({
       text: `You saved this for when "${h.cue}" comes up: ${it.action}`,
       provenance: h.provenance,
       source: `intention:${h.id}`,
     });
+    mem.prospective.markSurfaced(h.id, now);
   }
   return out;
 }

@@ -243,6 +243,8 @@ export interface Intention {
   cronExpr: string | null; // recurrence, null unless cron
   eventMatch: EventMatch | null; // null unless event
   contextCue: string | null; // null unless context — the phrase describing WHEN it's relevant
+  nag: boolean; // re-fire until acknowledged (once triggers only)
+  lastSurfacedAt: number | null; // context items: last surface time (cooldown)
   status: IntentionStatus;
   dedupKey: string | null; // idempotency: a UNIQUE key prevents duplicate scheduling
   expiresAt: number | null; // past this, a never-fired intention is expired
@@ -262,6 +264,7 @@ export interface NewIntention {
   cronExpr?: string | null;
   eventMatch?: EventMatch | null;
   contextCue?: string | null;
+  nag?: boolean;
   expiresAt?: number | null;
   dedupKey?: string | null;
   provenance: Provenance;

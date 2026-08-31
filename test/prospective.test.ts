@@ -233,6 +233,43 @@ test("remind.snooze / remind.done validate and run through the tools", async () 
   } finally { cleanup(); }
 });
 
+// ─── nag-until-done + supersede (finish) ───
+test("a nag reminder re-fires instead of completing, until done", async () => {
+  const { store, cleanup } = fresh();
+  try {
+    const fired: Intention[] = [];
+    let clock = T0;
+    const s = schedulerWith(store, fired, () => clock);
+    const i = store.create({ title: "book flight", action: "nudge", trigger: "once", fireAt: T0 - 1000, nag: true, provenance: { origin: "operator" } }).intention;
+
+    await s.tick();
+    assert.equal(fired.length, 1);
+    // Instead of done, it's re-armed to a later time (nag interval).
+    const after = store.get(i.id)!;
+    assert.equal(after.status, "pending");
+    assert.ok(after.fireAt! > clock, "re-armed into the future");
+
+    // acknowledging it stops the nag
+    store.done(i.id);
+    clock = after.fireAt! + 1000;
+    await s.tick();
+    assert.equal(fired.length, 1, "done nag does not fire again");
+  } finally { cleanup(); }
+});
+
+test("supersedes cancels the old intention on create", async () => {
+  const { store, ctx, cleanup } = fresh();
+  try {
+    const old = once(store, T0);
+    const r = remindCreate.validate({ title: "dentist", action: "call", at: "2026-10-05T09:00:00Z", supersedes: old.id });
+    assert.equal(r.ok, true);
+    await remindCreate.run((r as { value: Parameters<typeof remindCreate.run>[0] }).value, ctx);
+    assert.equal(store.get(old.id)!.status, "cancelled");
+    // nag requires an `at` trigger
+    assert.equal(remindCreate.validate({ title: "t", action: "a", cron: "0 9 * * 1", nag: true }).ok, false);
+  } finally { cleanup(); }
+});
+
 // ─── context trigger (Phase D: facts-for-later) ───
 test("context cue: index, keyword-match, and remove", async () => {
   const { m, store, cleanup } = fresh();

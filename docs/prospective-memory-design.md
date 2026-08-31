@@ -199,6 +199,14 @@ user's condition*, not about *which of five stores to use*.
   existing embedder); `manual/someday` + review digest; `snooze/ack/nag/supersede`; relative-time +
   lead-up ladders; proposed/inferred capture; kind-aware surfacing policy.
 
+> **Status (implemented):** ✅ Phase 1 `kind` · ✅ `manual`/someday trigger · ✅ lifecycle
+> (snooze/done, **nag-until-done**, **supersede**) · ✅ **context trigger** (facts-for-later) with a
+> re-surface **cooldown** · ✅ windowed event triggers + inbound-message-as-event · ✅ the browser
+> **Later view** (read + gated snooze/done/cancel through the boundary) · ✅ kind-aware **surfacing**,
+> **proposed-capture**, and **review** guidance. Remaining: an autonomous periodic review *routine*
+> (today it's guidance + the user can set a cron review), and a stronger embedder for true semantic
+> context matching (currently keyword-anchored).
+
 ## 07 · Phased plan (tested slices, no big-bang)
 
 1. **Generalize the row.** Add `kind`; make `trigger.type` open; migrate `once/cron → time`

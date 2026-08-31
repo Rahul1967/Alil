@@ -97,6 +97,19 @@ test("a context fact surfaces in the model's context when its topic comes up (§
   assert.doesNotMatch(unrelated, /prefers an aisle seat/);
 });
 
+test("a context fact is not re-surfaced within the cooldown window", async () => {
+  const { alil, mock } = await makeAlil({}, endResp("a"), endResp("b"));
+  const it = alil.memory!.prospective.create({ title: "aisle", action: "prefers an aisle seat", trigger: "context", contextCue: "booking travel", provenance: { origin: "operator" } }).intention;
+  await alil.memory!.store.indexContextCue(it.id, "booking travel", { origin: "operator" });
+  // Two relevant turns back-to-back: only the first surfaces the fact (cooldown suppresses the 2nd).
+  await alil.runTurn("book travel to Rome", { origin: "operator" });
+  await alil.runTurn("more travel booking questions", { origin: "operator" });
+  const first = mock.received[0]!.messages.map((m) => (typeof m.content === "string" ? m.content : "")).join("\n");
+  const second = mock.received[1]!.messages.map((m) => (typeof m.content === "string" ? m.content : "")).join("\n");
+  assert.match(first, /prefers an aisle seat/);
+  assert.doesNotMatch(second, /prefers an aisle seat/);
+});
+
 test("a non-matching event is recorded but wakes nothing", async () => {
   const notes: string[] = [];
   const { alil } = await makeAlil({ notify: async (t) => { notes.push(t); } });

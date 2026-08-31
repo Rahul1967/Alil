@@ -36,4 +36,10 @@ function migrate(db: DB): void {
   if (icols.length > 0 && !icols.some((c) => c.name === "context_cue")) {
     db.exec("ALTER TABLE intention ADD COLUMN context_cue TEXT");
   }
+  if (icols.length > 0 && !icols.some((c) => c.name === "nag")) {
+    db.exec("ALTER TABLE intention ADD COLUMN nag INTEGER NOT NULL DEFAULT 0");
+  }
+  if (icols.length > 0 && !icols.some((c) => c.name === "last_surfaced_at")) {
+    db.exec("ALTER TABLE intention ADD COLUMN last_surfaced_at INTEGER");
+  }
 }

@@ -108,6 +108,18 @@ export class Scheduler {
         return;
       }
     }
+    // Nag-until-done: a once intention flagged `nag` re-arms itself at a fixed interval instead of
+    // completing, until the user acknowledges it with remind.done (which sets status=done).
+    if (intention.nag && intention.trigger === "once") {
+      const next = this.#now() + NAG_INTERVAL_MS;
+      if (intention.expiresAt === null || next <= intention.expiresAt) {
+        this.#store.reschedule(intention.id, next);
+        return;
+      }
+    }
     this.#store.markDone(intention.id);
   }
 }
+
+/** How long a nag-until-done reminder waits before re-firing. */
+const NAG_INTERVAL_MS = 24 * 60 * 60_000;

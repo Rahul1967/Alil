@@ -23,6 +23,8 @@ interface IntentionRow {
   cron_expr: string | null;
   event_match: string | null;
   context_cue: string | null;
+  nag: number;
+  last_surfaced_at: number | null;
   status: string;
   dedup_key: string | null;
   expires_at: number | null;
@@ -51,6 +53,7 @@ export class ProspectiveStore {
   #cancel: Statement;
   #snooze: Statement;
   #done: Statement;
+  #surfaced: Statement;
   #list: Statement;
   #recover: Statement;
   #expire: Statement;
@@ -58,9 +61,9 @@ export class ProspectiveStore {
   constructor(db: DB) {
     this.#db = db;
     this.#ins = db.prepare(
-      `INSERT INTO intention(id, title, action, kind, trigger, fire_at, cron_expr, event_match, context_cue,
+      `INSERT INTO intention(id, title, action, kind, trigger, fire_at, cron_expr, event_match, context_cue, nag,
                              status, dedup_key, expires_at, created_at, fired_at, attempts, provenance)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, NULL, 0, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, NULL, 0, ?)`,
     );
     this.#get = db.prepare(`SELECT * FROM intention WHERE id = ?`);
     this.#getByDedup = db.prepare(`SELECT * FROM intention WHERE dedup_key = ?`);
@@ -93,6 +96,7 @@ export class ProspectiveStore {
     );
     // Done: acknowledge/complete an intention (distinct from cancel = "don't want it").
     this.#done = db.prepare(`UPDATE intention SET status = 'done' WHERE id = ? AND status IN ('pending','firing')`);
+    this.#surfaced = db.prepare(`UPDATE intention SET last_surfaced_at = ? WHERE id = ?`);
     this.#list = db.prepare(`SELECT * FROM intention ORDER BY created_at DESC LIMIT ?`);
     this.#recover = db.prepare(
       `UPDATE intention SET status = 'pending' WHERE status = 'firing' AND fired_at < ?`,
@@ -120,6 +124,7 @@ export class ProspectiveStore {
       n.cronExpr ?? null,
       n.eventMatch ? JSON.stringify(n.eventMatch) : null,
       n.contextCue ?? null,
+      n.nag ? 1 : 0,
       n.dedupKey ?? null,
       n.expiresAt ?? null,
       Date.now(),
@@ -187,6 +192,11 @@ export class ProspectiveStore {
     return this.#done.run(id).changes >= 1;
   }
 
+  /** Record that a context intention was just surfaced (drives the cooldown). */
+  markSurfaced(id: string, at: number): void {
+    this.#surfaced.run(at, id);
+  }
+
   list(limit = 100): Intention[] {
     return (this.#list.all(limit) as IntentionRow[]).map(toIntention);
   }
@@ -213,6 +223,8 @@ function toIntention(r: IntentionRow): Intention {
     cronExpr: r.cron_expr,
     eventMatch: r.event_match ? (JSON.parse(r.event_match) as EventMatch) : null,
     contextCue: r.context_cue ?? null,
+    nag: r.nag === 1,
+    lastSurfacedAt: r.last_surfaced_at ?? null,
     status: r.status as IntentionStatus,
     dedupKey: r.dedup_key,
     expiresAt: r.expires_at,

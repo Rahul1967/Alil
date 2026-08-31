@@ -12,6 +12,8 @@ interface RemindCreateArgs {
   event?: EventMatch; // predicate → 'event'
   manual?: boolean; // no automatic trigger → 'manual' (someday / review-only)
   context?: string; // relevance phrase → 'context' (surface when the topic comes up)
+  nag?: boolean; // re-fire daily until acknowledged (once triggers only)
+  supersedes?: string; // id of an intention this replaces (cancels the old on create)
   expiresAt?: string; // ISO
   dedupKey?: string;
 }
@@ -55,6 +57,8 @@ export const remindCreate: ToolImpl<RemindCreateArgs> = {
       },
       manual: { type: "boolean", description: "Set true for a someday/review item with NO automatic trigger (bucket list, a decision to revisit) — it just lives in the list until you bring it up. Mutually exclusive with at/cron/event." },
       context: { type: "string", description: "A relevance phrase → surface this LATER when the topic comes up, e.g. context:\"booking travel\" with action \"prefers an aisle seat\". Best for facts-for-later and decisions to resume. Mutually exclusive with at/cron/event/manual." },
+      nag: { type: "boolean", description: "Only with `at`: re-fire the reminder daily until the user marks it done (remind.done). For \"nag me until I book the flight\"." },
+      supersedes: { type: "string", description: "Id of an existing intention this one replaces — the old one is cancelled on create. Use to revise a reminder instead of leaving a stale duplicate." },
       expiresAt: { type: "string", description: "Drop the intention if it hasn't fired by this ISO time." },
       dedupKey: { type: "string", description: "Stable key to prevent scheduling the same thing twice." },
     },
@@ -84,6 +88,17 @@ export const remindCreate: ToolImpl<RemindCreateArgs> = {
     const value: RemindCreateArgs = { title: title.trim(), action: action.trim() };
     if (manual) value.manual = true;
     if (typeof context === "string") value.context = context.trim();
+
+    if (args["nag"] !== undefined && typeof args["nag"] !== "boolean") return { ok: false, error: "`nag` must be a boolean" };
+    if (args["nag"] === true) {
+      if (at === undefined) return { ok: false, error: "`nag` requires a one-off `at` trigger (it re-fires that reminder until done)" };
+      value.nag = true;
+    }
+    const supersedes = args["supersedes"];
+    if (supersedes !== undefined) {
+      if (typeof supersedes !== "string" || supersedes.trim() === "") return { ok: false, error: "`supersedes` must be a non-empty intention id" };
+      value.supersedes = supersedes.trim();
+    }
 
     const kind = args["kind"];
     if (kind !== undefined) {
@@ -153,6 +168,7 @@ export const remindCreate: ToolImpl<RemindCreateArgs> = {
       ...(args.cron ? { fireAt: new Cron(args.cron).nextRun()?.getTime() ?? null, cronExpr: args.cron } : {}),
       ...(args.event ? { eventMatch: args.event } : {}),
       ...(args.context ? { contextCue: args.context } : {}),
+      ...(args.nag ? { nag: true } : {}),
       // A windowed event trigger self-expires at `before`: if no matching event arrives in the
       // window (e.g. the user never chats on Oct 5), it lapses instead of lingering forever.
       ...(args.expiresAt ? { expiresAt: Date.parse(args.expiresAt) } : args.event?.before !== undefined ? { expiresAt: args.event.before } : {}),
@@ -164,6 +180,11 @@ export const remindCreate: ToolImpl<RemindCreateArgs> = {
     // Index a context cue so it can be matched against future turns (facts-for-later).
     if (trigger === "context" && args.context) {
       await ctx.memory?.store?.indexContextCue(intention.id, args.context, { origin: "operator" });
+    }
+    // Supersede: cancel the old intention this one replaces (and drop its context cue).
+    if (args.supersedes) {
+      store.cancel(args.supersedes);
+      ctx.memory?.store?.removeContextCue(args.supersedes);
     }
 
     const whenText =

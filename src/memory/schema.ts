@@ -77,6 +77,8 @@ CREATE TABLE IF NOT EXISTS intention (
   cron_expr    TEXT,                       -- recurrence, null unless cron
   event_match  TEXT,                       -- JSON predicate, null unless event
   context_cue  TEXT,                        -- relevance phrase, null unless trigger='context'
+  nag          INTEGER NOT NULL DEFAULT 0,   -- 1 = re-fire until acknowledged (nag-until-done)
+  last_surfaced_at INTEGER,                  -- context items: last time surfaced (cooldown)
   status       TEXT NOT NULL DEFAULT 'pending',
   dedup_key    TEXT,
   expires_at   INTEGER,
