@@ -16,6 +16,7 @@ import type { MemorySystem, MemoryStore } from "../memory/index.ts";
 import type { ProspectiveStore } from "../memory/index.ts";
 import type { Intention, IncomingEvent } from "../memory/types.ts";
 import { WorldStore } from "../world/index.ts";
+import { DossierStore } from "../dossier/index.ts";
 import { AuditLedger, Scheduler } from "../gateway/index.ts";
 import type { EventBus } from "../gateway/index.ts";
 import { TurnQueue } from "../gateway/index.ts";
@@ -54,6 +55,8 @@ export interface AlilConfig {
   policyPath?: string;
   worldPath?: string;
   worldMarkdownPath?: string;
+  /** Directory the operator-dossier markdown files live under. Default workspace/DOSSIER. */
+  dossierRoot?: string;
   auditPath?: string;
   guards?: GuardLimits;
   maxParallel?: number;
@@ -91,6 +94,7 @@ export class Alil {
   readonly #memory: MemorySystem | null;
   readonly #episodes: EpisodeManager | null;
   readonly #world: WorldStore;
+  readonly #dossier: DossierStore;
   readonly #scheduler: Scheduler | null;
   readonly #actions: ActionSink;
 
@@ -106,6 +110,7 @@ export class Alil {
     this.#memory = built.memory;
     this.#episodes = built.episodes;
     this.#world = built.world;
+    this.#dossier = built.dossier;
     this.#scheduler = built.scheduler;
     this.#eventBus = built.eventBus;
   }
@@ -113,6 +118,10 @@ export class Alil {
   /** The world-model, for channels that want to surface present-tense state. */
   get world(): WorldStore {
     return this.#world;
+  }
+  /** The operator dossier, for channels that surface a "who you are" view. */
+  get dossier(): DossierStore {
+    return this.#dossier;
   }
   get audit(): AuditLedger {
     return this.#ledger;
@@ -215,6 +224,7 @@ interface BuiltCore {
   memory: MemorySystem | null;
   episodes: EpisodeManager | null;
   world: WorldStore;
+  dossier: DossierStore;
   scheduler: Scheduler | null;
   eventBus: EventBus;
 }
@@ -236,6 +246,9 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     path: config.worldPath ?? "workspace/.alil/world.json",
     markdownPath: config.worldMarkdownPath ?? "workspace/WORLD.md",
   });
+  // Operator dossier: markdown files are the source of truth; the store reads/writes them and
+  // renders the always-on operator preamble. Channel-agnostic, like the world-model.
+  const dossier = new DossierStore({ root: config.dossierRoot ?? `${sandboxRoot}/DOSSIER` });
 
   // Memory (optional). Recall ON by default for ALL channels; canonical stays standing context.
   let memory: MemorySystem | null = null;
@@ -285,6 +298,7 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
       memory: memCtx,
       prospective: prospCtx,
       world: { store: world },
+      dossier: { store: dossier },
       ...(binding.sendFile ? { channel: { sendFile: binding.sendFile } } : {}),
     }),
     approvals: binding.approvals,
@@ -301,6 +315,7 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     prompt: new PromptAssembler(new FilePersonaSource(), { env: { now: () => new Date() }, ...(knowledge ? { knowledge } : {}) }),
     actions: boundary,
     world: logger ? tapWorld(world, logger) : world,
+    profile: { preamble: () => dossier.operatorPreamble() },
     ...(observer ? { observer } : {}),
   };
   const brain = new Brain({ modelId: config.modelId, guards: config.guards ?? DEFAULT_GUARDS }, registry, ports);
@@ -338,7 +353,7 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     },
   });
 
-  alil = new Alil(config, binding, { brain, actions: boundary, planService, ledger: audit, auditSink, logger, memory, episodes, world, scheduler, eventBus });
+  alil = new Alil(config, binding, { brain, actions: boundary, planService, ledger: audit, auditSink, logger, memory, episodes, world, dossier, scheduler, eventBus });
   return alil;
 }
 

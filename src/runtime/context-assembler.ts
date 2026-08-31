@@ -16,12 +16,18 @@ export function initialMessages(params: {
   recalled: Fragment[];
   skills: SkillRef[];
   worldState?: string | null;
+  operatorProfile?: string | null;
 }): ChatMessage[] {
-  const { input, recalled, skills, worldState } = params;
+  const { input, recalled, skills, worldState, operatorProfile } = params;
   const messages: ChatMessage[] = [];
 
   const contextBlocks: string[] = [];
-  // Present-tense state first — it orients everything else. Authored by the assistant's own
+  // Who the operator is, first of all — it conditions how everything else is read. Sourced from
+  // the dossier (the durable, operator-owned model of the user); trusted, so no untrusted fence.
+  if (operatorProfile) {
+    contextBlocks.push(`[operator]\n${operatorProfile}`);
+  }
+  // Present-tense state next — it orients the current turn. Authored by the assistant's own
   // gated world.* tools; individual entries carry their own ⚠untrusted markers when tainted.
   if (worldState) {
     contextBlocks.push(`[current state]\n${worldState}`);

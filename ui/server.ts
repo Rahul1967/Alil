@@ -165,6 +165,30 @@ const server = createServer(async (req, res) => {
     }
   }
 
+  // ── Operator dossier (read-only view): list files, optionally filtered by type/tag/text ──
+  if (req.method === "GET" && url.pathname === "/api/dossier") {
+    const type = url.searchParams.get("type");
+    const tag = url.searchParams.get("tag");
+    const text = url.searchParams.get("text");
+    const items = alil.dossier.query({
+      ...(type ? { type: type as never } : {}),
+      ...(tag ? { tagsAny: [tag] } : {}),
+      ...(text ? { text } : {}),
+    }).map((f) => ({
+      slug: f.frontmatter.slug, type: f.frontmatter.type, title: f.frontmatter.title,
+      tags: f.frontmatter.tags, status: f.frontmatter.status,
+      description: f.frontmatter.description ?? "", updated: f.frontmatter.updated,
+      snippet: f.body.replace(/\s+/g, " ").slice(0, 200),
+    }));
+    return json(200, { items });
+  }
+  const dm = url.pathname.match(/^\/api\/dossier\/([^/]+)$/);
+  if (req.method === "GET" && dm) {
+    const f = alil.dossier.get(decodeURIComponent(dm[1]!));
+    if (!f) return json(404, { error: "not found" });
+    return json(200, { frontmatter: f.frontmatter, body: f.body, relPath: f.relPath });
+  }
+
   // ── Memory dashboard (read-only inspection) ─────────────────────────────────
   if (req.method === "GET" && url.pathname.startsWith("/api/memory/")) {
     const memory = alil.memory;

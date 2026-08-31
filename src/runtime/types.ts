@@ -82,6 +82,15 @@ export interface WorldPort {
   stateBlock(): string | null;
 }
 
+/**
+ * Always-on operator profile for context assembly. `preamble` returns a compact, capped block of
+ * the highest-signal facts about the user (identity + high-confidence preferences), or null when
+ * the dossier is empty. Optional on the brain — absent ⇒ no operator block is injected.
+ */
+export interface ProfilePort {
+  preamble(): string | null;
+}
+
 /** Lists the tools available to advertise to the model. Decouples the brain from the registry. */
 export interface ToolCatalogPort {
   list(): Promise<ToolSpec[]>;

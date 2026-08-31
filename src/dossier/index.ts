@@ -1,0 +1,9 @@
+export { DossierStore, slugify, normalizeTags, serialize, parse } from "./store.ts";
+export type { DossierStoreOptions } from "./store.ts";
+export {
+  DOSSIER_TYPES, TAG_VOCABULARY,
+} from "./types.ts";
+export type {
+  DossierType, DossierStatus, DossierConfidence, DossierFrontmatter, DossierFile,
+  DossierQuery, DossierCreate, DossierPatch,
+} from "./types.ts";

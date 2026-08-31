@@ -26,6 +26,12 @@ import { sendFile } from "./send-file.ts";
 import { worldRead } from "./world-read.ts";
 import { worldTrack } from "./world-track.ts";
 import { worldNote } from "./world-note.ts";
+import { dossierQuery } from "./dossier-query.ts";
+import { dossierRead } from "./dossier-read.ts";
+import { dossierCreate } from "./dossier-create.ts";
+import { dossierUpdate } from "./dossier-update.ts";
+import { dossierSupersede } from "./dossier-supersede.ts";
+import { dossierDelete } from "./dossier-delete.ts";
 
 /** name → tool. Adding a tool = one entry here (plus its file). */
 export class ToolRegistry {
@@ -72,4 +78,10 @@ export const DEFAULT_TOOLS: AnyTool[] = [
   worldRead,
   worldTrack,
   worldNote,
+  dossierQuery,
+  dossierRead,
+  dossierCreate,
+  dossierUpdate,
+  dossierSupersede,
+  dossierDelete,
 ];

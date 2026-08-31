@@ -9,6 +9,7 @@ import type {
   ToolCatalogPort,
   BrainObserver,
   WorldPort,
+  ProfilePort,
   Clock,
 } from "./types.ts";
 import { systemClock } from "./types.ts";
@@ -29,6 +30,8 @@ export interface BrainPorts {
   observer?: BrainObserver;
   /** Optional present-tense state injected into context. Absent ⇒ no state block. */
   world?: WorldPort;
+  /** Optional always-on operator profile injected into context. Absent ⇒ no operator block. */
+  profile?: ProfilePort;
 }
 
 export interface RunOptions {
@@ -106,7 +109,8 @@ export class Brain {
     // (with any tool calls) and the tool results, so the provider sees a valid
     // user → assistant(tool_use) → tool(result) alternation.
     const worldState = this.#ports.world?.stateBlock() ?? null;
-    const messages = initialMessages({ input, recalled, skills, worldState });
+    const operatorProfile = this.#ports.profile?.preamble() ?? null;
+    const messages = initialMessages({ input, recalled, skills, worldState, operatorProfile });
 
     for (;;) {
       if (signal?.aborted) return aborted();

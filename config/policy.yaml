@@ -68,3 +68,9 @@ rules:
   - kind: allow
     match: { tool: world.read }
     note: "reading your own present-tense world-model is safe (read-only); world.track/world.note are writes and require approval"
+  - kind: allow
+    match: { tool: dossier.query }
+    note: "searching your own operator dossier is safe (read-only); dossier.create/update/supersede/delete are writes and require approval"
+  - kind: allow
+    match: { tool: dossier.read }
+    note: "reading one operator-dossier file is safe (read-only)"
