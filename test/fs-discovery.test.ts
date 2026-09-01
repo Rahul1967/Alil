@@ -101,6 +101,23 @@ test("fs.list caps at 100 entries and flags truncation", async () => {
   }
 });
 
+test("fs.list puts the real entry names in the observation summary (read-side grounding)", async () => {
+  const { ctx, dir } = await ctxWith();
+  try {
+    await writeFile(join(dir, "export.csv"), "a,b,c", "utf8");
+    await mkdir(join(dir, "documents"));
+    const out = await run(fsList, {}, ctx);
+    // The names live in the summary the model reads, not only in data — so it can't summarize a
+    // directory from memory.
+    assert.match(out.summary, /export\.csv/);
+    assert.match(out.summary, /documents/);
+    assert.match(out.summary, /- export\.csv \(5 B\)/); // file marker + size
+    assert.match(out.summary, /d documents/); // dir marker
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("fs.list cannot escape the sandbox", async () => {
   const { ctx, dir } = await ctxWith();
   try {

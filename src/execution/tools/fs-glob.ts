@@ -65,9 +65,10 @@ export const fsGlob: ToolImpl<FsGlobArgs> = {
     hits.sort((a, b) => b.mtimeMs - a.mtimeMs); // newest first
     const truncated = hits.length > MAX_HITS;
     const shown = hits.slice(0, MAX_HITS);
-    const summary = truncated
-      ? `matched ${MAX_HITS} of ${hits.length} files for '${args.pattern}' (truncated)`
-      : `matched ${shown.length} file${shown.length === 1 ? "" : "s"} for '${args.pattern}'`;
-    return { summary, data: { pattern: args.pattern, truncated, files: shown.map((h) => h.path) } };
+    const head = truncated
+      ? `matched ${MAX_HITS} of ${hits.length} files for '${args.pattern}' (truncated):`
+      : `matched ${shown.length} file${shown.length === 1 ? "" : "s"} for '${args.pattern}':`;
+    const body = shown.length === 0 ? "  (no matches)" : shown.map((h) => `  ${h.path}`).join("\n");
+    return { summary: `${head}\n${body}`, data: { pattern: args.pattern, truncated, files: shown.map((h) => h.path) } };
   },
 };

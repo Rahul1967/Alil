@@ -64,10 +64,13 @@ export const fsList: ToolImpl<FsListArgs> = {
     entries.sort((a, b) => b.mtimeMs - a.mtimeMs); // newest first
     const truncated = entries.length > MAX_ENTRIES;
     const shown = entries.slice(0, MAX_ENTRIES);
-    const summary = truncated
-      ? `listed ${MAX_ENTRIES} of ${entries.length} entries in ${rel} (truncated, newest first)`
-      : `listed ${shown.length} entr${shown.length === 1 ? "y" : "ies"} in ${rel}`;
-
-    return { summary, data: { path: rel, truncated, entries: shown } };
+    const head = truncated
+      ? `listed ${MAX_ENTRIES} of ${entries.length} entries in ${rel} (truncated, newest first):`
+      : `listed ${shown.length} entr${shown.length === 1 ? "y" : "ies"} in ${rel}:`;
+    // Put the real names IN the observation (not just in `data`), so an answer to "what's in X" is
+    // built from ground truth and the model has nothing to summarize from memory.
+    const lines = shown.map((e) => `  ${e.type === "dir" ? "d" : e.type === "file" ? "-" : "?"} ${e.name}${e.type === "file" ? ` (${e.size} B)` : ""}`);
+    const body = shown.length === 0 ? "  (empty)" : lines.join("\n");
+    return { summary: `${head}\n${body}`, data: { path: rel, truncated, entries: shown } };
   },
 };

@@ -491,6 +491,7 @@ Legend: ✅ built · 🟡 partial · ⬜ planned.
 | Dossier: `timeline.md` automation; sqlite/FTS index | 🟡/⬜ | `event` type + skeleton exist; timeline append + index deferred |
 | Persona (§10) | ✅ | `workspace/SOUL.md`, base prompt |
 | Grounding: harness-injected post-action verification (§10a #1) | ✅ | `src/execution/executor.ts` + per-tool `verify` (fs.write/edit, dossier.*) |
+| Grounding: read-side — listings surface real entries in the observation (§10a #3) | ✅ | `fs.list`/`fs.glob` put names in the summary; prompt rule to answer listings from a live call |
 | Grounding: done-claim gate, fabrication-rate telemetry (§10a #2, #5) | ⬜ | planned; reuses provenance/taint |
 | Skill runtime (signed, sandboxed, manifest-enforced) | ⬜ | design only; see §04 supply-chain row |
 
