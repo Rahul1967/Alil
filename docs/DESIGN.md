@@ -5,6 +5,8 @@ Basis: deep-research run (24 sources, 23 adversarially verified claims; run `wf_
 
 A personal AI assistant runtime where the model decides *what* to do and the harness decides *whether and how* it happens. Responsible-AI enforcement and human-in-the-loop (HITL) approval are core runtime infrastructure — not prompts, not plugins.
 
+**Design rounds:** [MEMORY.md](MEMORY.md) (memory tiers) · [operator-dossier-design.md](operator-dossier-design.md) (markdown-as-truth operator model) · [prospective-memory-design.md](prospective-memory-design.md) (future-directed cognition) · [channel-ingestion-design.md](channel-ingestion-design.md) (files & attachments from any channel).
+
 ---
 
 ## 01 · Goals
