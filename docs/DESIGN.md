@@ -428,6 +428,45 @@ Keep the self-model matched to the machinery, so the promise stays honest.
   no standing authority, verify-don't-assume, untrusted content is data, never self-refuse an
   available action.
 
+### 10a · Grounding — success must be downstream of an observation
+
+A language model has no memory of whether a side-effect actually happened; it emits whatever
+completes the pattern, so "it's done / the file is at X / I confirmed it exists" can be generated
+with no tool call behind it. This is *confabulation*, and it is not fixable by prompting — a
+"verify, never assume" instruction is advisory and gets ignored under pressure (observed:
+`base.ts` carried exactly that line while the model still fabricated a file move, its size, a
+directory listing, and an absolute path). The field's consensus is architectural: **a claim of
+success must be downstream of a real observation the harness inserted, and the only thing that can
+change the world is a validated tool call.** (Sources: ReAct's grounded observation step;
+Anthropic's `tool_use`→`tool_result` protocol where the model halts and the harness authors the
+result; Aider's apply-then-show-git-diff; OpenHands/Devin where the sandbox terminal is ground
+truth; Chain-of-Verification — which only helps when the verification consumes an *external* signal,
+not a transcript re-read.)
+
+Alil already has the two prerequisites most harnesses lack — a grounded tool loop (results fed back
+verbatim, fenced by provenance) and a provenance/taint model. The missing piece is *enforcement*.
+The structural mitigations, highest-leverage first:
+
+1. **Harness-injected post-action verification.** A mutating tool may declare a `verify(args, ctx)`
+   read-back; after a successful `run`, the executor calls it automatically and folds the result
+   (`verified: …` / `VERIFICATION FAILED: …`) into the observation the model sees — *before* the
+   model gets the turn back. Success is thereby structurally downstream of an independent check the
+   model did not author. Implemented for `fs.write`/`fs.edit` and the `dossier.*` mutations
+   (`src/execution/executor.ts`, per-tool `verify`); the base prompt teaches the model to obey a
+   `VERIFICATION FAILED` line. (Extend to `world.*` and future mutating tools.)
+2. **A done-claim gate (planned).** Before an assistant message reaches the user, scan it for
+   completion claims and file paths; every asserted path must carry provenance from a successful
+   `tool_result`, every "moved/created/deleted/confirmed" must map to a preceding successful call.
+   On mismatch, don't send — inject a hard error observation and loop. This reuses the existing
+   provenance/taint machinery to turn the advisory prompt line into an enforced invariant.
+3. **Verbatim tool output.** Always feed back exit code + stdout + stderr, never a harness-summarized
+   "ok" — a summarized success line reopens the gap.
+4. **Never fabricate a path.** The model reports paths exactly as a tool returned them and cannot
+   know the absolute host path from inside the jail (prompt-enforced; ideally validated).
+5. **Telemetry — fabrication rate.** Count assistant turns that assert a completed side-effect with
+   no matching successful `tool_result` in the preceding observations, ÷ total completion claims.
+   Computable from the transcript; proves the mitigations work and catches regressions. (Planned.)
+
 ## 11 · Implementation status & code map
 
 **As of 2026-09-01.** This section is the single as-built view; update it when a slice lands.
@@ -451,6 +490,8 @@ Legend: ✅ built · 🟡 partial · ⬜ planned.
 | Operator dossier (§09): store, tools, always-on block, UI, migration | ✅ | `src/dossier/`, `dossier-*` tools, `ui/` |
 | Dossier: `timeline.md` automation; sqlite/FTS index | 🟡/⬜ | `event` type + skeleton exist; timeline append + index deferred |
 | Persona (§10) | ✅ | `workspace/SOUL.md`, base prompt |
+| Grounding: harness-injected post-action verification (§10a #1) | ✅ | `src/execution/executor.ts` + per-tool `verify` (fs.write/edit, dossier.*) |
+| Grounding: done-claim gate, fabrication-rate telemetry (§10a #2, #5) | ⬜ | planned; reuses provenance/taint |
 | Skill runtime (signed, sandboxed, manifest-enforced) | ⬜ | design only; see §04 supply-chain row |
 
 **Channels built:** terminal (`scripts/chat.ts`), browser (`ui/`), Telegram
