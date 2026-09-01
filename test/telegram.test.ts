@@ -83,6 +83,34 @@ test("runTelegramLoop ignores non-authorized senders, handles the owner, advance
   assert.equal(savedOffset, 3); // last update_id (2) + 1
 });
 
+test("runTelegramLoop dispatches a file-only message (no text) to onMessage", async () => {
+  const owner = 100;
+  const updates: TelegramUpdate[] = [
+    // A document with no caption and no text — must still be handled (regression: the dispatch
+    // gate previously required msg.text, silently dropping bare file attachments).
+    { update_id: 9, message: { message_id: 9, date: 0, chat: { id: owner }, from: { id: owner },
+      document: { file_id: "FILE123", file_name: "export.csv", mime_type: "text/csv" } } },
+  ];
+  const f = fakeFetch([{ ok: true, result: updates }, { ok: true, result: [] }]);
+  const client = new TelegramClient({ token: "T", fetchImpl: f.fn });
+  const handled: TelegramMessage[] = [];
+  const controller = new AbortController();
+
+  await runTelegramLoop({
+    client,
+    authorizedUserId: owner,
+    onMessage: async (m) => { handled.push(m); controller.abort(); },
+    loadOffset: () => 0,
+    saveOffset: () => {},
+    signal: controller.signal,
+    pollTimeout: 0,
+  });
+
+  assert.equal(handled.length, 1);
+  assert.equal(handled[0]!.document?.file_name, "export.csv");
+  assert.equal(handled[0]!.text, undefined);
+});
+
 test("runTelegramLoop routes an authorized button press to onCallback", async () => {
   const owner = 100;
   const updates: TelegramUpdate[] = [

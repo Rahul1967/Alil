@@ -239,8 +239,9 @@ export class TelegramClient {
 export interface TelegramLoopDeps {
   client: TelegramClient;
   authorizedUserId: number;
-  /** Handle one authorized text message. Called fire-and-forget so the poller keeps running
-   * (a turn may await an approval button press, which arrives as a later update). */
+  /** Handle one authorized message — text, a document/photo attachment, or a captioned file.
+   * Called fire-and-forget so the poller keeps running (a turn may await an approval button
+   * press, which arrives as a later update). */
   onMessage: (msg: TelegramMessage) => Promise<void> | void;
   /** Handle an authorized inline-button press (HITL approve/reject). Awaited — it's fast. */
   onCallback?: (cbq: TelegramCallbackQuery) => Promise<void> | void;
@@ -285,7 +286,7 @@ export async function runTelegramLoop(deps: TelegramLoopDeps): Promise<void> {
         } else {
           console.error(`[tg] ignored callback from unauthorized user ${cbq.from.id}`);
         }
-      } else if (msg && msg.text) {
+      } else if (msg && (msg.text || msg.document || msg.photo || msg.caption)) {
         if (msg.from?.id === deps.authorizedUserId) {
           // Fire-and-forget so the poller keeps running (a turn may await an approval tap).
           void Promise.resolve(deps.onMessage(msg)).catch((e) => console.error("[tg] turn error:", e));

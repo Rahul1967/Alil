@@ -14,8 +14,24 @@ import type { ChannelBinding } from "../src/app/index.ts";
 import type { ApprovalPort, ApprovalRequest, ApprovalDecision } from "../src/policy/index.ts";
 import { TelegramClient, runTelegramLoop } from "../src/channels/telegram.ts";
 import type { TelegramMessage, TelegramCallbackQuery } from "../src/channels/telegram.ts";
+import type { Attachment } from "../src/ingestion/index.ts";
 
 const CHANNEL = "telegram";
+
+// Files stay referenceable for a short window after they arrive, so "save the file I just sent"
+// works even when the file and the instruction are separate Telegram messages. Bounded by count
+// and age so stale files don't linger in context.
+const RECENT_ATTACHMENT_MS = 15 * 60 * 1000;
+const RECENT_ATTACHMENT_MAX = 5;
+let recentAttachments: { att: Attachment; at: number }[] = [];
+function rememberAttachment(att: Attachment): void {
+  recentAttachments.push({ att, at: Date.now() });
+}
+function liveAttachments(): Attachment[] {
+  const cutoff = Date.now() - RECENT_ATTACHMENT_MS;
+  recentAttachments = recentAttachments.filter((r) => r.at >= cutoff).slice(-RECENT_ATTACHMENT_MAX);
+  return recentAttachments.map((r) => r.att);
+}
 const modelId = process.env.BEDROCK_MODEL_ID ?? "us.anthropic.claude-sonnet-4-5-20250929-v1:0";
 
 const token = process.env.TELEGRAM_BOT_TOKEN ?? process.argv[2];
@@ -136,27 +152,37 @@ async function onMessage(msg: TelegramMessage): Promise<void> {
   }
 
   // Inbound file: download authenticated bytes and cross the ingestion boundary (tainted
-  // `ingested`), then run a turn that lists it for the model to open with doc.read / fs.read.
-  const attachments = [];
+  // `ingested`). The file is remembered so it stays referenceable for the next few turns.
   const file = msg.document ?? (msg.photo && msg.photo.length > 0 ? msg.photo[msg.photo.length - 1] : undefined);
+  let justArrived: Attachment | undefined;
   if (file) {
     try {
       const bytes = await client.downloadFile(file.file_id);
       const filename = msg.document?.file_name ?? `photo-${file.file_id.slice(-8)}.jpg`;
-      const att = await alil.ingestion.receive({
+      justArrived = await alil.ingestion.receive({
         bytes, filename, source: CHANNEL,
         ...(msg.document?.mime_type ? { mime: msg.document.mime_type } : {}),
         ...(msg.caption ? { caption: msg.caption } : {}),
       });
-      attachments.push(att);
+      rememberAttachment(justArrived);
     } catch (e) {
       await client.sendMessage(msg.chat.id, `· couldn't ingest that file: ${(e as Error).message}`);
     }
   }
 
+  // Include the just-arrived file plus any still-recent ones, so an instruction that follows a bare
+  // file drop ("save the file I just sent") can still see it.
+  const attachments = liveAttachments();
+
   await client.sendChatAction(msg.chat.id);
-  const turnText = msg.text ?? msg.caption ?? (attachments.length > 0 ? "(the operator sent a file)" : "");
-  const turn = await alil.runTurn(turnText, provenance, { label: "inbound", ...(attachments.length > 0 ? { attachments } : {}) });
+  const turnText =
+    msg.text ??
+    msg.caption ??
+    (justArrived ? `(the operator sent a file: ${justArrived.filename})` : "");
+  const turn = await alil.runTurn(turnText, provenance, {
+    label: "inbound",
+    ...(attachments.length > 0 ? { attachments } : {}),
+  });
   await client.sendMessage(msg.chat.id, turn.assistantText ?? "(no reply)");
 }
 
