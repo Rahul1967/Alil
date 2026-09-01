@@ -1,5 +1,5 @@
 /**
- * Shared core contracts (subset of PLAN.md §2 that the brain touches).
+ * Shared core contracts (the subset of the design the brain touches; see DESIGN.md §02–03).
  * Types only — no logic. Every section imports from here so definitions stay single-sourced.
  */
 

@@ -2,7 +2,7 @@
 
 **v0.2 · 2026-08-26** · Consolidates the former MEMORY / MEMORY_IMPL / MEMORY_AGENTIC docs.
 
-Companion to `DESIGN.md` (harness architecture & threat model) and `PLAN.md` (repo layout).
+Companion to `DESIGN.md` (harness architecture, threat model, and the as-built code map §11).
 This document is the single source of truth for Alil's memory: the architecture, how it is
 stored and retrieved, and the agentic (pull) model by which the assistant fetches memory on
 its own.
@@ -356,5 +356,5 @@ ledger, agentic Phase 1 (standing canonical), Phase 1.5 (canonical tools), Phase
 
 ---
 
-*Related: `DESIGN.md` (harness architecture, threat model, HITL), `PLAN.md` (repo layout, data
+*Related: `DESIGN.md` (harness architecture, threat model, HITL, and the as-built code map, data
 model, tool catalog), `BEST_PRACTICES.md`.*

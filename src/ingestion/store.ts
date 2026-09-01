@@ -5,7 +5,7 @@ import { Sandbox } from "../execution/sandbox.ts";
 import type { Attachment, AttachmentKind, IncomingFile, IngestionPort } from "./types.ts";
 
 /**
- * IngestionStore — the one boundary all inbound files cross (docs/channel-ingestion-design.md §03).
+ * IngestionStore — the one boundary all inbound files cross (DESIGN.md §08c).
  *
  * Adapters hand it authenticated bytes + a name + MIME; it sanitizes the name, places the file
  * under `attachments/<YYYY-MM-DD>/` inside the sandbox jail, refuses protected/oversized writes,

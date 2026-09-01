@@ -1,5 +1,5 @@
 /**
- * Channel-agnostic ingestion contracts (docs/channel-ingestion-design.md §03).
+ * Channel-agnostic ingestion contracts (DESIGN.md §08c).
  * Types only — no logic. A channel adapter's job ends at producing an `IncomingFile`
  * (authenticated bytes + name + MIME); the shared `IngestionPort` turns that into an
  * `Attachment` sitting in the sandbox, tainted `ingested`, ready for doc.read / fs.read.

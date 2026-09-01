@@ -1,5 +1,5 @@
 /**
- * AuditLedger — the append-only decision/write log (DESIGN.md §02 gateway, PLAN.md §3).
+ * AuditLedger — the append-only decision/write log (DESIGN.md §02 gateway, §11 code map).
  *
  * Every behavior-changing event (a distilled episode, a pinned canonical fact, a completed
  * turn) is recorded as one JSONL line with a monotonic seq. It is the forensic source of

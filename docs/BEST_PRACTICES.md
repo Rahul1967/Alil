@@ -1,6 +1,6 @@
 # Alil — Engineering Best Practices & Implementation Checklists
 
-**Companion to `DESIGN.md` and `PLAN.md` · v0.1 · 2026-07-07**
+**Companion to `DESIGN.md` · v0.1 · 2026-07-07**
 
 Practical checklists to run through when building each kind of component. Every item is
 phrased so you can tick it off in a PR. Grounded in the verified research (`DESIGN.md`
@@ -88,10 +88,10 @@ Apply to *every* component. The three lenses:
       Execution (`DESIGN.md` §02) and respect that zone's trust level.
 - [ ] **Crosses the boundary?** If it produces a side-effect, it must go through the policy
       engine — no direct execution.
-- [ ] **Data contract first.** Define/extend the schema (`PLAN.md` §2) before code; make
+- [ ] **Data contract first.** Define/extend the schema (`DESIGN.md` §11 code map) before code; make
       illegal states unrepresentable in the types.
 - [ ] **Provenance-aware.** Thread `Provenance` through any new context path.
-- [ ] **Observable.** Emit `LogEvent`s for every decision and side-effect (`PLAN.md` §3).
+- [ ] **Observable.** Emit `LogEvent`s for every decision and side-effect (`DESIGN.md` §02, §11).
 - [ ] **Config over code** for anything an operator should tune (rules, limits, toggles) —
       goes in `config/`, reviewable without deploy.
 - [ ] **Reversible / auditable.** Behavior-changing state (memory writes, grants, schedules)
@@ -105,7 +105,7 @@ Apply to *every* component. The three lenses:
 ## 3 · Implementing a tool
 
 - [ ] **Declare the effect class** (`read`/`write`/`execute`/`network`/`spend`) — this,
-      not the name, drives policy (`PLAN.md` §6).
+      not the name, drives policy (`DESIGN.md` §03).
 - [ ] **Typed arg schema**, validated at execution; reject unknown/extra fields.
 - [ ] **Assign a default risk tier** and confirm the pipeline handling matches intent.
 - [ ] **Idempotency key** for any side-effect; document what "already done" means.
