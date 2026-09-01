@@ -65,13 +65,92 @@ function scrollDown() {
   document.querySelector("main").scrollTop = document.querySelector("main").scrollHeight;
 }
 
+// ── Markdown beautifier ────────────────────────────────────────────────────────
+// Small, dependency-free, and safe-by-construction: every scrap of source text is
+// HTML-escaped BEFORE any tag is emitted, so model output (untrusted) can never inject
+// markup. We only render a pragmatic subset — headings, bold/italic, inline+fenced
+// code, links, lists, blockquotes, hr — which covers what the model actually writes.
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// Inline spans, applied to already-escaped text. Order matters: code first so its
+// contents are shielded from emphasis/link rules.
+function renderInline(s) {
+  const codes = [];
+  s = s.replace(/`([^`]+)`/g, (_, c) => `\u0000${codes.push(`<code>${c}</code>`) - 1}\u0000`);
+  // [label](url) — only http(s)/mailto to keep hrefs harmless.
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+|mailto:[^\s)]+)\)/g,
+    (_, label, url) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`);
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/\b__([^_]+)__\b/g, "<strong>$1</strong>");
+  s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+  s = s.replace(/(^|[^_])_([^_\n]+)_/g, "$1<em>$2</em>");
+  s = s.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => codes[Number(i)]);
+}
+
+// Block-level pass over escaped source lines.
+function renderMarkdown(src) {
+  const lines = escapeHtml(src).split("\n");
+  const out = [];
+  let i = 0;
+  let para = [];
+  const flushPara = () => { if (para.length) { out.push(`<p>${renderInline(para.join(" "))}</p>`); para = []; } };
+  while (i < lines.length) {
+    const line = lines[i];
+    const fence = line.match(/^\s*```(.*)$/);
+    if (fence) { // fenced code block — verbatim until the closing fence
+      flushPara();
+      i++;
+      const body = [];
+      while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) { body.push(lines[i]); i++; }
+      i++; // consume closing fence
+      out.push(`<pre><code>${body.join("\n")}</code></pre>`);
+      continue;
+    }
+    if (/^\s*$/.test(line)) { flushPara(); i++; continue; }
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) { flushPara(); const n = heading[1].length; out.push(`<h${n}>${renderInline(heading[2])}</h${n}>`); i++; continue; }
+    if (/^\s*(?:---|\*\*\*|___)\s*$/.test(line)) { flushPara(); out.push("<hr>"); i++; continue; }
+    // '>' has already been escaped to '&gt;' by escapeHtml, so match that form.
+    if (/^\s*&gt;\s?/.test(line)) {
+      flushPara();
+      const quote = [];
+      while (i < lines.length && /^\s*&gt;\s?/.test(lines[i])) { quote.push(lines[i].replace(/^\s*&gt;\s?/, "")); i++; }
+      out.push(`<blockquote>${renderInline(quote.join(" "))}</blockquote>`);
+      continue;
+    }
+    if (/^\s*(?:[-*+]|\d+[.)])\s+/.test(line)) {
+      flushPara();
+      const ordered = /^\s*\d+[.)]\s+/.test(line);
+      const items = [];
+      while (i < lines.length && /^\s*(?:[-*+]|\d+[.)])\s+/.test(lines[i])) {
+        items.push(`<li>${renderInline(lines[i].replace(/^\s*(?:[-*+]|\d+[.)])\s+/, ""))}</li>`);
+        i++;
+      }
+      out.push(`<${ordered ? "ol" : "ul"}>${items.join("")}</${ordered ? "ol" : "ul"}>`);
+      continue;
+    }
+    para.push(line.trim());
+    i++;
+  }
+  flushPara();
+  return out.join("");
+}
+
 function addMessage(role, text, trace) {
   if (empty) empty.remove();
   const row = document.createElement("div");
   row.className = "msg " + role;
   const bubble = document.createElement("div");
   bubble.className = "bubble";
-  bubble.textContent = text;
+  if (role === "bot") {
+    bubble.classList.add("md");
+    bubble.innerHTML = renderMarkdown(text);
+  } else {
+    bubble.textContent = text;
+  }
   if (trace && trace.length) {
     const t = document.createElement("div");
     t.className = "trace";
