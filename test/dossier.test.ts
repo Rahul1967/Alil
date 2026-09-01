@@ -174,6 +174,28 @@ test("migratePreferences moves canonical prefs into preferences.md and forgets t
   await rm(dir, { recursive: true, force: true });
 });
 
+test("migratePreferences is a silent no-op (no approval) when there are no canonical prefs", async () => {
+  const root = await tmpRoot();
+  const dir = await mkdtemp(join(tmpdir(), "alil-core-"));
+  const end: ModelResponse = { text: "ok", toolCalls: [], stopReason: "end", usage: { inputTokens: 1, outputTokens: 1 } };
+  const registry = new ProviderRegistry().register(new MockProvider().script(end, end)).registerModel(mockSpec);
+  let asked = false;
+  const approvals: ApprovalPort = { async request() { asked = true; return { approved: true }; } };
+  const alil = createAlil(
+    { modelId: "mock-model", registry, dbPath: ":memory:", auditPath: join(dir, "audit.jsonl"),
+      worldPath: join(dir, "world.json"), worldMarkdownPath: join(dir, "WORLD.md"), dossierRoot: root },
+    { channel: "test", approvals },
+  );
+  // No canonical preferences/rules seeded — a fresh install.
+  const result = await alil.migratePreferences();
+  assert.equal(result.outcome, "ok");
+  assert.match(result.summary ?? "", /no migration needed/);
+  assert.equal(asked, false, "must not prompt the operator when there is nothing to migrate");
+  assert.equal(alil.dossier.get("preferences"), undefined);
+  await rm(root, { recursive: true, force: true });
+  await rm(dir, { recursive: true, force: true });
+});
+
 test("createAlil injects the [operator] block from the dossier every turn", async () => {
   const root = await tmpRoot();
   const store = new DossierStore({ root });

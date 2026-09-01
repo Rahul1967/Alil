@@ -17,7 +17,7 @@ import type { MemorySystem, MemoryStore } from "../memory/index.ts";
 import type { ProspectiveStore } from "../memory/index.ts";
 import type { Intention, IncomingEvent } from "../memory/types.ts";
 import { WorldStore } from "../world/index.ts";
-import { DossierStore } from "../dossier/index.ts";
+import { DossierStore, planPreferencesMigration } from "../dossier/index.ts";
 import { IngestionStore } from "../ingestion/index.ts";
 import type { Attachment } from "../ingestion/index.ts";
 import { AuditLedger, Scheduler } from "../gateway/index.ts";
@@ -161,6 +161,13 @@ export class Alil {
   async migratePreferences(): Promise<ToolResult> {
     if (!this.#memory || this.#dossier.get("preferences")) {
       return { actionId: "prefs-migration", outcome: "ok", summary: "no migration needed" };
+    }
+    // Only surface an approval when there is actually something to move. On a fresh install with no
+    // canonical preferences/rules, proposing the write would interrupt the operator's first turn to
+    // migrate nothing — so skip silently until real preferences exist.
+    const plan = await planPreferencesMigration(this.#memory.store);
+    if (plan.facts.length === 0) {
+      return { actionId: "prefs-migration", outcome: "ok", summary: "no migration needed (no canonical preferences)" };
     }
     return this.#actions.submit({
       action: {
