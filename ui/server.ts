@@ -73,9 +73,9 @@ const alil = createAlil({ modelId, debug }, binding);
 alil.start();
 
 interface ChatReply { reply: string; trace: string[]; iterations: number; stopReason: string }
-async function runTurn(text: string): Promise<ChatReply> {
+async function runTurn(text: string, attachments?: import("../src/ingestion/index.ts").Attachment[]): Promise<ChatReply> {
   activeTrace = [];
-  const turn = await alil.runTurn(text, { origin: "operator", channel: CHANNEL });
+  const turn = await alil.runTurn(text, { origin: "operator", channel: CHANNEL }, attachments && attachments.length > 0 ? { attachments } : {});
   return { reply: turn.assistantText ?? "", trace: [...activeTrace], iterations: turn.iterations, stopReason: turn.stopReason };
 }
 
@@ -267,12 +267,27 @@ const server = createServer(async (req, res) => {
     }
   }
 
+  // Upload an attachment: base64 bytes → ingestion boundary → returns the placed Attachment. The
+  // page holds the returned attachment(s) and echoes them back on the next /api/chat post.
+  if (req.method === "POST" && url.pathname === "/api/upload") {
+    try {
+      const body = JSON.parse((await readBody(req)) || "{}") as { filename?: string; contentBase64?: string; caption?: string };
+      if (!body.filename || !body.contentBase64) return json(400, { error: "filename and contentBase64 required" });
+      const bytes = new Uint8Array(Buffer.from(body.contentBase64, "base64"));
+      const att = await alil.ingestion.receive({ bytes, filename: body.filename, source: CHANNEL, ...(body.caption ? { caption: body.caption } : {}) });
+      return json(200, { attachment: att });
+    } catch (e) {
+      return json(400, { error: (e as Error).message });
+    }
+  }
+
   if (req.method === "POST" && url.pathname === "/api/chat") {
     try {
-      const body = JSON.parse((await readBody(req)) || "{}") as { message?: string };
+      const body = JSON.parse((await readBody(req)) || "{}") as { message?: string; attachments?: import("../src/ingestion/index.ts").Attachment[] };
       const text = (body.message ?? "").trim();
-      if (!text) return json(400, { error: "empty message" });
-      return json(200, await runTurn(text));
+      const attachments = body.attachments ?? [];
+      if (!text && attachments.length === 0) return json(400, { error: "empty message" });
+      return json(200, await runTurn(text || "(the operator sent a file)", attachments));
     } catch (e) {
       return json(500, { error: (e as Error).message });
     }

@@ -189,6 +189,20 @@
     }
     #send:hover:not(:disabled) { filter: brightness(1.06); }
     #send:disabled { opacity: .45; cursor: default; }
+    #attach {
+      height: 46px; width: 46px; flex: none; border: 1px solid var(--line); border-radius: 12px;
+      background: var(--panel); color: var(--ink-faint); font-size: 18px; cursor: pointer; transition: .12s;
+    }
+    #attach:hover:not(:disabled) { border-color: var(--mind); color: var(--ink); }
+    #attach:disabled { opacity: .45; cursor: default; }
+    #attachTray { max-width: 720px; margin: 0 auto 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+    #attachTray .chip {
+      display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 999px;
+      background: color-mix(in srgb, var(--mind) 12%, transparent); border: 1px solid var(--line);
+      font: 500 12px/1.2 "IBM Plex Sans", sans-serif; color: var(--ink);
+    }
+    #attachTray .chip button { border: none; background: none; color: var(--ink-faint); cursor: pointer; font-size: 13px; padding: 0; }
+    #attachTray .chip button:hover { color: var(--ink); }
 
     .typing { display: inline-flex; gap: 5px; padding: 3px 0; }
     .typing i { width: 6px; height: 6px; border-radius: 50%; background: var(--mind); animation: b 1.1s infinite; }
@@ -404,7 +418,10 @@
     </div>
   </main>
   <footer>
+    <div id="attachTray" hidden></div>
     <form id="form">
+      <input type="file" id="fileInput" multiple hidden />
+      <button id="attach" type="button" title="Attach a file">📎</button>
       <textarea id="input" placeholder="Message Alil…  ·  Enter sends, Shift+Enter for a new line" autofocus></textarea>
       <button id="send" type="submit">Send</button>
     </form>

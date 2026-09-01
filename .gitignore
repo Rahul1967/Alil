@@ -8,6 +8,8 @@ workspace/memory.db
 workspace/memory.db-wal
 workspace/memory.db-shm
 workspace/DOSSIER/
+workspace/attachments/
+attachments/
 
 # Claude Code local settings + temp files
 .claude/

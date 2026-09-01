@@ -135,8 +135,28 @@ async function onMessage(msg: TelegramMessage): Promise<void> {
     return;
   }
 
+  // Inbound file: download authenticated bytes and cross the ingestion boundary (tainted
+  // `ingested`), then run a turn that lists it for the model to open with doc.read / fs.read.
+  const attachments = [];
+  const file = msg.document ?? (msg.photo && msg.photo.length > 0 ? msg.photo[msg.photo.length - 1] : undefined);
+  if (file) {
+    try {
+      const bytes = await client.downloadFile(file.file_id);
+      const filename = msg.document?.file_name ?? `photo-${file.file_id.slice(-8)}.jpg`;
+      const att = await alil.ingestion.receive({
+        bytes, filename, source: CHANNEL,
+        ...(msg.document?.mime_type ? { mime: msg.document.mime_type } : {}),
+        ...(msg.caption ? { caption: msg.caption } : {}),
+      });
+      attachments.push(att);
+    } catch (e) {
+      await client.sendMessage(msg.chat.id, `· couldn't ingest that file: ${(e as Error).message}`);
+    }
+  }
+
   await client.sendChatAction(msg.chat.id);
-  const turn = await alil.runTurn(msg.text ?? "", provenance, { label: "inbound" });
+  const turnText = msg.text ?? msg.caption ?? (attachments.length > 0 ? "(the operator sent a file)" : "");
+  const turn = await alil.runTurn(turnText, provenance, { label: "inbound", ...(attachments.length > 0 ? { attachments } : {}) });
   await client.sendMessage(msg.chat.id, turn.assistantText ?? "(no reply)");
 }
 

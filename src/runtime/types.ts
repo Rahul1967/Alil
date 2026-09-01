@@ -13,6 +13,17 @@ export interface BrainInput {
   sessionId: string;
   message: { text: string; provenance: Provenance };
   history: TranscriptLine[];
+  /** Files the operator attached this turn (already placed in the sandbox, tainted `ingested`). */
+  attachments?: AttachmentRef[];
+}
+
+/** A file available to open this turn — a trimmed view of an ingestion Attachment for the brain. */
+export interface AttachmentRef {
+  path: string;
+  filename: string;
+  kind: string;
+  bytes: number;
+  caption?: string;
 }
 
 /** A tool call the brain proposes — handed OUT to the policy boundary via ActionSink. */

@@ -32,6 +32,24 @@ export function initialMessages(params: {
   if (worldState) {
     contextBlocks.push(`[current state]\n${worldState}`);
   }
+  // Files the operator attached this turn. Listed, not inlined — the model opens what it needs
+  // with doc.read (pdf/docx/xlsx/csv) or fs.read (text), keeping large files off the hot path.
+  if (input.attachments && input.attachments.length > 0) {
+    const rows = input.attachments.map((a) => {
+      const size = a.bytes >= 1000 ? `${Math.round(a.bytes / 1000)} KB` : `${a.bytes} B`;
+      const how =
+        a.kind === "document" || a.kind === "data"
+          ? "open with doc.read"
+          : a.kind === "text"
+            ? "open with fs.read"
+            : a.kind === "image"
+              ? "image — vision not yet available; reason from name/caption only"
+              : "binary — not readable";
+      const note = a.caption ? ` — "${a.caption}"` : "";
+      return `- ${a.path} (${a.kind}, ${size}) — ${how}${note}`;
+    });
+    contextBlocks.push(`[attachments]\n${rows.join("\n")}`);
+  }
   for (const f of recalled) {
     contextBlocks.push(
       `[memory · ${f.provenance.origin}${f.source ? ` · ${f.source}` : ""}]\n${f.text}`,

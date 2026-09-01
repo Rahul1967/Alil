@@ -18,6 +18,8 @@ import type { ProspectiveStore } from "../memory/index.ts";
 import type { Intention, IncomingEvent } from "../memory/types.ts";
 import { WorldStore } from "../world/index.ts";
 import { DossierStore } from "../dossier/index.ts";
+import { IngestionStore } from "../ingestion/index.ts";
+import type { Attachment } from "../ingestion/index.ts";
 import { AuditLedger, Scheduler } from "../gateway/index.ts";
 import type { EventBus } from "../gateway/index.ts";
 import { TurnQueue } from "../gateway/index.ts";
@@ -75,6 +77,8 @@ export interface RunTurnOptions {
   label?: string;
   signal?: AbortSignal;
   preempt?: boolean;
+  /** Files the operator attached this turn (already placed via alil.ingestion.receive). */
+  attachments?: Attachment[];
 }
 
 /**
@@ -96,6 +100,7 @@ export class Alil {
   readonly #episodes: EpisodeManager | null;
   readonly #world: WorldStore;
   readonly #dossier: DossierStore;
+  readonly #ingestion: IngestionStore;
   readonly #scheduler: Scheduler | null;
   readonly #actions: ActionSink;
   #prefsMigrationTried = false; // one-time-per-process guard for the canonical→dossier prefs move
@@ -113,6 +118,7 @@ export class Alil {
     this.#episodes = built.episodes;
     this.#world = built.world;
     this.#dossier = built.dossier;
+    this.#ingestion = built.ingestion;
     this.#scheduler = built.scheduler;
     this.#eventBus = built.eventBus;
   }
@@ -124,6 +130,11 @@ export class Alil {
   /** The operator dossier, for channels that surface a "who you are" view. */
   get dossier(): DossierStore {
     return this.#dossier;
+  }
+  /** The ingestion boundary: a channel adapter calls `alil.ingestion.receive(file)` to place an
+   *  inbound attachment in the sandbox (tainted `ingested`) before running a turn with it. */
+  get ingestion(): IngestionStore {
+    return this.#ingestion;
   }
   get audit(): AuditLedger {
     return this.#ledger;
@@ -180,7 +191,14 @@ export class Alil {
     return this.#queue.submit(async (queueSignal): Promise<BrainTurn> => {
       const at = new Date().toISOString();
       const episodeId = this.#episodes ? await this.#episodes.beginTurn(at) : "ep";
-      const input: BrainInput = { sessionId: this.channel, message: { text, provenance }, history: this.loadHistory() };
+      const input: BrainInput = {
+        sessionId: this.channel,
+        message: { text, provenance },
+        history: this.loadHistory(),
+        ...(opts.attachments && opts.attachments.length > 0
+          ? { attachments: opts.attachments.map((a) => ({ path: a.path, filename: a.filename, kind: a.kind, bytes: a.bytes, ...(a.caption ? { caption: a.caption } : {}) })) }
+          : {}),
+      };
       this.#logger?.turnStart(this.channel, opts.label ?? "turn", text, provenance);
       const turn = await this.#brain.run(input, { signal: anySignal(queueSignal, opts.signal) });
       this.#logger?.turnEnd(turn);
@@ -254,6 +272,7 @@ interface BuiltCore {
   episodes: EpisodeManager | null;
   world: WorldStore;
   dossier: DossierStore;
+  ingestion: IngestionStore;
   scheduler: Scheduler | null;
   eventBus: EventBus;
 }
@@ -278,6 +297,10 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
   // Operator dossier: markdown files are the source of truth; the store reads/writes them and
   // renders the always-on operator preamble. Channel-agnostic, like the world-model.
   const dossier = new DossierStore({ root: config.dossierRoot ?? `${sandboxRoot}/DOSSIER` });
+  // One sandbox jail, shared by the executor's filesystem tools and the ingestion boundary, so an
+  // attachment lands in the same workspace doc.read/fs.read later resolve paths against.
+  const sandbox = new Sandbox(sandboxRoot);
+  const ingestion = new IngestionStore({ sandbox });
 
   // Memory (optional). Recall ON by default for ALL channels; canonical stays standing context.
   let memory: MemorySystem | null = null;
@@ -324,7 +347,7 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     tools,
     hooks: [credentialBlock],
     executor: new Executor({
-      sandbox: new Sandbox(sandboxRoot),
+      sandbox,
       reads: new ReadTracker(),
       memory: memCtx,
       prospective: prospCtx,
@@ -384,7 +407,7 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     },
   });
 
-  alil = new Alil(config, binding, { brain, actions: boundary, planService, ledger: audit, auditSink, logger, memory, episodes, world, dossier, scheduler, eventBus });
+  alil = new Alil(config, binding, { brain, actions: boundary, planService, ledger: audit, auditSink, logger, memory, episodes, world, dossier, ingestion, scheduler, eventBus });
   return alil;
 }
 

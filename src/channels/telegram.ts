@@ -21,10 +21,33 @@ export interface TelegramChat {
   type?: string;
 }
 
+/** A file the operator attached — document (any file) or a photo size variant. */
+export interface TelegramDocument {
+  file_id: string;
+  file_name?: string;
+  mime_type?: string;
+  file_size?: number;
+}
+export interface TelegramPhotoSize {
+  file_id: string;
+  width: number;
+  height: number;
+  file_size?: number;
+}
+/** getFile result — `file_path` is appended to the file download base URL. */
+export interface TelegramFile {
+  file_id: string;
+  file_size?: number;
+  file_path?: string;
+}
+
 export interface TelegramMessage {
   message_id: number;
   date: number;
   text?: string;
+  caption?: string; // caption accompanying a document/photo
+  document?: TelegramDocument;
+  photo?: TelegramPhotoSize[]; // ascending sizes; last is largest
   chat: TelegramChat;
   from?: TelegramUser;
 }
@@ -88,12 +111,15 @@ interface ApiResponse<T> {
 
 export class TelegramClient {
   readonly #base: string;
+  readonly #fileBase: string;
   readonly #fetch: typeof fetch;
 
   constructor(opts: TelegramClientOptions) {
     if (!opts.token) throw new Error("TelegramClient requires a bot token");
     const base = opts.apiBase ?? "https://api.telegram.org";
     this.#base = `${base}/bot${opts.token}`;
+    // Downloads use a distinct path: <base>/file/bot<token>/<file_path>.
+    this.#fileBase = `${base}/file/bot${opts.token}`;
     this.#fetch = opts.fetchImpl ?? fetch;
   }
 
@@ -191,6 +217,22 @@ export class TelegramClient {
     });
     const json = (await res.json()) as ApiResponse<unknown>;
     if (!json.ok) throw new Error(`telegram sendDocument failed: ${json.description ?? res.status}`);
+  }
+
+  /** Resolve a `file_id` to a downloadable `file_path` (valid ~1 hr). */
+  getFile(fileId: string): Promise<TelegramFile> {
+    return this.call<TelegramFile>("getFile", { file_id: fileId });
+  }
+
+  /** Download an inbound attachment's bytes given a `file_id`. Bot API caps downloads at ~20 MB. */
+  async downloadFile(fileId: string, signal?: AbortSignal): Promise<Uint8Array> {
+    const file = await this.getFile(fileId);
+    if (!file.file_path) throw new Error("telegram getFile returned no file_path");
+    const res = await this.#fetch(`${this.#fileBase}/${file.file_path}`, {
+      signal: signal ?? AbortSignal.timeout(120_000),
+    });
+    if (!res.ok) throw new Error(`telegram file download failed: ${res.status}`);
+    return new Uint8Array(await res.arrayBuffer());
   }
 }
 

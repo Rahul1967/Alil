@@ -7,6 +7,57 @@ const empty = document.getElementById("empty");
 const form = document.getElementById("form");
 const input = document.getElementById("input");
 const send = document.getElementById("send");
+const attach = document.getElementById("attach");
+const fileInput = document.getElementById("fileInput");
+const attachTray = document.getElementById("attachTray");
+// Files uploaded (placed in the sandbox by /api/upload) and pending on the next chat turn.
+let pendingAttachments = [];
+
+function renderTray() {
+  attachTray.innerHTML = "";
+  attachTray.hidden = pendingAttachments.length === 0;
+  pendingAttachments.forEach((a, i) => {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    const kb = a.bytes >= 1000 ? Math.round(a.bytes / 1000) + " KB" : a.bytes + " B";
+    chip.textContent = `📄 ${a.filename} (${kb})`;
+    const x = document.createElement("button");
+    x.type = "button";
+    x.textContent = "✕";
+    x.addEventListener("click", () => { pendingAttachments.splice(i, 1); renderTray(); });
+    chip.appendChild(x);
+    attachTray.appendChild(chip);
+  });
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(",")[1] || "");
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+
+attach.addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", async () => {
+  for (const file of Array.from(fileInput.files || [])) {
+    try {
+      const contentBase64 = await fileToBase64(file);
+      const r = await fetch("/api/upload", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ filename: file.name, contentBase64 }),
+      });
+      const j = await r.json();
+      if (r.ok && j.attachment) { pendingAttachments.push(j.attachment); renderTray(); }
+      else addNote("upload failed: " + (j.error || r.status));
+    } catch (e) {
+      addNote("upload error: " + e.message);
+    }
+  }
+  fileInput.value = "";
+});
 const dot = document.getElementById("dot");
 const status = document.getElementById("status");
 
@@ -121,7 +172,11 @@ async function pollApprovals() {
 }
 
 async function submit(text) {
-  addMessage("user", text);
+  const attachments = pendingAttachments;
+  pendingAttachments = [];
+  renderTray();
+  const shown = attachments.length > 0 ? `${text}${text ? "\n" : ""}📎 ${attachments.map((a) => a.filename).join(", ")}` : text;
+  addMessage("user", shown);
   send.disabled = true;
   input.disabled = true;
   const typing = addTyping();
@@ -130,7 +185,7 @@ async function submit(text) {
     const r = await fetch("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ message: text }),
+      body: JSON.stringify({ message: text, attachments }),
     });
     const j = await r.json();
     clearInterval(approvalPoll);
@@ -157,7 +212,7 @@ async function submit(text) {
 form.addEventListener("submit", (e) => {
   e.preventDefault();
   const text = input.value.trim();
-  if (!text) return;
+  if (!text && pendingAttachments.length === 0) return;
   input.value = "";
   input.style.height = "auto";
   submit(text);
