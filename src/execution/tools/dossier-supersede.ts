@@ -42,4 +42,15 @@ export const dossierSupersede: ToolImpl<DossierSupersedeArgs> = {
     const f = store.supersede(args.slug, args.reason, { origin: "model" });
     return { summary: `superseded dossier "${f.frontmatter.title}"`, data: { slug: f.frontmatter.slug, status: f.frontmatter.status } };
   },
+
+  async verify(args: DossierSupersedeArgs, ctx: ToolContext): Promise<string> {
+    const store = ctx.dossier?.store;
+    if (!store) return "VERIFICATION ERROR: dossier is not available";
+    const f = store.get(args.slug);
+    if (!f) return `VERIFICATION FAILED: dossier "${args.slug}" not found after supersede`;
+    if (f.frontmatter.status !== "superseded") {
+      return `VERIFICATION FAILED: dossier "${args.slug}" status is "${f.frontmatter.status}", not superseded`;
+    }
+    return `verified: dossier "${args.slug}" is now superseded`;
+  },
 };

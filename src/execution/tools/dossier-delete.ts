@@ -35,4 +35,12 @@ export const dossierDelete: ToolImpl<DossierDeleteArgs> = {
     const removed = store.remove(args.slug);
     return { summary: removed ? `deleted dossier "${args.slug}"` : `dossier: no file "${args.slug}"`, data: { removed } };
   },
+
+  async verify(args: DossierDeleteArgs, ctx: ToolContext): Promise<string> {
+    const store = ctx.dossier?.store;
+    if (!store) return "VERIFICATION ERROR: dossier is not available";
+    return store.get(args.slug)
+      ? `VERIFICATION FAILED: dossier "${args.slug}" still exists after delete`
+      : `verified: dossier "${args.slug}" is gone`;
+  },
 };

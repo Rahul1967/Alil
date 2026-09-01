@@ -65,6 +65,15 @@ export interface ToolImpl<T = Record<string, unknown>> {
   readonly reversible: boolean;
   validate(args: Record<string, unknown>): ValidateResult<T>;
   run(args: T, ctx: ToolContext): Promise<ToolRunResult>;
+  /**
+   * Optional harness-injected read-back for a MUTATING tool. After a successful `run`, the executor
+   * calls this and appends its result to the observation the model sees — so a claim of success is
+   * downstream of a real, independent check the harness (not the model) performed. Return a short
+   * ground-truth line, e.g. "verified: file exists (131 KB)" or a `VERIFICATION FAILED: …` line if
+   * the intended effect is not actually present. Throwing is fine — the executor surfaces it. Only
+   * read here (stat/re-read); never mutate.
+   */
+  verify?(args: T, ctx: ToolContext): Promise<string>;
 }
 
 /**

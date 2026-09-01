@@ -31,10 +31,23 @@ export class Executor {
 
     try {
       const out = await tool.run(validated.value, this.#ctx);
+      // Harness-injected verification: for a mutating tool that declares `verify`, run an
+      // independent read-back and fold it into the observation the model sees. This makes a claim
+      // of success structurally downstream of a real check — the model cannot report "done" without
+      // the confirming (or failing) observation already in context.
+      let summary = out.summary;
+      if (tool.verify) {
+        try {
+          const v = await tool.verify(validated.value, this.#ctx);
+          if (v) summary += `\n${v}`;
+        } catch (verifyErr) {
+          summary += `\nVERIFICATION ERROR: ${verifyErr instanceof Error ? verifyErr.message : String(verifyErr)}`;
+        }
+      }
       return this.#record(action.id, {
         actionId: action.id,
         outcome: "ok",
-        summary: out.summary,
+        summary,
         ...(out.data !== undefined ? { data: out.data } : {}),
         ...(out.provenance !== undefined ? { resultProvenance: out.provenance } : {}),
       });

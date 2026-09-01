@@ -63,4 +63,12 @@ export const dossierCreate: ToolImpl<DossierCreate> = {
     const f = store.create(args, { origin: "model" });
     return { summary: `created dossier "${f.frontmatter.title}" (${f.relPath})`, data: { slug: f.frontmatter.slug, relPath: f.relPath } };
   },
+
+  async verify(args: DossierCreate, ctx: ToolContext): Promise<string> {
+    const store = ctx.dossier?.store;
+    if (!store) return "VERIFICATION ERROR: dossier is not available";
+    const f = store.list().find((x) => x.frontmatter.title === args.title);
+    if (!f) return `VERIFICATION FAILED: no dossier file titled "${args.title}" exists after create`;
+    return `verified: dossier file ${f.relPath} exists`;
+  },
 };

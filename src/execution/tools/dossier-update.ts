@@ -58,4 +58,12 @@ export const dossierUpdate: ToolImpl<DossierUpdateArgs> = {
     const f = store.update(args.slug, patch, { origin: "model" });
     return { summary: `updated dossier "${f.frontmatter.title}"`, data: { slug: f.frontmatter.slug, updated: f.frontmatter.updated } };
   },
+
+  async verify(args: DossierUpdateArgs, ctx: ToolContext): Promise<string> {
+    const store = ctx.dossier?.store;
+    if (!store) return "VERIFICATION ERROR: dossier is not available";
+    const f = store.get(args.slug);
+    if (!f) return `VERIFICATION FAILED: dossier "${args.slug}" not found after update`;
+    return `verified: dossier "${args.slug}" exists (updated ${f.frontmatter.updated})`;
+  },
 };

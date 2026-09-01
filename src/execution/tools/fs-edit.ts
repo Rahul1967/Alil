@@ -90,6 +90,16 @@ export const fsEdit: ToolImpl<FsEditArgs> = {
     const n = args.replace_all ? occurrences : 1;
     return { summary: `edited ${args.path} (${n} replacement${n === 1 ? "" : "s"})` };
   },
+
+  async verify(args: FsEditArgs, ctx: ToolContext): Promise<string> {
+    const full = ctx.sandbox.resolve(args.path);
+    const content = await readFile(full, "utf8").catch(() => undefined);
+    if (content === undefined) return `VERIFICATION FAILED: ${args.path} could not be read after edit`;
+    if (!content.includes(args.new_string)) {
+      return `VERIFICATION FAILED: ${args.path} does not contain the new text after edit`;
+    }
+    return `verified: ${args.path} now contains the edited text`;
+  },
 };
 
 function countOccurrences(haystack: string, needle: string): number {

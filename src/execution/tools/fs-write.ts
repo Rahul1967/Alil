@@ -1,4 +1,4 @@
-import { writeFile, mkdir, readFile } from "node:fs/promises";
+import { writeFile, mkdir, readFile, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { ToolImpl, ToolContext, ValidateResult, ToolRunResult } from "./types.ts";
 
@@ -56,5 +56,12 @@ export const fsWrite: ToolImpl<FsWriteArgs> = {
     await writeFile(full, args.content, "utf8");
     ctx.reads?.record(full, args.content); // reflect the new content for a follow-up edit
     return { summary: `wrote ${args.content.length} chars to ${args.path}` };
+  },
+
+  async verify(args: FsWriteArgs, ctx: ToolContext): Promise<string> {
+    const full = ctx.sandbox.resolve(args.path);
+    const info = await stat(full).catch(() => undefined);
+    if (!info || !info.isFile()) return `VERIFICATION FAILED: ${args.path} is not present after write`;
+    return `verified: ${args.path} exists (${info.size} bytes)`;
   },
 };
