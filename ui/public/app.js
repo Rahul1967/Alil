@@ -182,6 +182,22 @@ function addTyping() {
   return row;
 }
 
+// The typing row for the in-flight turn, so pollers can flip it to a "waiting on you" state
+// when the turn parks on an approval (otherwise the page just looks stuck "loading").
+let activeTyping = null;
+function setTurnWaiting(waiting) {
+  if (!activeTyping) return;
+  const bubble = activeTyping.querySelector(".bubble");
+  if (!bubble) return;
+  if (waiting) {
+    bubble.classList.add("awaiting");
+    bubble.innerHTML = '<span class="await-approval">⏳ waiting for your approval below ↓</span>';
+  } else {
+    bubble.classList.remove("awaiting");
+    bubble.innerHTML = '<span class="typing"><i></i><i></i><i></i></span>';
+  }
+}
+
 async function health() {
   try {
     const r = await fetch("/api/health");
@@ -227,6 +243,9 @@ function renderApproval(a) {
     card.classList.add("resolved");
     head.textContent = (approved ? "Approved — running" : "Rejected — not run") + ` · ${a.tool}`;
     btns.remove();
+    // The turn resumes now — flip the indicator back to "thinking" until the reply lands (or the
+    // next approval parks). Without this the "waiting for approval" note would linger misleadingly.
+    setTurnWaiting(false);
   };
   approve.addEventListener("click", () => answer(true));
   reject.addEventListener("click", () => answer(false));
@@ -245,6 +264,9 @@ async function pollApprovals() {
       shownApprovals.add(a.id);
       renderApproval(a);
     }
+    // If the current turn is parked on any unanswered approval, tell the user the turn is
+    // waiting on them (not silently hung). Cleared once nothing is pending.
+    setTurnWaiting((items || []).length > 0);
   } catch {
     /* transient — try again next tick */
   }
@@ -259,6 +281,7 @@ async function submit(text) {
   send.disabled = true;
   input.disabled = true;
   const typing = addTyping();
+  activeTyping = typing;
   const approvalPoll = setInterval(pollApprovals, 1000);
   try {
     const r = await fetch("/api/chat", {
@@ -269,6 +292,7 @@ async function submit(text) {
     const j = await r.json();
     clearInterval(approvalPoll);
     typing.remove();
+    activeTyping = null;
     if (!r.ok) {
       addNote("error: " + (j.error || r.status));
     } else {
@@ -279,9 +303,11 @@ async function submit(text) {
   } catch (e) {
     clearInterval(approvalPoll);
     typing.remove();
+    activeTyping = null;
     addNote("network error: " + e.message);
   } finally {
     clearInterval(approvalPoll);
+    activeTyping = null;
     send.disabled = false;
     input.disabled = false;
     input.focus();

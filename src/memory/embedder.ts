@@ -73,18 +73,32 @@ export class BedrockTitanEmbedder implements Embedder {
   readonly dim: number;
   readonly #modelId: string;
   readonly #region: string;
+  readonly #timeoutMs: number;
+  readonly #client?: { send(cmd: unknown, opts?: { abortSignal?: AbortSignal }): Promise<{ body: Uint8Array }> };
 
-  constructor(opts?: { dim?: 256 | 512 | 1024; modelId?: string; region?: string }) {
+  constructor(opts?: {
+    dim?: 256 | 512 | 1024;
+    modelId?: string;
+    region?: string;
+    timeoutMs?: number;
+    /** Injectable client (tests / alternate transports). Falls back to a real Bedrock client. */
+    client?: { send(cmd: unknown, opts?: { abortSignal?: AbortSignal }): Promise<{ body: Uint8Array }> };
+  }) {
     this.dim = opts?.dim ?? 256;
     this.#modelId = opts?.modelId ?? "amazon.titan-embed-text-v2:0";
     this.#region = opts?.region ?? process.env.AWS_REGION ?? "us-east-1";
+    // A hung embed call must never block a whole turn (it runs inside gated writes like
+    // memory.procedure.create). Bound it; a timeout surfaces as a normal error the caller
+    // handles, rather than an indefinite await that leaves the channel "loading" forever.
+    this.#timeoutMs = opts?.timeoutMs ?? 15_000;
+    this.#client = opts?.client;
   }
 
   async embed(texts: string[]): Promise<Float32Array[]> {
     const { BedrockRuntimeClient, InvokeModelCommand } = await import(
       "@aws-sdk/client-bedrock-runtime"
     );
-    const client = new BedrockRuntimeClient({ region: this.#region });
+    const client = this.#client ?? new BedrockRuntimeClient({ region: this.#region });
     const out: Float32Array[] = [];
     for (const text of texts) {
       const cmd = new InvokeModelCommand({
@@ -93,7 +107,19 @@ export class BedrockTitanEmbedder implements Embedder {
         accept: "application/json",
         body: JSON.stringify({ inputText: text, dimensions: this.dim, normalize: true }),
       });
-      const res = await client.send(cmd);
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), this.#timeoutMs);
+      let res: { body: Uint8Array };
+      try {
+        res = (await client.send(cmd, { abortSignal: ctrl.signal })) as { body: Uint8Array };
+      } catch (err) {
+        if (ctrl.signal.aborted) {
+          throw new Error(`BedrockTitanEmbedder: embed timed out after ${this.#timeoutMs}ms`);
+        }
+        throw err;
+      } finally {
+        clearTimeout(timer);
+      }
       const parsed = JSON.parse(new TextDecoder().decode(res.body)) as { embedding: number[] };
       out.push(Float32Array.from(parsed.embedding));
     }

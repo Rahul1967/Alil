@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { HashingEmbedder } from "../src/memory/embedder.ts";
+import { HashingEmbedder, BedrockTitanEmbedder } from "../src/memory/embedder.ts";
 
 test("embed is deterministic", async () => {
   const e = new HashingEmbedder(64);
@@ -54,4 +54,42 @@ test("batch embed returns one vector per input, in order", async () => {
 test("rejects a non-positive dimension", () => {
   assert.throws(() => new HashingEmbedder(0));
   assert.throws(() => new HashingEmbedder(-4));
+});
+
+// ── BedrockTitanEmbedder: bounded so a hung network call can't stall a whole turn ──
+
+test("Bedrock embedder times out a hung request instead of awaiting forever", async () => {
+  // A client whose send() never resolves on its own — only the abort signal ends it.
+  const hangingClient = {
+    send(_cmd: unknown, opts?: { abortSignal?: AbortSignal }): Promise<{ body: Uint8Array }> {
+      return new Promise((_resolve, reject) => {
+        opts?.abortSignal?.addEventListener("abort", () => reject(new Error("aborted")));
+      });
+    },
+  };
+  const e = new BedrockTitanEmbedder({ timeoutMs: 20, client: hangingClient });
+  await assert.rejects(() => e.embed(["anything"]), /timed out after 20ms/);
+});
+
+test("Bedrock embedder returns the vector when the client responds in time", async () => {
+  const vec = [0.1, 0.2, 0.3];
+  const okClient = {
+    async send(): Promise<{ body: Uint8Array }> {
+      return { body: new TextEncoder().encode(JSON.stringify({ embedding: vec })) };
+    },
+  };
+  const e = new BedrockTitanEmbedder({ timeoutMs: 1000, client: okClient });
+  const [v] = await e.embed(["hello"]);
+  assert.equal(v!.length, 3);
+  for (let i = 0; i < vec.length; i++) assert.ok(Math.abs(v![i]! - vec[i]!) < 1e-6);
+});
+
+test("Bedrock embedder surfaces a non-timeout error unchanged", async () => {
+  const failClient = {
+    async send(): Promise<{ body: Uint8Array }> {
+      throw new Error("AccessDeniedException");
+    },
+  };
+  const e = new BedrockTitanEmbedder({ timeoutMs: 1000, client: failClient });
+  await assert.rejects(() => e.embed(["hello"]), /AccessDeniedException/);
 });
