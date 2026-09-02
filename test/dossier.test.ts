@@ -78,6 +78,52 @@ test("supersede keeps the file, flips status, appends a dated reason", async () 
   await rm(root, { recursive: true, force: true });
 });
 
+test("update on a missing slug names the closest existing slugs (recoverable error)", async () => {
+  const root = await tmpRoot();
+  const store = new DossierStore({ root });
+  // The real scenario: files created with title-derived slugs...
+  store.create({ type: "account", title: "HDFC Bank Salary Account", tags: ["financial"] }, OP);
+  store.create({ type: "account", title: "Bank of Baroda (BOB) Primary Account", tags: ["financial"] }, OP);
+  // ...but the model guessed "account-hdfc-bank" and the update dead-ended.
+  assert.throws(
+    () => store.update("account-hdfc-bank", { body: "x" }, { origin: "model" }),
+    (err: Error) => {
+      assert.match(err.message, /no file with slug "account-hdfc-bank"/);
+      assert.match(err.message, /hdfc-bank-salary-account/); // suggests the real slug
+      assert.match(err.message, /dossier\.query|dossier\.create/); // and a next step
+      return true;
+    },
+  );
+  await rm(root, { recursive: true, force: true });
+});
+
+test("suggestSlugs ranks token overlap and excludes unrelated files", async () => {
+  const root = await tmpRoot();
+  const store = new DossierStore({ root });
+  store.create({ type: "account", title: "HDFC Bank Salary Account" }, OP);
+  store.create({ type: "account", title: "Canara Bank Backup Account" }, OP);
+  store.create({ type: "note", title: "Weekend trip ideas" }, OP);
+  const near = store.suggestSlugs("account-canara-bank");
+  assert.equal(near[0], "canara-bank-backup-account"); // best token overlap first
+  assert.ok(!near.includes("weekend-trip-ideas")); // unrelated file excluded
+  await rm(root, { recursive: true, force: true });
+});
+
+test("update on a truly novel slug tells the model to query or create", async () => {
+  const root = await tmpRoot();
+  const store = new DossierStore({ root });
+  store.create({ type: "note", title: "Reading list" }, OP);
+  assert.throws(
+    () => store.update("nonexistent-thing", { body: "x" }, { origin: "model" }),
+    (err: Error) => {
+      assert.match(err.message, /No similar file exists/);
+      assert.match(err.message, /dossier\.query|dossier\.create/);
+      return true;
+    },
+  );
+  await rm(root, { recursive: true, force: true });
+});
+
 test("delete removes the file", async () => {
   const root = await tmpRoot();
   const store = new DossierStore({ root });

@@ -59,6 +59,31 @@ export class DossierStore {
     return this.list().find((f) => f.frontmatter.slug === slug);
   }
 
+  /**
+   * Slugs of existing files ranked by similarity to a target — used to turn a "no such slug" error
+   * into a recoverable hint (the model guessed a slug instead of querying). Matches on shared
+   * tokens first (so "account-hdfc-bank" surfaces "hdfc-bank-salary-account"), then substring, then
+   * a light edit-distance fallback. Returns at most `limit` slugs, closest first.
+   */
+  suggestSlugs(target: string, limit = 5): string[] {
+    const want = slugify(target);
+    const wantTokens = new Set(want.split("-").filter(Boolean));
+    const scored = this.list().map((f) => {
+      const slug = f.frontmatter.slug;
+      const tokens = slug.split("-").filter(Boolean);
+      const shared = tokens.filter((t) => wantTokens.has(t)).length;
+      const substr = slug.includes(want) || want.includes(slug) ? 1 : 0;
+      // Higher is closer: token overlap dominates, substring is a tiebreaker, then -distance.
+      const score = shared * 10 + substr * 3 - editDistance(want, slug) / 100;
+      return { slug, score, shared, substr };
+    });
+    return scored
+      .filter((s) => s.shared > 0 || s.substr > 0) // only real near-misses, not the whole file list
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit)
+      .map((s) => s.slug);
+  }
+
   /** Structured query: filter by type/tags/status/date/text. All conditions are ANDed. */
   query(q: DossierQuery): DossierFile[] {
     let files = this.list();
@@ -106,7 +131,7 @@ export class DossierStore {
   /** Patch an existing file's body and/or frontmatter. `updated` is always refreshed. */
   update(slug: string, patch: DossierPatch, provenance: Provenance): DossierFile {
     const f = this.get(slug);
-    if (!f) throw new Error(`dossier: no file with slug "${slug}"`);
+    if (!f) throw new Error(this.#notFoundMessage(slug));
     const fm: DossierFrontmatter = {
       ...f.frontmatter,
       ...(patch.frontmatter ?? {}),
@@ -124,7 +149,7 @@ export class DossierStore {
   /** Mark a file superseded (status flip + a dated note appended). The fact is kept, not deleted. */
   supersede(slug: string, reason: string, provenance: Provenance): DossierFile {
     const f = this.get(slug);
-    if (!f) throw new Error(`dossier: no file with slug "${slug}"`);
+    if (!f) throw new Error(this.#notFoundMessage(slug));
     const note = `\n\n> Superseded ${this.#today()}: ${reason}`;
     return this.update(slug, { body: f.body + note, frontmatter: { status: "superseded" as DossierStatus } }, provenance);
   }
@@ -192,9 +217,45 @@ export class DossierStore {
       return null; // corrupt/partial file: skip rather than crash the whole query
     }
   }
+
+  /**
+   * Build a recoverable "no such slug" error: name the miss, then either point at the closest
+   * existing slugs (so the model can retry with a real one) or, if there are no near-misses, tell
+   * it to dossier.query / dossier.create. Turning the dead-end into a next-step keeps the model
+   * from silently guessing (the trace where it invented "account-hdfc-bank" and fell through).
+   */
+  #notFoundMessage(slug: string): string {
+    const near = this.suggestSlugs(slug);
+    if (near.length > 0) {
+      return `dossier: no file with slug "${slug}". Did you mean: ${near.map((s) => `"${s}"`).join(", ")}? ` +
+        `Use dossier.query to confirm the exact slug, or dossier.create if it doesn't exist yet.`;
+    }
+    return `dossier: no file with slug "${slug}". No similar file exists — run dossier.query to list ` +
+      `what's there, or dossier.create to add it.`;
+  }
 }
 
 // ── module helpers ─────────────────────────────────────────────────────────
+
+/** Levenshtein edit distance (small strings only) — the last-resort ranker in suggestSlugs. */
+function editDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  const m = a.length;
+  const n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev: number[] = Array.from({ length: n + 1 }, (_, i) => i);
+  let curr: number[] = new Array<number>(n + 1).fill(0);
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min((prev[j] ?? 0) + 1, (curr[j - 1] ?? 0) + 1, (prev[j - 1] ?? 0) + cost);
+    }
+    [prev, curr] = [curr, prev];
+  }
+  return prev[n] ?? 0;
+}
 
 function isSingleton(type: DossierType): boolean {
   return type === "identity" || type === "preferences";
