@@ -69,6 +69,7 @@ test("brain advertises catalog tools to the model", async () => {
     "remind.snooze",
     "send_file",
     "shell",
+    "vision.view",
     "web.fetch",
     "web.search",
     "world.note",
@@ -153,5 +154,5 @@ test("catalog reflects a custom rule source's world consistently", async () => {
   const src = new StaticRuleSource(cfg);
   assert.equal((await src.load()).mode, "default");
   const catalog = new RegistryToolCatalog();
-  assert.equal((await catalog.list()).length, 33);
+  assert.equal((await catalog.list()).length, 34);
 });

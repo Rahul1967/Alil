@@ -201,7 +201,13 @@ export class Brain {
         results.push(result);
         roundResults.push(result);
         observer?.onToolResult?.({ tool: call.tool, outcome: result.outcome, summary: result.summary, ...(result.data !== undefined ? { data: result.data } : {}) });
-        toolResults.push({ toolCallId: call.id, content: toolResultContent(result) });
+        toolResults.push({
+          toolCallId: call.id,
+          content: toolResultContent(result),
+          ...(result.resultImages && result.resultImages.length > 0
+            ? { images: result.resultImages.map((i) => ({ data: i.data, mediaType: i.mediaType })) }
+            : {}),
+        });
         // Cancelled mid-batch: stop launching further tools and end the turn cleanly.
         if (signal?.aborted) return aborted();
       }

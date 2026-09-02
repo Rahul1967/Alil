@@ -43,7 +43,7 @@ export function initialMessages(params: {
           : a.kind === "text"
             ? "open with fs.read"
             : a.kind === "image"
-              ? "image — vision not yet available; reason from name/caption only"
+              ? "look at with vision.view"
               : "binary — not readable";
       const note = a.caption ? ` — "${a.caption}"` : "";
       return `- ${a.path} (${a.kind}, ${size}) — ${how}${note}`;

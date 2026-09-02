@@ -50,6 +50,7 @@ export class Executor {
         summary,
         ...(out.data !== undefined ? { data: out.data } : {}),
         ...(out.provenance !== undefined ? { resultProvenance: out.provenance } : {}),
+        ...(out.images !== undefined && out.images.length > 0 ? { resultImages: out.images } : {}),
       });
     } catch (err) {
       const summary =

@@ -6,6 +6,7 @@ import { fsGrep } from "./fs-grep.ts";
 import { fsEdit } from "./fs-edit.ts";
 import { fsWrite } from "./fs-write.ts";
 import { docRead } from "./doc-read.ts";
+import { visionView } from "./vision-view.ts";
 import { shell } from "./shell.ts";
 import { webFetch } from "./web-fetch.ts";
 import { webSearch } from "./web-search.ts";
@@ -58,6 +59,7 @@ export const DEFAULT_TOOLS: AnyTool[] = [
   fsEdit,
   fsWrite,
   docRead,
+  visionView,
   shell,
   webFetch,
   webSearch,

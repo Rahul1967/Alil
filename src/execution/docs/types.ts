@@ -31,4 +31,17 @@ export interface DocExtractor {
   supports(ext: string): boolean;
   /** Extract text from raw bytes. `ext` is lowercase, no dot. */
   extract(bytes: Uint8Array, ext: string, opts?: ExtractOptions): Promise<ExtractedDoc>;
+  /**
+   * Optional: render a document page to an image (PNG) for the vision path — used to SEE a
+   * scanned/image-only page that has no text layer. Returns undefined when the extractor cannot
+   * render (e.g. no canvas backend installed) so the caller degrades to a "not transcribed" note
+   * rather than failing. `page` is 1-based. Only meaningful for paginated formats (PDF).
+   */
+  renderPage?(bytes: Uint8Array, ext: string, page: number): Promise<RenderedPage | undefined>;
+}
+
+/** A rendered document page as image bytes, ready to attach as a vision image block. */
+export interface RenderedPage {
+  data: Uint8Array;
+  mediaType: string; // "image/png"
 }

@@ -7,10 +7,13 @@
  * are flagged `imageOnly` for a future OCR/vision extractor to pick up — this offline path
  * returns their (empty) text as-is rather than guessing.
  */
-import type { DocExtractor, ExtractedDoc, ExtractOptions, DocSection } from "./types.ts";
+import type { DocExtractor, ExtractedDoc, ExtractOptions, DocSection, RenderedPage } from "./types.ts";
 
 /** Below this many non-whitespace chars, a PDF page is treated as image-only (scanned). */
 const IMAGE_ONLY_THRESHOLD = 8;
+
+/** Render scale for scanned-page rasterization — 2× keeps small text legible for vision. */
+const RENDER_SCALE = 2;
 
 function inRange(index: number, range?: [number, number]): boolean {
   if (!range) return true;
@@ -43,6 +46,30 @@ export class OfflineDocExtractor implements DocExtractor {
       default:
         throw new Error(`OfflineDocExtractor cannot read ".${ext}"`);
     }
+  }
+
+  /**
+   * Render a PDF page to a PNG for the vision path (reading a scanned/image-only page). Uses unpdf's
+   * `renderPageAsImage`, which needs a canvas backend (`@napi-rs/canvas`). Both are lazy-imported so
+   * a text-only deploy pays nothing; if the canvas backend is not installed, this returns undefined
+   * and the caller degrades to a "not transcribed" note rather than throwing.
+   */
+  async renderPage(bytes: Uint8Array, ext: string, page: number): Promise<RenderedPage | undefined> {
+    if (ext !== "pdf") return undefined;
+    let canvasImport: (() => Promise<unknown>) | undefined;
+    try {
+      // Probe the optional native canvas backend without importing it into the hot path.
+      await import("@napi-rs/canvas");
+      canvasImport = () => import("@napi-rs/canvas");
+    } catch {
+      return undefined; // no canvas backend — caller degrades gracefully
+    }
+    const { renderPageAsImage } = await import("unpdf");
+    const buf = await renderPageAsImage(bytes, page, {
+      scale: RENDER_SCALE,
+      canvasImport: canvasImport as never,
+    });
+    return { data: new Uint8Array(buf as ArrayBuffer), mediaType: "image/png" };
   }
 
   async #pdf(bytes: Uint8Array, opts?: ExtractOptions): Promise<ExtractedDoc> {

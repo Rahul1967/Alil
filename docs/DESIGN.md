@@ -360,17 +360,54 @@ bytes + filename + MIME; the shared `IngestionPort.receive()` does everything af
    `web.fetch` and `doc.read` output already cross.
 
 **How the model sees it.** A fresh attachment is listed in a small `[attachments]` block at the top
-of the turn (path, kind, size, "open with doc.read/fs.read") — the bytes are **never auto-inlined**.
-The model opens what it needs on demand, keeping large files off the hot context path. Extraction
-stays with the existing `doc.read` (PDF/DOCX/XLSX/CSV via an offline extractor) and `fs.read` (text).
+of the turn (path, kind, size, "open with doc.read / fs.read / vision.view") — the bytes are
+**never auto-inlined**. The model opens what it needs on demand, keeping large files off the hot
+context path. Extraction stays with the existing `doc.read` (PDF/DOCX/XLSX/CSV via an offline
+extractor), `fs.read` (text), and `vision.view` (images — see below).
 
 **Per-channel receiver** is the only new channel code: Telegram `getFile`→download by `file_id`
 (document/photo); browser `POST /api/upload`; a future Slack `files.info`→`url_private_download`
 with the bearer header. The boundary generalizes — everything downstream is channel-agnostic.
 
-**Deferred:** vision/OCR for images and scanned PDFs (the offline extractor already *flags*
-`imageOnly` pages; a `VisionDescribeExtractor` or native image blocks in the provider is the next
-step), and terminal `!attach`.
+### 08c′ · Vision (the model can see)
+
+Images become model context through the same grounded, taint-fenced path as any other read.
+Modern vision LLMs are not an OCR stage — image bytes become tokens processed in the same pass as
+text — so vision is a **provider-layer** concern (an image content block on a message), not a tool
+that returns a transcription. The design follows the industry-convergent pattern (Anthropic image
+blocks, Bedrock Converse `image` blocks, OpenAI `image_url`): the harness does transport +
+encoding; the model does understanding.
+
+- **`vision.view` (read-only, low-risk).** Loads an image from the sandbox, verifies the extension
+  against the file's **magic bytes** (a mislabeled `.png` is refused, never handed to the provider
+  with a wrong media type), caps size (5 MB — images balloon as base64), and returns the bytes as an
+  image block. An optional `prompt` focuses the analysis.
+- **Images ride the tool-result message.** The bytes travel back on the grounded
+  `tool_use → tool_result` path (a `ToolResultBlock.images[]`), so they cross the **same untrusted
+  fence** as `doc.read`/`web.fetch` output: `{ origin: "ingested" }`. An image can *inform* the
+  model but cannot widen authority on its own — a receipt that "says" to send money is still tainted
+  data, and any derived action re-crosses the boundary. This also satisfies grounding (§10a): a
+  description is downstream of an observation the harness inserted.
+- **Capability gating, graceful degrade.** The providers emit native image blocks only when the
+  target model's `capabilities.vision` is true (composed image-then-text, per Anthropic's guidance);
+  on a non-vision model the bytes are dropped and the tool's text summary stands — the turn degrades
+  rather than erroring.
+
+**Deferred:** an optional local Tesseract `doc.ocr` fallback for offline/air-gapped *text*
+extraction (native vision handles the online path — see below), and terminal `!attach`.
+
+### 08c″ · Scanned / image-only PDFs
+
+A scanned PDF has no text layer, so the offline extractor flags those pages `imageOnly` rather than
+guessing. `doc.read` now closes the loop: pass **`see: true`** and it renders the image-only pages
+in the requested range to PNGs (via unpdf's `renderPageAsImage` + the `@napi-rs/canvas` backend,
+both lazy-imported so a text-only deploy pays nothing) and attaches them on the **same
+`images[]` → tool-result → provider path** as `vision.view` — so the pages cross the identical
+ingested-taint fence and are shown only to a vision-capable model. Rendering is capped
+(5 pages/call; narrow `pages` for more), and when no canvas backend is present the tool degrades to
+the existing "not transcribed" note instead of failing. This makes native vision the OCR path for
+scanned documents; a separate Tesseract engine stays an optional offline fallback, not a
+prerequisite.
 
 ## 09 · Operator dossier (the model of the user)
 
@@ -486,7 +523,9 @@ Legend: ✅ built · 🟡 partial · ⬜ planned.
 | Ambient ingestion (§08a): event bus, gated unprompted wakes | ✅ | `src/gateway/ingest/`, `src/gateway/scheduler.ts`, `src/app/ambient.ts` |
 | Subagents (§08b): scoped, structurally non-inheriting | ✅ | `src/runtime/subagent.ts`, `subagent-node-executor.ts` |
 | File ingestion (§08c): boundary + Telegram/browser wiring | ✅ | `src/ingestion/`, `src/channels/telegram.ts`, `ui/server.ts` |
-| File ingestion: vision/OCR for images & scanned PDFs; terminal `!attach` | ⬜ | (offline extractor flags `imageOnly`; no `VisionDescribeExtractor`) |
+| Vision (§08c′): `vision.view` + provider image blocks, vision-gated | ✅ | `src/execution/tools/vision-view.ts`, `src/providers/{anthropic,bedrock}.ts` |
+| Scanned PDFs (§08c″): `doc.read see:true` renders image-only pages to vision | ✅ | `src/execution/tools/doc-read.ts`, `docs/offline-extractor.ts` (unpdf + `@napi-rs/canvas`) |
+| File ingestion: optional local Tesseract `doc.ocr`; terminal `!attach` | ⬜ | (native vision covers scanned PDFs; offline text-OCR fallback deferred) |
 | Operator dossier (§09): store, tools, always-on block, UI, migration | ✅ | `src/dossier/`, `dossier-*` tools, `ui/` |
 | Dossier: `timeline.md` automation; sqlite/FTS index | 🟡/⬜ | `event` type + skeleton exist; timeline append + index deferred |
 | Persona (§10) | ✅ | `workspace/SOUL.md`, base prompt |
@@ -523,9 +562,11 @@ hash-chained ledger; security-critical slices get an adversarial test *before* t
 - *Operator dossier:* markdown-native operator model with the always-on `[operator]` block and a
   one-time preferences migration.
 - *File ingestion:* the channel-agnostic boundary + Telegram/browser wiring.
+- *Vision:* `vision.view` + provider image blocks (Anthropic/Bedrock), capability-gated,
+  taint-fenced; scanned/image-only PDF pages readable via `doc.read see:true` (rendered to images).
 
 **Next.**
-- Vision/OCR extractor for images and scanned PDFs (§08c); terminal `!attach`.
+- Optional local Tesseract `doc.ocr` for offline/air-gapped text extraction; terminal `!attach`.
 - Dossier `timeline.md` automation; sqlite/FTS index when scan latency or relevance ranking demands.
 - Signed/sandboxed skill runtime with capability manifests (§04 supply-chain row) — the gate before
   any public skill registry.

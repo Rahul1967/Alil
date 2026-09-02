@@ -7,6 +7,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import ExcelJS from "exceljs";
 import { docRead } from "../src/execution/tools/doc-read.ts";
 import { OfflineDocExtractor } from "../src/execution/docs/offline-extractor.ts";
+import type { DocExtractor, ExtractedDoc, RenderedPage } from "../src/execution/docs/types.ts";
 import { Sandbox } from "../src/execution/index.ts";
 import type { ToolContext } from "../src/execution/tools/types.ts";
 
@@ -19,6 +20,17 @@ const MINIMAL_PDF = `%PDF-1.4
 BT /F1 18 Tf 20 100 Td (Hello alil PDF) Tj ET
 endstream endobj
 5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj
+trailer<</Root 1 0 R>>
+%%EOF`;
+
+// A one-page PDF with an EMPTY content stream — renders fine but has no text layer, so the
+// extractor flags the page `imageOnly` (the scanned-page case the vision path handles).
+const IMAGE_ONLY_PDF = `%PDF-1.4
+1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj
+2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj
+3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents 4 0 R>>endobj
+4 0 obj<</Length 0>>stream
+endstream endobj
 trailer<</Root 1 0 R>>
 %%EOF`;
 
@@ -120,6 +132,105 @@ test("a range narrows which sheets are returned", async () => {
     const text = (res.data as { text: string }).text;
     assert.match(text, /── Two ──/);
     assert.doesNotMatch(text, /── One ──/);
+  } finally {
+    cleanup();
+  }
+});
+
+// ─── scanned/image-only PDF → vision path (§08c′) ───
+
+test("doc.read flags an image-only page and points at `see: true`", async () => {
+  const { dir, ctx, cleanup } = fresh();
+  try {
+    writeFileSync(join(dir, "scan.pdf"), IMAGE_ONLY_PDF);
+    const res = await docRead.run({ path: "scan.pdf" }, ctx);
+    const data = res.data as { imageOnlyPages: number[] };
+    assert.deepEqual(data.imageOnlyPages, [1]);
+    // The default extractor can render, so the note offers the vision path.
+    assert.match(res.summary, /see: true/);
+    // No images attached unless the model asks.
+    assert.equal(res.images, undefined);
+  } finally {
+    cleanup();
+  }
+});
+
+test("doc.read with see:true renders the scanned page as an image, tainted ingested", async () => {
+  const { dir, ctx, cleanup } = fresh();
+  try {
+    writeFileSync(join(dir, "scan.pdf"), IMAGE_ONLY_PDF);
+    const res = await docRead.run({ path: "scan.pdf", see: true }, ctx);
+    assert.equal(res.images?.length, 1);
+    assert.equal(res.images?.[0]?.mediaType, "image/png");
+    // base64 of a PNG starts with "iVBOR".
+    assert.match(res.images?.[0]?.data ?? "", /^iVBOR/);
+    assert.equal(res.provenance?.origin, "ingested");
+    assert.match(res.summary, /rendered as image/);
+  } finally {
+    cleanup();
+  }
+});
+
+test("doc.read validates the see flag", () => {
+  assert.equal(docRead.validate({ path: "a.pdf", see: "yes" as unknown as boolean }).ok, false);
+  const v = docRead.validate({ path: "a.pdf", see: true });
+  assert.ok(v.ok && v.value.see === true);
+});
+
+test("doc.read degrades to a not-transcribed note when the extractor cannot render", async () => {
+  const { dir, cleanup } = fresh();
+  try {
+    // A stub extractor with no renderPage — the graceful-degrade path (no canvas backend).
+    const noRender: DocExtractor = {
+      supports: (ext) => ext === "pdf",
+      extract: async (): Promise<ExtractedDoc> => ({
+        kind: "pdf",
+        sectionCount: 1,
+        sections: [{ index: 1, label: "page 1", text: "", imageOnly: true }],
+      }),
+      // renderPage intentionally omitted
+    };
+    const ctx: ToolContext = { sandbox: new Sandbox(dir), docs: { extractor: noRender } };
+    writeFileSync(join(dir, "scan.pdf"), IMAGE_ONLY_PDF);
+
+    const res = await docRead.run({ path: "scan.pdf", see: true }, ctx);
+    assert.equal(res.images, undefined);
+    assert.match(res.summary, /not transcribed/);
+    // Without a renderer, we don't dangle a `see: true` hint.
+    assert.doesNotMatch(res.summary, /see: true/);
+  } finally {
+    cleanup();
+  }
+});
+
+test("doc.read caps rendered scanned pages and reports the remainder", async () => {
+  const { dir, cleanup } = fresh();
+  try {
+    // 7 image-only pages; a renderer that always succeeds — expect the 5-page cap to apply.
+    const many: DocExtractor = {
+      supports: (ext) => ext === "pdf",
+      extract: async (): Promise<ExtractedDoc> => ({
+        kind: "pdf",
+        sectionCount: 7,
+        sections: Array.from({ length: 7 }, (_, i) => ({
+          index: i + 1,
+          label: `page ${i + 1}`,
+          text: "",
+          imageOnly: true,
+        })),
+      }),
+      renderPage: async (): Promise<RenderedPage> => ({
+        data: new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+        mediaType: "image/png",
+      }),
+    };
+    const ctx: ToolContext = { sandbox: new Sandbox(dir), docs: { extractor: many } };
+    writeFileSync(join(dir, "scan.pdf"), IMAGE_ONLY_PDF);
+
+    const res = await docRead.run({ path: "scan.pdf", pages: [1, 7], see: true }, ctx);
+    assert.equal(res.images?.length, 5); // MAX_SEE_PAGES
+    assert.match(res.summary, /5 scanned page\(s\) rendered/);
+    assert.match(res.summary, /2 more scanned page\(s\) not rendered/);
   } finally {
     cleanup();
   }

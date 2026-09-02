@@ -43,12 +43,26 @@ export interface ToolRunResult {
   summary: string;
   data?: unknown;
   /**
+   * Images produced by a vision-capable READ tool (e.g. vision.view). The executor copies these
+   * onto the ToolResult; the loop attaches them to the tool-result message so vision providers
+   * render native image blocks. Bytes are base64 (no data-URL prefix). Carrying images on the
+   * grounded tool_use→tool_result path keeps them behind the same untrusted fence as any ingested
+   * content — an image can inform the model but never widen authority on its own.
+   */
+  images?: ImageRef[];
+  /**
    * Set by tools that ingest untrusted external content (web.fetch, doc.read, ambient events)
    * to `{ origin: "ingested", ingestedFrom: <source> }`. The executor copies it onto the
    * ToolResult so the runtime can (a) fence the body before it enters the model's context and
    * (b) taint subsequent same-turn actions — driving the provenance escalation in the boundary.
    */
   provenance?: Provenance;
+}
+
+/** A base64 image + its IANA media type, produced by a vision read tool. */
+export interface ImageRef {
+  data: string; // base64, no `data:` prefix
+  mediaType: string; // image/jpeg | image/png | image/gif | image/webp
 }
 
 /**

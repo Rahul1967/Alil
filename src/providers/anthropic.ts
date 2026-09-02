@@ -38,7 +38,7 @@ export class AnthropicProvider implements Provider {
       max_tokens: inv.maxOutputTokens ?? spec.maxOutputTokens,
       ...(inv.system ? { system: inv.system } : {}),
       ...(inv.temperature !== undefined ? { temperature: inv.temperature } : {}),
-      messages: toAnthropicMessages(inv),
+      messages: toAnthropicMessages(inv, spec.capabilities.vision),
       ...(inv.tools && inv.tools.length > 0
         ? {
             tools: inv.tools.map((t) => ({
@@ -98,17 +98,30 @@ interface AnthropicMsg {
   content: unknown;
 }
 
-function toAnthropicMessages(inv: ModelInvocation): AnthropicMsg[] {
+function toAnthropicMessages(inv: ModelInvocation, vision: boolean): AnthropicMsg[] {
   return inv.messages.map((m): AnthropicMsg => {
     if (m.role === "tool") {
-      // A turn's results are already one message; map its blocks 1:1.
+      // A turn's results are already one message; map its blocks 1:1. A result carrying images
+      // (from a vision read tool) emits native image blocks BEFORE its text — Anthropic performs
+      // best image-then-text — but only when the target model is vision-capable; otherwise the
+      // bytes are dropped and the text placeholder stands so a non-vision model degrades cleanly.
       return {
         role: "user",
-        content: (m.toolResults ?? []).map((r) => ({
-          type: "tool_result",
-          tool_use_id: r.toolCallId,
-          content: r.content,
-        })),
+        content: (m.toolResults ?? []).map((r) => {
+          const hasImages = vision && (r.images?.length ?? 0) > 0;
+          if (!hasImages) {
+            return { type: "tool_result", tool_use_id: r.toolCallId, content: r.content };
+          }
+          const blocks: unknown[] = [];
+          for (const img of r.images ?? []) {
+            blocks.push({
+              type: "image",
+              source: { type: "base64", media_type: img.mediaType, data: img.data },
+            });
+          }
+          blocks.push({ type: "text", text: r.content });
+          return { type: "tool_result", tool_use_id: r.toolCallId, content: blocks };
+        }),
       };
     }
     if (m.role === "assistant") {

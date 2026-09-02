@@ -42,6 +42,18 @@ export interface ToolResult {
   data?: unknown;
   /** Set when the boundary produced ingested/tainted output (e.g. web.fetch). */
   resultProvenance?: Provenance;
+  /**
+   * Images produced by a vision read tool (base64 + media type). The loop attaches these to the
+   * tool-result message so vision-capable providers render native image blocks. Carried on the
+   * grounded tool-result path, so images stay behind the same untrusted fence as ingested text.
+   */
+  resultImages?: ResultImage[];
+}
+
+/** A base64 image + IANA media type carried back from a vision read tool. */
+export interface ResultImage {
+  data: string; // base64, no `data:` prefix
+  mediaType: string;
 }
 
 // ─── Fragment: a unit of recalled/injected context, provenance-tagged ───

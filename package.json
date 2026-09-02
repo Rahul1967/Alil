@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1080.0",
+    "@napi-rs/canvas": "^0.1.100",
     "better-sqlite3": "^11.10.0",
     "croner": "^10.0.1",
     "exceljs": "^4.4.0",

@@ -6,6 +6,7 @@ import type {
   ContentBlock,
   Message as BedrockMessage,
   Tool as BedrockTool,
+  ToolResultContentBlock,
   ConverseCommandOutput,
 } from "@aws-sdk/client-bedrock-runtime";
 import type {
@@ -47,7 +48,7 @@ export class BedrockProvider implements Provider {
   async invoke(inv: ModelInvocation, spec: ModelSpec, signal?: AbortSignal): Promise<ModelResponse> {
     const command = new ConverseCommand({
       modelId: inv.model,
-      messages: toBedrockMessages(inv),
+      messages: toBedrockMessages(inv, spec.capabilities.vision),
       ...(inv.system ? { system: [{ text: inv.system }] } : {}),
       inferenceConfig: {
         maxTokens: inv.maxOutputTokens ?? spec.maxOutputTokens,
@@ -69,15 +70,24 @@ export class BedrockProvider implements Provider {
 }
 
 // ─── request mapping ───
-function toBedrockMessages(inv: ModelInvocation): BedrockMessage[] {
+function toBedrockMessages(inv: ModelInvocation, vision: boolean): BedrockMessage[] {
   return inv.messages.map((m): BedrockMessage => {
     if (m.role === "tool") {
-      // A turn's results are already one message; map its blocks 1:1.
+      // A turn's results are already one message; map its blocks 1:1. A result carrying images
+      // (from a vision read tool) emits native Converse image blocks alongside its text, but only
+      // when the target model is vision-capable; otherwise bytes are dropped and the text stands.
       return {
         role: "user",
-        content: (m.toolResults ?? []).map((r) => ({
-          toolResult: { toolUseId: r.toolCallId, content: [{ text: r.content }] },
-        })),
+        content: (m.toolResults ?? []).map((r): ContentBlock => {
+          const imgs = vision ? (r.images ?? []) : [];
+          const inner: ToolResultContentBlock[] = [];
+          for (const img of imgs) {
+            const format = bedrockImageFormat(img.mediaType);
+            if (format) inner.push({ image: { format, source: { bytes: base64ToBytes(img.data) } } });
+          }
+          inner.push({ text: r.content });
+          return { toolResult: { toolUseId: r.toolCallId, content: inner } };
+        }),
       };
     }
     if (m.role === "assistant") {
@@ -105,6 +115,22 @@ function toBedrockTools(inv: ModelInvocation): BedrockTool[] {
       },
     }),
   );
+}
+
+/** Map an IANA image media type to the Converse `image.format` subtype; undefined if unsupported. */
+function bedrockImageFormat(mediaType: string): "png" | "jpeg" | "gif" | "webp" | undefined {
+  switch (mediaType) {
+    case "image/png": return "png";
+    case "image/jpeg": return "jpeg";
+    case "image/gif": return "gif";
+    case "image/webp": return "webp";
+    default: return undefined;
+  }
+}
+
+/** Decode base64 image data to the byte array Converse expects (no data-URL prefix). */
+function base64ToBytes(b64: string): Uint8Array {
+  return new Uint8Array(Buffer.from(b64, "base64"));
 }
 
 // ─── response mapping ───

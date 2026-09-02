@@ -38,10 +38,38 @@ export interface ChatMessage {
   toolResults?: ToolResultBlock[];
 }
 
+/**
+ * A single image attached to a message, provider-agnostic. `data` is raw base64 (no data-URL
+ * prefix); `mediaType` is an IANA image type the vision-capable providers accept. Images ride on
+ * tool-result blocks (the grounded tool_use→tool_result protocol) so they cross the same untrusted
+ * fence as any ingested content. Providers that lack vision (spec.capabilities.vision=false) drop
+ * the bytes and keep the text placeholder — a non-vision model degrades, never errors.
+ */
+export interface ImageBlock {
+  /** Base64-encoded image bytes (no `data:` prefix). */
+  data: string;
+  /** IANA media type: image/jpeg | image/png | image/gif | image/webp. */
+  mediaType: string;
+}
+
 export interface ToolResultBlock {
   toolCallId: string;
   content: string;
+  /**
+   * Optional images produced by a vision-capable read tool (e.g. vision.view). Rendered as native
+   * image content blocks by vision providers, placed BEFORE the text per Anthropic's guidance.
+   * Ignored by providers whose model spec has vision=false.
+   */
+  images?: ImageBlock[];
 }
+
+/** Media types the vision providers accept. Anything else must be transcoded before attaching. */
+export const SUPPORTED_IMAGE_MEDIA_TYPES: readonly string[] = [
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+];
 
 export interface ToolSpec {
   name: string;
