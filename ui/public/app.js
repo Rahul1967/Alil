@@ -261,15 +261,25 @@ function renderApproval(a) {
 async function pollApprovals() {
   try {
     const { items } = await (await fetch("/api/approvals")).json();
+    const pending = new Set((items || []).map((a) => a.id));
     for (const a of items || []) {
       if (shownApprovals.has(a.id)) continue;
       shownApprovals.add(a.id);
       renderApproval(a);
     }
-    // The "waiting for approval" banner must track what the user can actually ACT on — a rendered,
-    // still-unanswered approval card — not the raw server count. A server-side pending item whose
-    // card is already resolved (or not yet/never rendered) must not leave the banner dangling with
-    // nothing below it. Derive the state from the DOM so banner and card can never disagree.
+    // Reconcile: any on-screen card the server no longer lists as pending has been resolved
+    // elsewhere or timed out server-side (the approval has a 5-min ceiling). Mark it resolved so a
+    // dead card can't sit there looking actionable, and so the banner clears with it.
+    for (const card of document.querySelectorAll(".approval:not(.resolved)")) {
+      if (!pending.has(card.dataset.id)) {
+        card.classList.add("resolved");
+        const head = card.querySelector(".approval-head");
+        if (head) head.textContent = "No longer pending (answered elsewhere or timed out)";
+        card.querySelector(".approval-btns")?.remove();
+      }
+    }
+    // The banner tracks what the user can ACT on — a rendered, still-unanswered card — never the
+    // raw server count. Derive it from the DOM so banner and card can never disagree.
     setTurnWaiting(hasActionableApproval());
   } catch {
     /* transient — try again next tick */
@@ -291,7 +301,8 @@ async function submit(text) {
   input.disabled = true;
   const typing = addTyping();
   activeTyping = typing;
-  const approvalPoll = setInterval(pollApprovals, 1000);
+  // Approvals are polled by the always-on poller (bottom of file), so a parked approval renders
+  // even if it lands before this turn's first tick — no per-turn interval needed here.
   try {
     const r = await fetch("/api/chat", {
       method: "POST",
@@ -299,7 +310,6 @@ async function submit(text) {
       body: JSON.stringify({ message: text, attachments }),
     });
     const j = await r.json();
-    clearInterval(approvalPoll);
     typing.remove();
     activeTyping = null;
     if (!r.ok) {
@@ -310,12 +320,10 @@ async function submit(text) {
       if (j.stopReason && j.stopReason !== "complete") addNote("turn " + j.stopReason);
     }
   } catch (e) {
-    clearInterval(approvalPoll);
     typing.remove();
     activeTyping = null;
     addNote("network error: " + e.message);
   } finally {
-    clearInterval(approvalPoll);
     activeTyping = null;
     send.disabled = false;
     input.disabled = false;
@@ -808,5 +816,10 @@ async function pollProactive() {
   } catch { /* transient */ }
 }
 setInterval(pollProactive, 3000);
+// Approvals are polled ALWAYS, not only while a turn is in flight. A turn can park on an approval
+// the instant it starts (before the first per-turn tick), and a page reload mid-turn would
+// otherwise never render the pending card. An always-on poller means a parked approval is always
+// surfaced — the fix for "the turn is waiting but no Approve/Reject card appeared".
+setInterval(pollApprovals, 1000);
 
 health();
