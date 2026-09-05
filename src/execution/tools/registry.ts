@@ -28,6 +28,7 @@ import { worldRead } from "./world-read.ts";
 import { worldTrack } from "./world-track.ts";
 import { worldNote } from "./world-note.ts";
 import { dossierQuery } from "./dossier-query.ts";
+import { dossierTimeline } from "./dossier-timeline.ts";
 import { dossierRead } from "./dossier-read.ts";
 import { dossierCreate } from "./dossier-create.ts";
 import { dossierUpdate } from "./dossier-update.ts";
@@ -81,6 +82,7 @@ export const DEFAULT_TOOLS: AnyTool[] = [
   worldTrack,
   worldNote,
   dossierQuery,
+  dossierTimeline,
   dossierRead,
   dossierCreate,
   dossierUpdate,

@@ -40,13 +40,18 @@ test("query filters by type, tag, text, and date", async () => {
   store.create({ type: "note", title: "Gym plan", tags: ["health"], body: "## Items\n- squats" }, OP);
   store.create({ type: "person", title: "Meghna", tags: ["family"], fields: { relation: "sister" } }, OP);
 
+  // Note: each create also emits a trajectory `event` file (below), so counts include those.
   assert.equal(store.query({ type: "account" }).length, 1);
-  assert.equal(store.query({ tagsAny: ["financial", "health"] }).length, 2);
+  // 2 subjects + their 2 "began tracking" events carry the financial/health tags.
+  assert.equal(store.query({ tagsAny: ["financial", "health"] }).length, 4);
   assert.equal(store.query({ tagsAll: ["financial", "health"] }).length, 0);
   assert.equal(store.query({ text: "squats" }).length, 1);
   assert.equal(store.query({ text: "SQUATS" }).length, 1); // case-insensitive
-  assert.equal(store.query({ updatedAfter: "2026-08-31" }).length, 3);
+  // 3 subjects + 3 events + the regenerated timeline.md index = 7 files, all dated today.
+  assert.equal(store.query({ updatedAfter: "2026-08-31" }).length, 7);
   assert.equal(store.query({ updatedBefore: "2026-08-30" }).length, 0);
+  // Excluding events + the timeline index, the three subjects remain.
+  assert.equal(store.query({ updatedAfter: "2026-08-31" }).filter((f) => f.frontmatter.type !== "event" && f.frontmatter.slug !== "timeline").length, 3);
   await rm(root, { recursive: true, force: true });
 });
 
@@ -263,4 +268,112 @@ test("createAlil injects the [operator] block from the dossier every turn", asyn
   assert.match(seen, /7edge/);
   await rm(root, { recursive: true, force: true });
   await rm(dir, { recursive: true, force: true });
+});
+
+// ── Trajectory layer: automatic event files + timeline.md projection (DESIGN §09) ──
+
+test("create emits a 'began tracking' event and regenerates timeline.md", async () => {
+  const root = await tmpRoot();
+  const store = new DossierStore({ root, now: () => new Date("2026-09-05T10:00:00Z") });
+  store.create({ type: "account", title: "HDFC Salary", tags: ["financial"] }, OP);
+
+  const events = store.timeline();
+  assert.equal(events.length, 1);
+  assert.equal(events[0]!.frontmatter.type, "event");
+  assert.match(events[0]!.frontmatter.title, /HDFC Salary: began tracking/);
+  assert.equal(events[0]!.frontmatter["subject"], "hdfc-salary");
+  assert.equal(events[0]!.frontmatter["domain"], "financial"); // first tag drives the domain
+  assert.match(String(events[0]!.frontmatter["when"]), /^2026-09-05T/); // resolved ISO datetime
+
+  // timeline.md is a projection, grouped by domain, listing the transition.
+  const tl = store.get("timeline")!;
+  assert.equal(tl.frontmatter.type, "index");
+  assert.match(tl.body, /## financial/);
+  assert.match(tl.body, /2026-09-05.*HDFC Salary: began tracking/);
+  await rm(root, { recursive: true, force: true });
+});
+
+test("supersede records a status transition into the timeline", async () => {
+  const root = await tmpRoot();
+  const store = new DossierStore({ root, now: () => new Date("2026-09-05T00:00:00Z") });
+  store.create({ type: "account", title: "Old Bank", tags: ["financial"] }, OP);
+  store.supersede("old-bank", "closed the account", OP);
+
+  const titles = store.timeline().map((e) => e.frontmatter.title);
+  // Two transitions on the same subject: began tracking, then the status flip.
+  assert.ok(titles.some((t) => /began tracking/.test(t)));
+  assert.ok(titles.some((t) => /status: active → superseded/.test(t)));
+  await rm(root, { recursive: true, force: true });
+});
+
+test("an ordinary field/body edit does NOT create an event (selective)", async () => {
+  const root = await tmpRoot();
+  const store = new DossierStore({ root, now: () => new Date("2026-09-05T00:00:00Z") });
+  store.create({ type: "person", title: "Meghna", tags: ["family"] }, OP);
+  const before = store.timeline().length; // just the "began tracking" event
+  store.update("meghna", { body: "## Facts\n- lives in Pune" }, { origin: "model" });
+  assert.equal(store.timeline().length, before, "a non-status edit must not add a transition");
+  await rm(root, { recursive: true, force: true });
+});
+
+test("events never trigger events, and singletons/index are excluded (no self-reference)", async () => {
+  const root = await tmpRoot();
+  const store = new DossierStore({ root, now: () => new Date("2026-09-05T00:00:00Z") });
+  store.create({ type: "identity", title: "About", body: "## Facts\n- Rahul" }, OP);
+  store.create({ type: "preferences", title: "Prefs", body: "## Preferences\n- concise" }, OP);
+  // identity + preferences are the operator, not transitions — no events, no timeline yet.
+  assert.equal(store.timeline().length, 0);
+  assert.equal(store.get("timeline"), undefined);
+  await rm(root, { recursive: true, force: true });
+});
+
+test("regenerateTimeline is a pure, rebuildable projection of the event files", async () => {
+  const root = await tmpRoot();
+  const store = new DossierStore({ root, now: () => new Date("2026-09-05T00:00:00Z") });
+  store.create({ type: "account", title: "A Bank", tags: ["financial"] }, OP);
+  store.create({ type: "person", title: "Sister", tags: ["family"] }, OP);
+  const first = store.get("timeline")!.body;
+  // Rebuilding from the same events yields the same projection (idempotent).
+  store.regenerateTimeline();
+  assert.equal(store.get("timeline")!.body, first);
+  // Both domains present, sorted.
+  assert.match(first, /## family/);
+  assert.match(first, /## financial/);
+  await rm(root, { recursive: true, force: true });
+});
+
+test("timeline() orders transitions newest-first by `when`", async () => {
+  const root = await tmpRoot();
+  let clock = "2026-09-01T09:00:00Z";
+  const store = new DossierStore({ root, now: () => new Date(clock) });
+  store.create({ type: "account", title: "First", tags: ["financial"] }, OP);
+  clock = "2026-09-03T09:00:00Z";
+  store.create({ type: "account", title: "Second", tags: ["financial"] }, OP);
+  const events = store.timeline();
+  assert.match(events[0]!.frontmatter.title, /Second/); // newest first
+  assert.match(events[1]!.frontmatter.title, /First/);
+  await rm(root, { recursive: true, force: true });
+});
+
+test("dossier.timeline tool returns transitions newest-first, filterable by domain", async () => {
+  const { dossierTimeline } = await import("../src/execution/tools/dossier-timeline.ts");
+  const root = await tmpRoot();
+  let clock = "2026-09-01T09:00:00Z";
+  const store = new DossierStore({ root, now: () => new Date(clock) });
+  store.create({ type: "account", title: "Bank A", tags: ["financial"] }, OP);
+  clock = "2026-09-04T09:00:00Z";
+  store.create({ type: "person", title: "Cousin", tags: ["family"] }, OP);
+
+  const ctx = { sandbox: {} as never, dossier: { store } };
+  const all = await dossierTimeline.run({}, ctx);
+  const rows = all.data as { what: string; domain: string }[];
+  assert.equal(rows.length, 2);
+  assert.match(rows[0]!.what, /Cousin/); // newest first
+  assert.equal(dossierTimeline.effect, "read");
+
+  const fin = await dossierTimeline.run({ domain: "financial" }, ctx);
+  const finRows = fin.data as { what: string }[];
+  assert.equal(finRows.length, 1);
+  assert.match(finRows[0]!.what, /Bank A/);
+  await rm(root, { recursive: true, force: true });
 });

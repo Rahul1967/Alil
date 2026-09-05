@@ -125,7 +125,14 @@ export class DossierStore {
     const body = ensureSkeleton(input.type, input.body ?? "");
     const rel = this.#relPathFor(input.type, slug);
     this.#write(rel, fm, body);
-    return this.#parseFile(join(this.#root, rel))!;
+    const created = this.#parseFile(join(this.#root, rel))!;
+    // Trajectory layer: starting to track a substantive fact is itself a transition. Skip the
+    // infrastructure/self types (event/index/timeline; identity/preferences describe the operator,
+    // not a change) so the timeline stays selective and never self-references.
+    if (isTransitionWorthy(input.type)) {
+      this.#recordTransition(created, "began tracking", provenance);
+    }
+    return created;
   }
 
   /** Patch an existing file's body and/or frontmatter. `updated` is always refreshed. */
@@ -143,7 +150,16 @@ export class DossierStore {
     };
     const body = patch.body !== undefined ? ensureSkeleton(fm.type, patch.body) : f.body;
     this.#write(f.relPath, fm, body);
-    return this.#parseFile(f.path)!;
+    const updated = this.#parseFile(f.path)!;
+    // Trajectory layer: a status change (e.g. active → superseded) is a material transition worth
+    // recording. Ordinary field/body edits are not logged, to keep the timeline selective (Chronos:
+    // only real state transitions, not a firehose). `event` files never trigger this — no cascade.
+    const statusBefore = f.frontmatter.status;
+    const statusAfter = updated.frontmatter.status;
+    if (f.frontmatter.type !== "event" && statusAfter !== statusBefore) {
+      this.#recordTransition(updated, `status: ${statusBefore} → ${statusAfter}`, provenance);
+    }
+    return updated;
   }
 
   /** Mark a file superseded (status flip + a dated note appended). The fact is kept, not deleted. */
@@ -178,6 +194,97 @@ export class DossierStore {
     if (!text) return null;
     if (text.length > this.#preambleMax) text = text.slice(0, this.#preambleMax).trimEnd() + " …";
     return text;
+  }
+
+  // ── Trajectory layer: event files + the timeline projection (DESIGN §09) ─────
+
+  /**
+   * Emit an `event` file recording a transition on `subject`, then re-project `timeline.md`. This
+   * is the trajectory automation: a fact changing IS an event (event-sourcing), events are the
+   * append-only log, and timeline.md is a pure projection regenerated from them (never hand-edited,
+   * so it can't drift). Kept selective — only called for material transitions. Best-effort: a
+   * failure here never breaks the underlying dossier write that triggered it.
+   */
+  #recordTransition(subject: DossierFile, what: string, provenance: Provenance): void {
+    try {
+      const when = this.#now().toISOString();
+      const day = when.slice(0, 10);
+      const domain = primaryDomain(subject.frontmatter);
+      // Unique, sortable, collision-proof slug: dated + subject + a short disambiguator.
+      const base = `${day}-${subject.frontmatter.slug}`;
+      let slug = base;
+      let n = 2;
+      while (this.get(slug)) slug = `${base}-${n++}`;
+
+      const title = `${subject.frontmatter.title}: ${what}`;
+      const fm: DossierFrontmatter = {
+        type: "event",
+        title,
+        slug,
+        tags: normalizeTags(subject.frontmatter.tags),
+        status: "active",
+        provenance: provenance.origin,
+        created: day,
+        updated: day,
+        when,
+        domain,
+        subject: subject.frontmatter.slug,
+      };
+      const body = `## What changed\n${what} — ${subject.frontmatter.title} (${subject.frontmatter.type}).\n`;
+      const rel = this.#relPathFor("event", slug);
+      this.#write(rel, fm, body);
+      this.regenerateTimeline();
+    } catch {
+      // Trajectory logging is best-effort; the primary dossier write already succeeded.
+    }
+  }
+
+  /** All `event` files, newest transition first (by `when`, falling back to `updated`). */
+  timeline(limit?: number): DossierFile[] {
+    const events = this.list().filter((f) => f.frontmatter.type === "event");
+    events.sort((a, b) => (eventWhen(a) < eventWhen(b) ? 1 : -1));
+    return limit && limit > 0 ? events.slice(0, limit) : events;
+  }
+
+  /**
+   * Rebuild `timeline.md` as a pure projection of the `event` files: a human-readable life-arc
+   * grouped by domain, newest first. Idempotent and rebuildable at any time — the event files are
+   * the source of truth, this file is a derived view. Writes nothing when there are no events.
+   */
+  regenerateTimeline(): void {
+    const events = this.timeline();
+    const rel = "timeline.md";
+    if (events.length === 0) return;
+
+    const fm: DossierFrontmatter = {
+      type: "index",
+      title: "Timeline",
+      slug: "timeline",
+      description: "Auto-generated life-arc: every recorded transition, newest first. Do not hand-edit — regenerated from the `event` files, which are the source of truth.",
+      tags: [],
+      status: "active",
+      provenance: "model",
+      created: this.#today(),
+      updated: this.#today(),
+    };
+
+    // Group by domain, newest-first within each group.
+    const byDomain = new Map<string, DossierFile[]>();
+    for (const e of events) {
+      const d = String(e.frontmatter["domain"] ?? "general");
+      (byDomain.get(d) ?? byDomain.set(d, []).get(d)!).push(e);
+    }
+    const domains = [...byDomain.keys()].sort();
+    const lines: string[] = [];
+    for (const d of domains) {
+      lines.push(`## ${d}`, "");
+      for (const e of byDomain.get(d)!) {
+        const date = String(e.frontmatter["when"] ?? e.frontmatter.updated).slice(0, 10);
+        lines.push(`- **${date}** — ${e.frontmatter.title}  \`${e.frontmatter.slug}\``);
+      }
+      lines.push("");
+    }
+    this.#write(rel, fm, lines.join("\n").trimEnd() + "\n");
   }
 
   // ── internals ──────────────────────────────────────────────────────────────
@@ -259,6 +366,25 @@ function editDistance(a: string, b: string): number {
 
 function isSingleton(type: DossierType): boolean {
   return type === "identity" || type === "preferences";
+}
+
+/**
+ * Which types warrant a trajectory `event` on create. Excludes infrastructure (event/index) so the
+ * timeline never self-references, and the operator-self singletons (identity/preferences), which
+ * describe who the operator IS rather than a change worth timelining.
+ */
+function isTransitionWorthy(type: DossierType): boolean {
+  return type !== "event" && type !== "index" && !isSingleton(type);
+}
+
+/** The domain an event groups under in the timeline: first tag, else the subject's type. */
+function primaryDomain(fm: DossierFrontmatter): string {
+  return fm.tags[0] ?? fm.type;
+}
+
+/** An event's sort key: its resolved `when` timestamp, falling back to `updated`. */
+function eventWhen(f: DossierFile): string {
+  return String(f.frontmatter["when"] ?? f.frontmatter.updated ?? "");
 }
 
 /** Required body skeleton per type, so updates stay predictable and queryable. */

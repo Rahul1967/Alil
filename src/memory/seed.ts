@@ -190,7 +190,7 @@ export const DEFAULT_MEMORY_INSTRUCTIONS: Fact[] = [
   {
     key: "mem.dossier.evolve",
     kind: "memory_instruction",
-    text: "The user changes over time — keep the dossier honest about it. When a fact CHANGES (a move, a new job, a closed account), do not overwrite it: dossier.supersede the old file (it stays as history) and create the new current one. For life transitions worth remembering as a trajectory, create an `event` file (type: event, with `when` and `domain`) so the arc is reconstructable. Reserve dossier.delete for mistakes or an explicit erase request.",
+    text: "The user changes over time — keep the dossier honest about it. When a fact CHANGES (a move, a new job, a closed account), do not overwrite it: dossier.supersede the old file (it stays as history) and create the new current one. You do NOT need to hand-write `event` files — the trajectory is automatic: creating a fact and superseding one each emit a dated `event` and refresh a `timeline.md` life-arc for you. To recall how things have changed, read dossier.timeline (\"what changed recently\", optionally by domain) instead of re-reading every document. Reserve dossier.delete for mistakes or an explicit erase request.",
     provenance: { origin: "system" },
   },
   {

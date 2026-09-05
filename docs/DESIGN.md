@@ -439,11 +439,19 @@ Alil creates, updates, and supersedes through the boundary.
   instant; sqlite/FTS is a deferred, rebuildable optimization that nothing in the write path depends
   on.
 - **Write tools, all boundary-gated:** `dossier.create` · `dossier.update` · `dossier.supersede`
-  (never hard-delete a fact) · `dossier.delete` (high-risk). Reads: `dossier.query` · `dossier.read`.
-- **Trajectory layer.** The differentiator nobody in the LLM-memory space ships: modeling the
-  operator *changing over time*. Each transition is an `event` file (`when`, `domain`, a
-  `## What changed` body); a `timeline.md` index is the reconstructable life-arc. "What changed
-  recently" is a cheap query over recent `event` files.
+  (never hard-delete a fact) · `dossier.delete` (high-risk). Reads: `dossier.query` · `dossier.read`
+  · `dossier.timeline`.
+- **Trajectory layer (automatic).** The differentiator nobody in the LLM-memory space ships:
+  modeling the operator *changing over time*. Following the event-sourcing pattern (ActiveGraph) and
+  bi-temporal fact tracking (Zep/Graphiti), and kept **selective** (Chronos: only real state
+  transitions, not a firehose): the store **auto-emits an `event` file** on a material transition —
+  a fact created ("began tracking"), or a status change including supersede — carrying `when` (a
+  resolved ISO datetime), `domain` (the subject's primary tag), and `subject` (the slug). `event`
+  files are the append-only log; **`timeline.md` is a pure projection regenerated from them** on
+  every transition (grouped by domain, newest first), so it can never drift and is rebuildable at
+  any time. Guards against a cascade: `event`/`index` and the operator-self singletons never emit
+  events. "What changed recently" is a cheap read via `dossier.timeline` (or the `event` files
+  directly).
 - **Migration.** Operator identity/preferences moved out of canonical memory into the dossier via a
   one-time, single-approval, idempotent migration; canonical memory stops storing operator-about-self
   facts thereafter.
@@ -527,7 +535,7 @@ Legend: ✅ built · 🟡 partial · ⬜ planned.
 | Scanned PDFs (§08c″): `doc.read see:true` renders image-only pages to vision | ✅ | `src/execution/tools/doc-read.ts`, `docs/offline-extractor.ts` (unpdf + `@napi-rs/canvas`) |
 | File ingestion: optional local Tesseract `doc.ocr`; terminal `!attach` | ⬜ | (native vision covers scanned PDFs; offline text-OCR fallback deferred) |
 | Operator dossier (§09): store, tools, always-on block, UI, migration | ✅ | `src/dossier/`, `dossier-*` tools, `ui/` |
-| Dossier: `timeline.md` automation; sqlite/FTS index | 🟡/⬜ | `event` type + skeleton exist; timeline append + index deferred |
+| Dossier: `timeline.md` automation; sqlite/FTS index | ✅ / ⬜ | auto `event` files on transitions + regenerated `timeline.md` projection + `dossier.timeline` tool (`src/dossier/store.ts`); sqlite/FTS index still deferred |
 | Persona (§10) | ✅ | `workspace/SOUL.md`, base prompt |
 | Grounding: harness-injected post-action verification (§10a #1) | ✅ | `src/execution/executor.ts` + per-tool `verify` (fs.write/edit, dossier.*) |
 | Grounding: read-side — listings surface real entries in the observation (§10a #3) | ✅ | `fs.list`/`fs.glob` put names in the summary; prompt rule to answer listings from a live call |
@@ -559,15 +567,16 @@ hash-chained ledger; security-critical slices get an adversarial test *before* t
   across terminal/browser/Telegram.
 - *Prospective memory:* generalized intention store (kinds, open triggers, context trigger,
   lifecycle) + the Later view.
-- *Operator dossier:* markdown-native operator model with the always-on `[operator]` block and a
-  one-time preferences migration.
+- *Operator dossier:* markdown-native operator model with the always-on `[operator]` block, a
+  one-time preferences migration, and an **automatic trajectory layer** — `event` files emitted on
+  transitions + a regenerated `timeline.md` projection + the `dossier.timeline` "what changed" read.
 - *File ingestion:* the channel-agnostic boundary + Telegram/browser wiring.
 - *Vision:* `vision.view` + provider image blocks (Anthropic/Bedrock), capability-gated,
   taint-fenced; scanned/image-only PDF pages readable via `doc.read see:true` (rendered to images).
 
 **Next.**
 - Optional local Tesseract `doc.ocr` for offline/air-gapped text extraction; terminal `!attach`.
-- Dossier `timeline.md` automation; sqlite/FTS index when scan latency or relevance ranking demands.
+- Dossier sqlite/FTS index when scan latency or relevance ranking demands (timeline automation now shipped).
 - Signed/sandboxed skill runtime with capability manifests (§04 supply-chain row) — the gate before
   any public skill registry.
 - Additional channel bindings (Slack first — its inbound-file path is already sketched in §08c).
