@@ -189,6 +189,8 @@ function setTurnWaiting(waiting) {
   if (!activeTyping) return;
   const bubble = activeTyping.querySelector(".bubble");
   if (!bubble) return;
+  const already = bubble.classList.contains("awaiting");
+  if (waiting === already) return; // idempotent: don't rewrite the DOM every poll tick
   if (waiting) {
     bubble.classList.add("awaiting");
     bubble.innerHTML = '<span class="await-approval">⏳ waiting for your approval below ↓</span>';
@@ -264,12 +266,19 @@ async function pollApprovals() {
       shownApprovals.add(a.id);
       renderApproval(a);
     }
-    // If the current turn is parked on any unanswered approval, tell the user the turn is
-    // waiting on them (not silently hung). Cleared once nothing is pending.
-    setTurnWaiting((items || []).length > 0);
+    // The "waiting for approval" banner must track what the user can actually ACT on — a rendered,
+    // still-unanswered approval card — not the raw server count. A server-side pending item whose
+    // card is already resolved (or not yet/never rendered) must not leave the banner dangling with
+    // nothing below it. Derive the state from the DOM so banner and card can never disagree.
+    setTurnWaiting(hasActionableApproval());
   } catch {
     /* transient — try again next tick */
   }
+}
+
+/** True iff at least one approval card is on screen and not yet resolved (awaiting the user). */
+function hasActionableApproval() {
+  return document.querySelector(".approval:not(.resolved)") !== null;
 }
 
 async function submit(text) {
