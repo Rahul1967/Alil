@@ -183,3 +183,69 @@ test("web.search validates query and caps maxResults", () => {
   assert.equal(v.ok, true);
   if (v.ok) assert.equal(v.value.maxResults, 20); // clamped to HARD_MAX
 });
+
+// A minimal Bing SERP fixture: two organic results, one with a wrapped (ck/a) redirect URL whose
+// `u=a1<base64url>` decodes to the real target, one with a direct external href.
+function bingFixture(): string {
+  const realUrl = "https://en.wikipedia.org/wiki/Mitochondrion";
+  const wrapped = "a1" + Buffer.from(realUrl, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_");
+  const head = "x".repeat(1200); // keep length > challenge threshold
+  return `<html><body>${head}
+    <li class="b_algo" data-id iid=SERP.1">
+      <h2><a href="https://www.bing.com/ck/a?u=${wrapped}&ntb=1">Mitochondrion &amp; aging</a></h2>
+      <p class="b_lineclamp2">Mitochondria decline with age &#0183; and affect longevity.</p>
+    </li>
+    <li class="b_algo" iid=SERP.2">
+      <h2><a href="https://example.org/aging">Aging study</a></h2>
+      <p>Direct link result about aging.</p>
+    </li>
+  </body></html>`;
+}
+
+async function withFetch(stub: () => Promise<Response>, fn: () => Promise<void>): Promise<void> {
+  const original = globalThis.fetch;
+  globalThis.fetch = stub as never;
+  try { await fn(); } finally { globalThis.fetch = original; }
+}
+
+test("web.search parses Bing results and decodes wrapped URLs", async () => {
+  await withFetch(
+    async () => new Response(bingFixture(), { status: 200 }),
+    async () => {
+      const res = await webSearch.run({ query: "mitochondria aging" }, {} as never);
+      const data = res.data as { results: { title: string; url: string; snippet: string }[] };
+      assert.equal(data.results.length, 2);
+      assert.equal(data.results[0]!.url, "https://en.wikipedia.org/wiki/Mitochondrion"); // unwrapped
+      assert.match(data.results[0]!.title, /Mitochondrion & aging/);
+      assert.match(data.results[0]!.snippet, /longevity/);
+      assert.equal(data.results[1]!.url, "https://example.org/aging"); // direct href kept
+    },
+  );
+});
+
+test("web.search fails honestly on an anti-bot challenge (not a silent 0 results)", async () => {
+  await withFetch(
+    async () => new Response("<html><body>Please verify you are human (captcha)</body></html>", { status: 200 }),
+    async () => {
+      await assert.rejects(() => webSearch.run({ query: "x" }, {} as never), /challenge|search failed/i);
+    },
+  );
+});
+
+test("web.search fails honestly on a non-OK status", async () => {
+  await withFetch(
+    async () => new Response("nope", { status: 503 }),
+    async () => {
+      await assert.rejects(() => webSearch.run({ query: "x" }, {} as never), /HTTP 503|search failed/i);
+    },
+  );
+});
+
+test("web.search treats an empty parse as an error, never a clean no-results", async () => {
+  await withFetch(
+    async () => new Response("<html><body>" + "y".repeat(2000) + "</body></html>", { status: 200 }),
+    async () => {
+      await assert.rejects(() => webSearch.run({ query: "x" }, {} as never), /no parseable results|search failed/i);
+    },
+  );
+});
