@@ -41,13 +41,22 @@ export class PromptAssembler implements PromptPort {
     }
     if (this.#env) {
       const d = this.#env.now();
+      // Host timezone (falls back to UTC if the runtime can't resolve one).
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
       const date = d.toLocaleDateString("en-US", {
         weekday: "long",
         year: "numeric",
         month: "long",
         day: "numeric",
+        timeZone: tz,
       });
-      prompt += `\n\n## Environment\nToday's date is ${date}. Use this when reasoning about relative dates like "today" or "yesterday".`;
+      const time = d.toLocaleTimeString("en-US", {
+        hour: "2-digit",
+        minute: "2-digit",
+        timeZoneName: "short",
+        timeZone: tz,
+      });
+      prompt += `\n\n## Environment\nThe current date and time is ${date}, ${time} (${tz}). This is authoritative — use it directly to answer "what time/date is it?" and to reason about relative times like "today", "tomorrow", "in 2 hours". The ISO-8601 instant is ${d.toISOString()}.`;
     }
     return prompt;
   }

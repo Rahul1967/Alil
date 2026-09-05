@@ -37,12 +37,16 @@ test("base prompt tells the model to search proactively", () => {
   assert.match(BASE_SYSTEM_PROMPT, /don't ask permission to look something up/i);
 });
 
-test("env context injects a fixed date into the prompt", async () => {
+test("env context injects the current date AND time into the prompt", async () => {
   const fixed = new Date("2026-07-07T12:00:00Z");
   const sys = await new PromptAssembler(new StaticPersonaSource(null), {
     env: { now: () => fixed },
   }).system();
   assert.ok(sys.startsWith(BASE_SYSTEM_PROMPT));
   assert.match(sys, /## Environment/);
-  assert.match(sys, /Today's date is .*2026/);
+  assert.match(sys, /current date and time is .*2026/);
+  // A time-of-day (HH:MM) must be present — the bug was date-only.
+  assert.match(sys, /\d{1,2}:\d{2}/);
+  // The unambiguous ISO instant is included verbatim for the model to anchor on.
+  assert.match(sys, /2026-07-07T12:00:00\.000Z/);
 });

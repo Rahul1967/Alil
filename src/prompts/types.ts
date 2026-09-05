@@ -18,8 +18,9 @@ export interface PersonaSource {
 }
 
 /**
- * Supplies dynamic runtime facts injected into the system prompt (currently the date, so
- * the model can reason about "today"/"yesterday"). Injectable so tests stay deterministic.
+ * Supplies dynamic runtime facts injected into the system prompt (the current date AND time, with
+ * timezone, so the model can answer "what time is it?" and reason about "today"/"in 2 hours").
+ * Injectable so tests stay deterministic.
  */
 export interface EnvContext {
   now(): Date;
