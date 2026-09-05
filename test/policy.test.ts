@@ -96,6 +96,25 @@ test("tainted (ingested) allow escalates to ask", () => {
   assert.equal(escalated.decision, "ask");
 });
 
+test("tainted ask stays ask for low/medium risk (human stays in the loop)", () => {
+  // A tainted, medium-risk action that's already `ask` must NOT become a hard deny — the operator
+  // must still be able to approve legitimate follow-up work (e.g. searching after reading a page).
+  const a = classify(action({ tool: "fs.write", args: { path: "n.md", content: "x" }, provenance: { origin: "ingested" } }), tools).action;
+  const escalated = escalateForProvenance({ decision: "ask", reason: "write", decidedBy: "rule" }, a);
+  assert.equal(escalated.decision, "ask");
+  assert.equal(escalated.decidedBy, "provenance");
+});
+
+test("tainted ask becomes deny only for high/critical risk (genuinely dangerous)", () => {
+  const a: ActionContract = {
+    id: "x", tool: "shell", args: { command: "rm -rf x" },
+    effect: "execute", reversible: false, risk: "high", classified: true,
+    provenance: { origin: "ingested" },
+  };
+  const escalated = escalateForProvenance({ decision: "ask", reason: "exec", decidedBy: "rule" }, a);
+  assert.equal(escalated.decision, "deny");
+});
+
 // ─── end-to-end boundary + real executor (temp workspace) ───
 test("boundary: allowed read executes; write is asked (stub-denied)", async () => {
   const dir = await mkdtemp(join(tmpdir(), "alil-ws-"));

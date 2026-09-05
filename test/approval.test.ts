@@ -186,22 +186,63 @@ test("terminal deny (credential hook) never reaches approval", async () => {
   assert.equal(prompted, false); // credential deny is terminal
 });
 
-test("tainted action that escalates to deny never reaches approval", async () => {
+test("a tainted medium-risk write now REACHES the human (escalate ask→ask, not a hard deny)", async () => {
+  // Provenance escalation raises the bar to human judgment; it must not remove the human from the
+  // loop for a benign case. A tainted write is prompted (the operator can approve), not blocked.
   let prompted = false;
   const spy: ApprovalPort = { async request() { prompted = true; return { approved: true }; } };
-  const boundary = new PolicyBoundary({
-    rules: new StaticRuleSource(config), tools, hooks: [],
-    executor: new Executor({ sandbox: new Sandbox("workspace") }),
-    approvals: spy, grants: new GrantStore(),
-  });
-  const ingested: Provenance = { origin: "ingested" };
-  // write is ask → tainted escalates ask→deny
-  const a = writeAction("w1", "out.md", "x");
-  a.action.provenance = ingested;
-  const r = await boundary.submit(a);
-  assert.equal(r.outcome, "denied");
-  assert.equal(prompted, false);
-} );
+  const dir = await mkdtemp(join(tmpdir(), "alil-appr-"));
+  try {
+    const boundary = new PolicyBoundary({
+      rules: new StaticRuleSource(config), tools, hooks: [],
+      executor: new Executor({ sandbox: new Sandbox(dir) }),
+      approvals: spy, grants: new GrantStore(),
+    });
+    // fs.write classifies to effect:write, risk:medium. Tainted ⇒ escalated but still ask.
+    const a: ProposedAction = {
+      action: {
+        id: "w1", tool: "fs.write", args: { path: "out.md", content: "x" },
+        effect: "write", reversible: false, risk: "medium", classified: false,
+        provenance: { origin: "ingested" },
+      },
+    };
+    const r = await boundary.submit(a);
+    assert.equal(prompted, true, "a tainted medium write must reach the operator, not be silently denied");
+    assert.equal(r.outcome, "ok");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a tainted HIGH-risk action is hard-denied and never reaches approval", async () => {
+  let prompted = false;
+  const spy: ApprovalPort = { async request() { prompted = true; return { approved: true }; } };
+  const execConfig: PolicyConfig = {
+    mode: "default",
+    rules: [{ kind: "ask", match: { effect: "execute" }, note: "confirm exec" }],
+  };
+  const dir = await mkdtemp(join(tmpdir(), "alil-appr-"));
+  try {
+    const boundary = new PolicyBoundary({
+      rules: new StaticRuleSource(execConfig), tools, hooks: [],
+      executor: new Executor({ sandbox: new Sandbox(dir) }),
+      approvals: spy, grants: new GrantStore(),
+    });
+    // A tainted, high-risk execute action — the genuinely dangerous case: hard-blocked.
+    const a: ProposedAction = {
+      action: {
+        id: "x1", tool: "shell", args: { command: "echo hi" },
+        effect: "execute", reversible: false, risk: "high", classified: true,
+        provenance: { origin: "ingested" },
+      },
+    };
+    const r = await boundary.submit(a);
+    assert.equal(r.outcome, "denied");
+    assert.equal(prompted, false, "a tainted high-risk action must not even be offered for approval");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 test("no approval port ⇒ ask fails closed", async () => {
   const boundary = new PolicyBoundary({
