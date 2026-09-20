@@ -1,5 +1,9 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, readdirSync, statSync } from "node:fs";
+import {
+  readFileSync, existsSync, mkdirSync, rmSync, readdirSync, statSync,
+  renameSync, openSync, closeSync, fsyncSync, unlinkSync, writeSync,
+} from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
+import { randomBytes } from "node:crypto";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { Provenance } from "../core/types.ts";
 import type {
@@ -13,6 +17,18 @@ export interface DossierStoreOptions {
   now?: () => Date;
   /** Max chars in the always-on operator preamble (~4 chars/token). Default 1600 (~400 tokens). */
   preambleMaxChars?: number;
+  /**
+   * Milliseconds to wait for the cross-process write lock before failing closed. Default 5000.
+   * A single logical mutation is fast, so a caller blocked this long means another process is
+   * genuinely writing (or a stale lock remains after a crash — see `.dossier.lock`).
+   */
+  lockTimeoutMs?: number;
+}
+
+/** One file to write in a commit: its vault-relative path and the exact bytes to land there. */
+interface PlannedWrite {
+  rel: string;
+  data: string;
 }
 
 /** Which subdirectory a well-known type routes into. Singletons + indexes sit at the root. Unknown
@@ -24,6 +40,8 @@ const TYPE_DIR: Record<string, string> = {
 };
 
 const DEFAULT_PREAMBLE_MAX = 1600;
+const DEFAULT_LOCK_TIMEOUT_MS = 5000;
+const LOCK_FILE = ".dossier.lock";
 
 /**
  * DossierStore — the single reader/writer for the operator dossier. Markdown files are the source
@@ -36,11 +54,13 @@ export class DossierStore {
   readonly #root: string;
   readonly #now: () => Date;
   readonly #preambleMax: number;
+  readonly #lockTimeoutMs: number;
 
   constructor(opts: DossierStoreOptions) {
     this.#root = opts.root;
     this.#now = opts.now ?? (() => new Date());
     this.#preambleMax = opts.preambleMaxChars ?? DEFAULT_PREAMBLE_MAX;
+    this.#lockTimeoutMs = opts.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
   }
 
   /** Every dossier file, parsed. Corrupt files are skipped rather than crashing a query. */
@@ -124,15 +144,17 @@ export class DossierStore {
     };
     const body = ensureSkeleton(input.type, input.body ?? "");
     const rel = this.#relPathFor(input.type, slug);
-    this.#write(rel, fm, body);
-    const created = this.#parseFile(join(this.#root, rel))!;
-    // Trajectory layer: starting to track a substantive fact is itself a transition. Skip the
-    // infrastructure/self types (event/index/timeline; identity/preferences describe the operator,
-    // not a change) so the timeline stays selective and never self-references.
+    // Collect the subject write plus — for a substantive fact — the trajectory event and the
+    // regenerated timeline into ONE atomic bundle. Starting to track a fact IS a transition, but
+    // it must land all-or-nothing with the fact itself (no partial "subject written, event lost").
+    // Skip the infrastructure/self types (event/index; identity/preferences) so the timeline stays
+    // selective and never self-references.
+    const writes: PlannedWrite[] = [{ rel, data: serialize(fm, body) }];
     if (isTransitionWorthy(input.type)) {
-      this.#recordTransition(created, "began tracking", provenance);
+      writes.push(...this.#transitionWrites(fm, "began tracking", provenance));
     }
-    return created;
+    this.#commit(writes);
+    return this.#parseFile(join(this.#root, rel))!;
   }
 
   /** Patch an existing file's body and/or frontmatter. `updated` is always refreshed. */
@@ -149,17 +171,18 @@ export class DossierStore {
       updated: this.#today(),
     };
     const body = patch.body !== undefined ? ensureSkeleton(fm.type, patch.body) : f.body;
-    this.#write(f.relPath, fm, body);
-    const updated = this.#parseFile(f.path)!;
     // Trajectory layer: a status change (e.g. active → superseded) is a material transition worth
-    // recording. Ordinary field/body edits are not logged, to keep the timeline selective (Chronos:
-    // only real state transitions, not a firehose). `event` files never trigger this — no cascade.
+    // recording; ordinary field/body edits are not, keeping the timeline selective. Bundle the
+    // subject write and any transition (event + timeline) into ONE atomic commit so they can never
+    // diverge. `event` files never trigger this — no cascade.
     const statusBefore = f.frontmatter.status;
-    const statusAfter = updated.frontmatter.status;
+    const statusAfter = fm.status;
+    const writes: PlannedWrite[] = [{ rel: f.relPath, data: serialize(fm, body) }];
     if (f.frontmatter.type !== "event" && statusAfter !== statusBefore) {
-      this.#recordTransition(updated, `status: ${statusBefore} → ${statusAfter}`, provenance);
+      writes.push(...this.#transitionWrites(fm, `status: ${statusBefore} → ${statusAfter}`, provenance));
     }
-    return updated;
+    this.#commit(writes);
+    return this.#parseFile(f.path)!;
   }
 
   /** Mark a file superseded (status flip + a dated note appended). The fact is kept, not deleted. */
@@ -174,7 +197,7 @@ export class DossierStore {
   remove(slug: string): boolean {
     const f = this.get(slug);
     if (!f) return false;
-    rmSync(f.path);
+    this.#withLock(() => rmSync(f.path));
     return true;
   }
 
@@ -199,44 +222,52 @@ export class DossierStore {
   // ── Trajectory layer: event files + the timeline projection (DESIGN §09) ─────
 
   /**
-   * Emit an `event` file recording a transition on `subject`, then re-project `timeline.md`. This
-   * is the trajectory automation: a fact changing IS an event (event-sourcing), events are the
-   * append-only log, and timeline.md is a pure projection regenerated from them (never hand-edited,
-   * so it can't drift). Kept selective — only called for material transitions. Best-effort: a
-   * failure here never breaks the underlying dossier write that triggered it.
+   * Build the planned writes for a transition on `subject`: one immutable `event` file plus the
+   * regenerated `timeline.md` projection that INCLUDES that new event. This returns writes rather
+   * than performing them, so the caller can bundle them with the subject write into ONE atomic
+   * commit — a fact changing and its event/timeline now land all-or-nothing (no more best-effort
+   * "subject written, event lost"). Kept selective: only called for material transitions, and
+   * never for `event`/`index`/self-singletons, so the timeline can't cascade or self-reference.
    */
-  #recordTransition(subject: DossierFile, what: string, provenance: Provenance): void {
-    try {
-      const when = this.#now().toISOString();
-      const day = when.slice(0, 10);
-      const domain = primaryDomain(subject.frontmatter);
-      // Unique, sortable, collision-proof slug: dated + subject + a short disambiguator.
-      const base = `${day}-${subject.frontmatter.slug}`;
-      let slug = base;
-      let n = 2;
-      while (this.get(slug)) slug = `${base}-${n++}`;
+  #transitionWrites(subject: DossierFrontmatter, what: string, provenance: Provenance): PlannedWrite[] {
+    const when = this.#now().toISOString();
+    const day = when.slice(0, 10);
+    const domain = primaryDomain(subject);
+    // Unique, sortable, collision-proof slug: dated + subject + a short disambiguator.
+    const base = `${day}-${subject.slug}`;
+    let slug = base;
+    let n = 2;
+    while (this.get(slug)) slug = `${base}-${n++}`;
 
-      const title = `${subject.frontmatter.title}: ${what}`;
-      const fm: DossierFrontmatter = {
-        type: "event",
-        title,
-        slug,
-        tags: normalizeTags(subject.frontmatter.tags),
-        status: "active",
-        provenance: provenance.origin,
-        created: day,
-        updated: day,
-        when,
-        domain,
-        subject: subject.frontmatter.slug,
-      };
-      const body = `## What changed\n${what} — ${subject.frontmatter.title} (${subject.frontmatter.type}).\n`;
-      const rel = this.#relPathFor("event", slug);
-      this.#write(rel, fm, body);
-      this.regenerateTimeline();
-    } catch {
-      // Trajectory logging is best-effort; the primary dossier write already succeeded.
-    }
+    const title = `${subject.title}: ${what}`;
+    const eventFm: DossierFrontmatter = {
+      type: "event",
+      title,
+      slug,
+      tags: normalizeTags(subject.tags),
+      status: "active",
+      provenance: provenance.origin,
+      created: day,
+      updated: day,
+      when,
+      domain,
+      subject: subject.slug,
+    };
+    const eventBody = `## What changed\n${what} — ${subject.title} (${subject.type}).\n`;
+    const eventRel = this.#relPathFor("event", slug);
+    const eventFile: DossierFile = {
+      path: join(this.#root, eventRel),
+      relPath: eventRel,
+      frontmatter: eventFm,
+      body: eventBody,
+    };
+
+    const writes: PlannedWrite[] = [{ rel: eventRel, data: serialize(eventFm, eventBody) }];
+    // Timeline projection must reflect the event we're about to write, so seed it with `eventFile`
+    // rather than re-reading from disk (which wouldn't yet contain it within this atomic commit).
+    const timeline = this.#timelineWrite([...this.timeline(), eventFile]);
+    if (timeline) writes.push(timeline);
+    return writes;
   }
 
   /** All `event` files, newest transition first (by `when`, falling back to `updated`). */
@@ -249,12 +280,21 @@ export class DossierStore {
   /**
    * Rebuild `timeline.md` as a pure projection of the `event` files: a human-readable life-arc
    * grouped by domain, newest first. Idempotent and rebuildable at any time — the event files are
-   * the source of truth, this file is a derived view. Writes nothing when there are no events.
+   * the source of truth, this file is a derived view. A no-op when there are no events.
    */
   regenerateTimeline(): void {
-    const events = this.timeline();
-    const rel = "timeline.md";
-    if (events.length === 0) return;
+    const write = this.#timelineWrite(this.timeline());
+    if (write) this.#commit([write]);
+  }
+
+  /**
+   * Compute the `timeline.md` projection for a set of events, as a PlannedWrite — pure (no I/O), so
+   * it can be bundled into an atomic commit or applied on its own by `regenerateTimeline`. Returns
+   * null when there are no events (nothing to project).
+   */
+  #timelineWrite(events: DossierFile[]): PlannedWrite | null {
+    if (events.length === 0) return null;
+    const sorted = [...events].sort((a, b) => (eventWhen(a) < eventWhen(b) ? 1 : -1));
 
     const fm: DossierFrontmatter = {
       type: "index",
@@ -270,7 +310,7 @@ export class DossierStore {
 
     // Group by domain, newest-first within each group.
     const byDomain = new Map<string, DossierFile[]>();
-    for (const e of events) {
+    for (const e of sorted) {
       const d = String(e.frontmatter["domain"] ?? "general");
       (byDomain.get(d) ?? byDomain.set(d, []).get(d)!).push(e);
     }
@@ -284,7 +324,7 @@ export class DossierStore {
       }
       lines.push("");
     }
-    this.#write(rel, fm, lines.join("\n").trimEnd() + "\n");
+    return { rel: "timeline.md", data: serialize(fm, lines.join("\n").trimEnd() + "\n") };
   }
 
   // ── internals ──────────────────────────────────────────────────────────────
@@ -302,9 +342,92 @@ export class DossierStore {
   }
 
   #write(rel: string, fm: DossierFrontmatter, body: string): void {
-    const abs = join(this.#root, rel);
-    mkdirSync(dirname(abs), { recursive: true });
-    writeFileSync(abs, serialize(fm, body));
+    this.#commit([{ rel, data: serialize(fm, body) }]);
+  }
+
+  /**
+   * Apply a set of file writes as ONE recoverable transaction under the cross-process lock.
+   * Guarantees:
+   *  - Atomic per file: each target is written to a temp file, fsync'd, then atomically renamed
+   *    over the destination — a reader never sees a truncated/partial file, even on crash.
+   *  - All-or-nothing across the bundle: any file being overwritten is first backed up; if a later
+   *    rename fails, the already-committed renames are rolled back from those backups and remaining
+   *    temps are cleaned up, so a coupled write (subject + event + timeline) can't half-apply.
+   * A commit with no writes is a no-op (and does not take the lock).
+   */
+  #commit(writes: PlannedWrite[]): void {
+    if (writes.length === 0) return;
+    this.#withLock(() => {
+      const staged: { abs: string; tmp: string; backup: string | null }[] = [];
+      const committed: { abs: string; backup: string | null }[] = [];
+      try {
+        // Phase 1 — stage every write to a temp file next to its destination (nothing visible yet).
+        for (const w of writes) {
+          const abs = join(this.#root, w.rel);
+          mkdirSync(dirname(abs), { recursive: true });
+          const tmp = `${abs}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+          atomicPrepare(tmp, w.data);
+          const backup = existsSync(abs) ? `${abs}.${process.pid}.${randomBytes(6).toString("hex")}.bak` : null;
+          staged.push({ abs, tmp, backup });
+        }
+        // Phase 2 — commit: back up any file we're about to overwrite, then rename temp into place.
+        for (const s of staged) {
+          if (s.backup) renameSync(s.abs, s.backup); // preserve prior bytes for rollback
+          renameSync(s.tmp, s.abs);
+          committed.push({ abs: s.abs, backup: s.backup });
+        }
+        // Phase 3 — success: drop the backups.
+        for (const c of committed) if (c.backup) safeUnlink(c.backup);
+      } catch (err) {
+        // Roll back the renames that already landed, restoring prior bytes (or removing a created
+        // file), then clean up any un-committed temps. Leaves the vault as it was pre-commit.
+        for (const c of committed.reverse()) {
+          if (c.backup) { safeUnlink(c.abs); renameSync(c.backup, c.abs); }
+          else safeUnlink(c.abs);
+        }
+        for (const s of staged) safeUnlink(s.tmp);
+        throw err;
+      }
+    });
+  }
+
+  /**
+   * Run `fn` while holding an exclusive, cross-process advisory lock on the dossier root, so a
+   * browser turn, a Telegram turn, and an ambient wake sharing one workspace can't interleave
+   * writes. The lock is an `wx`-created `.dossier.lock` file carrying the holder's pid + time.
+   * Fails closed after `lockTimeoutMs` rather than corrupting state. A stale lock (holder crashed)
+   * is reported with its recorded pid/time — it is NEVER auto-stolen; recovery is an explicit
+   * operator action (delete the lockfile after confirming no writer is alive).
+   */
+  #withLock<T>(fn: () => T): T {
+    mkdirSync(this.#root, { recursive: true });
+    const lockPath = join(this.#root, LOCK_FILE);
+    const deadline = Date.now() + this.#lockTimeoutMs;
+    let fd: number | undefined;
+    for (;;) {
+      try {
+        fd = openSync(lockPath, "wx"); // exclusive create — fails if the lock is held
+        writeSync(fd, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }));
+        break;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+        if (Date.now() >= deadline) {
+          const holder = readLockHolder(lockPath);
+          throw new Error(
+            `dossier: could not acquire write lock at ${lockPath} within ${this.#lockTimeoutMs}ms` +
+            (holder ? ` (held by pid ${holder.pid} since ${holder.at})` : "") +
+            `. If no writer is alive, remove the lockfile to recover.`,
+          );
+        }
+        sleepSync(25); // brief spin; a logical mutation is fast, so contention clears quickly
+      }
+    }
+    try {
+      return fn();
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+      safeUnlink(lockPath);
+    }
   }
 
   #parseFile(abs: string): DossierFile | null {
@@ -343,6 +466,47 @@ export class DossierStore {
 }
 
 // ── module helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Write `data` to `tmp` and flush it to disk (fsync), so a subsequent atomic rename lands fully
+ * durable bytes. The caller renames `tmp` over the real destination; POSIX rename is atomic, so a
+ * concurrent reader sees either the old file or the complete new one — never a partial write.
+ */
+function atomicPrepare(tmp: string, data: string): void {
+  const fd = openSync(tmp, "w");
+  try {
+    writeSync(fd, data);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Remove a file, ignoring "already gone" — used for temps, backups, and lock cleanup. */
+function safeUnlink(path: string): void {
+  try {
+    unlinkSync(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+}
+
+/** Read the pid/time recorded in a held lockfile, for a helpful stale-lock error. Best-effort. */
+function readLockHolder(path: string): { pid: unknown; at: unknown } | null {
+  try {
+    const j = JSON.parse(readFileSync(path, "utf8")) as { pid: unknown; at: unknown };
+    return { pid: j.pid, at: j.at };
+  } catch {
+    return null;
+  }
+}
+
+/** Busy-wait `ms` milliseconds synchronously (the store's write path is intentionally sync). */
+function sleepSync(ms: number): void {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { /* spin briefly; contention on a fast mutation clears quickly */ }
+}
+
 
 /** Levenshtein edit distance (small strings only) — the last-resort ranker in suggestSlugs. */
 function editDistance(a: string, b: string): number {

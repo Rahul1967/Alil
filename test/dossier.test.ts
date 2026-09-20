@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -375,5 +375,103 @@ test("dossier.timeline tool returns transitions newest-first, filterable by doma
   const finRows = fin.data as { what: string }[];
   assert.equal(finRows.length, 1);
   assert.match(finRows[0]!.what, /Bank A/);
+  await rm(root, { recursive: true, force: true });
+});
+
+// ── Atomic transactional writes + write-lock (crash-safety & all-or-nothing) ──
+
+test("a transition is all-or-nothing: a failed timeline write rolls back the subject and event", async () => {
+  const root = await tmpRoot();
+  const store = new DossierStore({ root, now: () => new Date("2026-09-05T00:00:00Z") });
+  // Establish a baseline: one account, its event, and a timeline.
+  store.create({ type: "account", title: "First", tags: ["financial"] }, OP);
+  const timelineBefore = readFileSync(join(root, "timeline.md"), "utf8");
+  const filesBefore = store.list().length;
+
+  // Force the timeline.md write to fail mid-commit by making its path un-writable: replace the
+  // file with a directory of the same name so the atomic rename onto it throws.
+  rmSync(join(root, "timeline.md"), { force: true });
+  mkdirSync(join(root, "timeline.md"));
+
+  // A new create bundles subject + event + timeline; the timeline write now fails, so NOTHING
+  // from this operation should land (not the account, not its event).
+  assert.throws(() => store.create({ type: "account", title: "Second", tags: ["financial"] }, OP));
+  assert.equal(store.get("second"), undefined, "subject must be rolled back");
+  assert.ok(!store.timeline().some((e) => /Second/.test(e.frontmatter.title)), "event must be rolled back");
+
+  // Restore the timeline file/dir and confirm the pre-commit state survived intact.
+  rmSync(join(root, "timeline.md"), { recursive: true });
+  writeFileSync(join(root, "timeline.md"), timelineBefore);
+  assert.ok(store.get("first"), "the pre-existing account is untouched");
+  assert.equal(store.list().length, filesBefore, "no partial files left behind");
+  await rm(root, { recursive: true, force: true });
+});
+
+test("commit leaves no .tmp or .bak files behind on success", async () => {
+  const root = await tmpRoot();
+  const store = new DossierStore({ root, now: () => new Date("2026-09-05T00:00:00Z") });
+  store.create({ type: "account", title: "HDFC", tags: ["financial"] }, OP); // subject + event + timeline
+  store.update("hdfc", { frontmatter: { status: "archived" } }, OP); // another coupled commit
+  const stray: string[] = [];
+  const walk = (dir: string) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (/\.(tmp|bak)$/.test(e.name)) stray.push(p);
+    }
+  };
+  walk(root);
+  assert.deepEqual(stray, [], "temp/backup files must be cleaned up after a successful commit");
+  await rm(root, { recursive: true, force: true });
+});
+
+test("an overwrite is atomic: the destination is never left truncated", async () => {
+  const root = await tmpRoot();
+  const store = new DossierStore({ root, now: () => new Date("2026-09-05T00:00:00Z") });
+  const f = store.create({ type: "note", title: "Doc", body: "## Items\n- original" }, OP);
+  // A normal update rewrites the file; read it back and confirm it's complete, not half-written.
+  store.update("doc", { body: "## Items\n- revised content that is longer than before" }, OP);
+  const raw = readFileSync(f.path, "utf8");
+  assert.match(raw, /^---\n/); // frontmatter intact
+  assert.match(raw, /revised content/); // new body fully present
+  assert.doesNotMatch(raw, /original/); // fully replaced, not appended/torn
+  await rm(root, { recursive: true, force: true });
+});
+
+test("the write-lock fails closed when held by another process", async () => {
+  const root = await tmpRoot();
+  const store = new DossierStore({ root, now: () => new Date("2026-09-05T00:00:00Z"), lockTimeoutMs: 100 });
+  const { openSync, closeSync, writeSync } = await import("node:fs");
+  mkdirSync(root, { recursive: true });
+  // Simulate a live foreign holder: an existing .dossier.lock the store didn't create.
+  const lockPath = join(root, ".dossier.lock");
+  const fd = openSync(lockPath, "wx");
+  writeSync(fd, JSON.stringify({ pid: 999999, at: "2026-09-05T00:00:00Z" }));
+  closeSync(fd);
+
+  // A write must fail closed within the timeout, naming the holder and how to recover.
+  assert.throws(
+    () => store.create({ type: "note", title: "Blocked" }, OP),
+    (err: Error) => {
+      assert.match(err.message, /could not acquire write lock/);
+      assert.match(err.message, /pid 999999/);
+      assert.match(err.message, /remove the lockfile to recover/);
+      return true;
+    },
+  );
+  // Nothing was written while blocked.
+  assert.equal(store.get("blocked"), undefined);
+  await rm(root, { recursive: true, force: true });
+});
+
+test("the write-lock is released after a successful commit (next write succeeds)", async () => {
+  const root = await tmpRoot();
+  const store = new DossierStore({ root, now: () => new Date("2026-09-05T00:00:00Z"), lockTimeoutMs: 100 });
+  store.create({ type: "note", title: "One" }, OP);
+  // If the lock leaked, this second write would block and throw; it must succeed.
+  store.create({ type: "note", title: "Two" }, OP);
+  assert.ok(store.get("one"));
+  assert.ok(store.get("two"));
+  assert.ok(!existsSync(join(root, ".dossier.lock")), "lockfile must be gone between commits");
   await rm(root, { recursive: true, force: true });
 });
