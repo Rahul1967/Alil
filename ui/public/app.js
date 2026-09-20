@@ -404,6 +404,11 @@ function setView(which) {
   tabLater.classList.toggle("active", which === "later");
   tabDossier.classList.toggle("active", which === "dossier");
   tabMemory.classList.toggle("active", which === "memory");
+  // Stop any running graph animation when leaving the dossier view (avoids a background RAF loop).
+  if (which !== "dossier" && typeof graphSim !== "undefined" && graphSim && graphSim.raf) {
+    cancelAnimationFrame(graphSim.raf);
+    graphSim.raf = null;
+  }
 }
 tabChat.addEventListener("click", () => setView("chat"));
 tabPlan.addEventListener("click", () => setView("plan"));
@@ -723,6 +728,245 @@ async function loadDossier() {
     dossierContent.appendChild(el("div", "later-section", label + " · " + group.length));
     group.forEach((i) => dossierContent.appendChild(renderDossierCard(i)));
   }
+}
+
+// ── Dossier view modes: Files / Timeline / Graph ─────────────────────────────
+const dModeEls = {
+  files: document.getElementById("dossierFiles"),
+  timeline: document.getElementById("dossierTimeline"),
+  graph: document.getElementById("dossierGraph"),
+};
+let dossierMode = "files";
+document.querySelectorAll("#dossierModes button").forEach((b) => {
+  b.addEventListener("click", () => {
+    document.querySelectorAll("#dossierModes button").forEach((x) => x.classList.remove("active"));
+    b.classList.add("active");
+    dossierMode = b.getAttribute("data-mode");
+    for (const [k, node] of Object.entries(dModeEls)) node.classList.toggle("show", k === dossierMode);
+    if (dossierMode === "files") loadDossier();
+    else if (dossierMode === "timeline") loadTimeline();
+    else if (dossierMode === "graph") loadGraph();
+  });
+});
+
+/** Fetch one dossier file's body as text (shared by timeline + graph detail panels). */
+async function fetchDossierBody(slug) {
+  try {
+    const f = await (await fetch("/api/dossier/" + encodeURIComponent(slug))).json();
+    if (!f || f.error) return null;
+    return f;
+  } catch { return null; }
+}
+
+// ── Timeline mode (vertical life-arc, grouped by domain) ─────────────────────
+const timelineContent = document.getElementById("timelineContent");
+const timelineDomains = document.getElementById("timelineDomains");
+let timelineDomainFilter = "";
+
+async function loadTimeline() {
+  timelineContent.innerHTML = "";
+  timelineContent.appendChild(el("div", "empty-tab", "loading…"));
+  let data;
+  try {
+    const params = new URLSearchParams();
+    if (timelineDomainFilter) params.set("domain", timelineDomainFilter);
+    data = await (await fetch("/api/dossier/timeline?" + params.toString())).json();
+  } catch (e) {
+    timelineContent.innerHTML = ""; timelineContent.appendChild(el("div", "empty-tab", "error: " + e.message)); return;
+  }
+  // Domain filter chips (built once from the full domain set the API reports).
+  if (!timelineDomains.dataset.built && data.domains) {
+    timelineDomains.dataset.built = "1";
+    const mk = (dom, label) => {
+      const btn = el("button", dom === "" ? "active" : "", label);
+      btn.addEventListener("click", () => {
+        timelineDomains.querySelectorAll("button").forEach((x) => x.classList.remove("active"));
+        btn.classList.add("active"); timelineDomainFilter = dom; loadTimeline();
+      });
+      timelineDomains.appendChild(btn);
+    };
+    mk("", "All");
+    data.domains.forEach((d) => mk(d, d));
+  }
+
+  timelineContent.innerHTML = "";
+  const rows = data.rows || [];
+  if (rows.length === 0) {
+    timelineContent.appendChild(el("div", "empty-tab",
+      "No transitions recorded yet. As facts are created, changed, or superseded, Alil logs each one here as a life-arc."));
+    return;
+  }
+  // Group by domain, preserving the newest-first order the API already applied.
+  const byDomain = {};
+  for (const r of rows) (byDomain[r.domain || "general"] ||= []).push(r);
+  for (const domain of Object.keys(byDomain).sort()) {
+    timelineContent.appendChild(el("div", "tl-domain", domain));
+    for (const r of byDomain[domain]) {
+      const item = el("div", "tl-item");
+      item.appendChild(el("div", "tl-date", r.when));
+      const title = el("div", "tl-title", r.title);
+      const sub = el("div", "tl-sub", "");
+      let loaded = false;
+      title.addEventListener("click", async () => {
+        const opening = !item.classList.contains("open");
+        item.classList.toggle("open");
+        if (opening && !loaded) {
+          loaded = true; sub.textContent = "loading…";
+          const f = await fetchDossierBody(r.slug);
+          sub.textContent = f ? (f.body || "(empty)") : "(could not load)";
+          if (r.subject) {
+            const link = el("div", "tl-date", "subject: " + r.subject);
+            sub.appendChild(link);
+          }
+        }
+      });
+      item.appendChild(title);
+      item.appendChild(sub);
+      timelineContent.appendChild(item);
+    }
+  }
+}
+
+// ── Graph mode (operator-centred node-link, tiny hand-rolled force layout) ────
+const graphCanvas = document.getElementById("graphCanvas");
+const graphLegend = document.getElementById("graphLegend");
+const graphDetail = document.getElementById("graphDetail");
+const GRAPH_COLORS = {
+  identity: "#7c5cff", person: "#2bb673", account: "#e0a030", loan: "#e0a030",
+  document: "#3a9bdc", note: "#8a8f98", event: "#8a8f98", index: "#8a8f98",
+};
+const graphColor = (type) => GRAPH_COLORS[type] || "#c0563a"; // invented types → accent
+let graphSim = null; // { nodes, edges, raf } so we can cancel a running simulation on tab switch
+
+async function loadGraph() {
+  graphDetail.classList.remove("show");
+  if (graphSim && graphSim.raf) cancelAnimationFrame(graphSim.raf);
+  let data;
+  try {
+    data = await (await fetch("/api/dossier/graph")).json();
+  } catch (e) {
+    graphLegend.textContent = "error: " + e.message; return;
+  }
+  const nodes = data.nodes || [];
+  const edges = data.edges || [];
+
+  // Legend from the distinct node types present.
+  graphLegend.innerHTML = "";
+  [...new Set(nodes.map((n) => n.type))].forEach((t) => {
+    const lg = el("span", "lg");
+    const dot = el("span", "dot"); dot.style.background = graphColor(t); lg.appendChild(dot);
+    lg.appendChild(document.createTextNode(t)); graphLegend.appendChild(lg);
+  });
+  if (nodes.length <= 1) {
+    graphLegend.innerHTML = "";
+    graphLegend.appendChild(el("span", "", "The graph fills in as Alil records people, accounts, and other facts about you."));
+  }
+
+  runForceGraph(nodes, edges);
+}
+
+/** A minimal force-directed layout on <canvas>: repulsion between nodes, springs along edges, and
+ *  gravity toward the center (the operator anchor is pinned). No dependencies — a few hundred ticks
+ *  settle a personal-scale graph (tens of nodes). Click a node to open its file detail. */
+function runForceGraph(rawNodes, edges) {
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = graphCanvas.clientWidth || 700;
+  const cssH = 460;
+  graphCanvas.width = cssW * dpr; graphCanvas.height = cssH * dpr;
+  const ctx = graphCanvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+  const cx = cssW / 2, cy = cssH / 2;
+
+  // Seed positions in a ring around the center; the anchor sits at the middle and stays pinned.
+  const nodes = rawNodes.map((n, i) => {
+    const a = (i / Math.max(1, rawNodes.length)) * Math.PI * 2;
+    return { ...n, x: n.central ? cx : cx + Math.cos(a) * 140, y: n.central ? cy : cy + Math.sin(a) * 140, vx: 0, vy: 0 };
+  });
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const links = edges.map((e) => ({ s: byId.get(e.source), t: byId.get(e.target), kind: e.kind, label: e.label })).filter((l) => l.s && l.t);
+
+  const REPULSION = 5200, SPRING = 0.015, SPRING_LEN = 96, GRAVITY = 0.012, DAMPING = 0.85;
+  let ticks = 0;
+
+  function step() {
+    for (let i = 0; i < nodes.length; i++) {
+      const a = nodes[i];
+      if (a.central) continue;
+      let fx = 0, fy = 0;
+      for (let j = 0; j < nodes.length; j++) {
+        if (i === j) continue;
+        const b = nodes[j];
+        let dx = a.x - b.x, dy = a.y - b.y;
+        let d2 = dx * dx + dy * dy || 0.01;
+        const f = REPULSION / d2;
+        const d = Math.sqrt(d2);
+        fx += (dx / d) * f; fy += (dy / d) * f;
+      }
+      fx += (cx - a.x) * GRAVITY; fy += (cy - a.y) * GRAVITY; // center gravity
+      a.vx = (a.vx + fx) * DAMPING; a.vy = (a.vy + fy) * DAMPING;
+    }
+    for (const l of links) {
+      const dx = l.t.x - l.s.x, dy = l.t.y - l.s.y;
+      const d = Math.sqrt(dx * dx + dy * dy) || 0.01;
+      const f = (d - SPRING_LEN) * SPRING;
+      const ux = dx / d, uy = dy / d;
+      if (!l.s.central) { l.s.vx += ux * f; l.s.vy += uy * f; }
+      if (!l.t.central) { l.t.vx -= ux * f; l.t.vy -= uy * f; }
+    }
+    for (const n of nodes) {
+      if (n.central) continue;
+      n.x += n.vx; n.y += n.vy;
+      n.x = Math.max(20, Math.min(cssW - 20, n.x));
+      n.y = Math.max(20, Math.min(cssH - 20, n.y));
+    }
+    draw();
+    if (++ticks < 400) graphSim.raf = requestAnimationFrame(step);
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, cssW, cssH);
+    // Edges
+    ctx.lineWidth = 1;
+    for (const l of links) {
+      ctx.strokeStyle = l.kind === "relation" ? "#2bb67366" : l.kind === "ownership" ? "#e0a03066" : "#8a8f9855";
+      ctx.beginPath(); ctx.moveTo(l.s.x, l.s.y); ctx.lineTo(l.t.x, l.t.y); ctx.stroke();
+    }
+    // Nodes
+    ctx.font = "600 11px 'IBM Plex Sans', sans-serif";
+    for (const n of nodes) {
+      const r = n.central ? 13 : 7;
+      ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = graphColor(n.type);
+      ctx.globalAlpha = n.status === "superseded" ? 0.4 : 1;
+      ctx.fill(); ctx.globalAlpha = 1;
+      ctx.fillStyle = "#c9ccd1";
+      const label = n.title.length > 22 ? n.title.slice(0, 21) + "…" : n.title;
+      ctx.fillText(label, n.x + r + 3, n.y + 3);
+    }
+  }
+
+  graphSim = { nodes, links, raf: null };
+  step();
+
+  // Click → find nearest node and open its detail.
+  graphCanvas.onclick = async (ev) => {
+    const rect = graphCanvas.getBoundingClientRect();
+    const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+    let best = null, bestD = 18 * 18;
+    for (const n of nodes) {
+      const dx = n.x - mx, dy = n.y - my, d = dx * dx + dy * dy;
+      if (d < bestD) { best = n; bestD = d; }
+    }
+    if (!best) { graphDetail.classList.remove("show"); return; }
+    graphDetail.classList.add("show");
+    graphDetail.innerHTML = "";
+    graphDetail.appendChild(el("div", "gd-title", best.title + "  (" + best.type + ")"));
+    const bodyDiv = el("div", "", "loading…");
+    graphDetail.appendChild(bodyDiv);
+    if (best.id === "__operator__") { bodyDiv.textContent = "The operator anchor. Add an identity file to give it content."; return; }
+    const f = await fetchDossierBody(best.id);
+    bodyDiv.textContent = f ? (f.body || "(empty)") : "(could not load)";
+  };
 }
 
 // ── Plan view ──────────────────────────────────────────────────────────────────

@@ -336,6 +336,38 @@
     .dcard.open .dbody { display: block; }
     .dcard.open .dsnip { display: none; }
     .dcard .ddesc { font-style: italic; color: var(--ink-faint); font-size: 12px; margin-top: 8px; }
+
+    /* ── Dossier view modes (Files / Timeline / Graph) ── */
+    .dossier-modes { display: flex; gap: 2px; margin-bottom: 14px; }
+    .dossier-modes button { border: 1px solid var(--line); background: var(--panel-2); color: var(--ink-soft); font: 600 12px/1 "IBM Plex Sans", sans-serif; padding: 7px 14px; cursor: pointer; transition: .12s; }
+    .dossier-modes button:first-child { border-radius: 8px 0 0 8px; }
+    .dossier-modes button:last-child { border-radius: 0 8px 8px 0; }
+    .dossier-modes button:hover { color: var(--ink); }
+    .dossier-modes button.active { color: #fff; background: var(--mind); border-color: var(--mind); }
+    .dmode { display: none; }
+    .dmode.show { display: block; }
+
+    /* ── Timeline (vertical life-arc, grouped by domain) ── */
+    #dossierTimeline .tl-domain { font: 700 11px/1 "IBM Plex Mono", monospace; text-transform: uppercase; letter-spacing: .06em; color: var(--mind); margin: 18px 0 8px; }
+    .tl-item { position: relative; padding: 0 0 14px 22px; border-left: 2px solid var(--line); }
+    .tl-item:last-child { border-left-color: transparent; }
+    .tl-item::before { content: ""; position: absolute; left: -6px; top: 3px; width: 10px; height: 10px; border-radius: 50%; background: var(--mind); border: 2px solid var(--panel); }
+    .tl-item.superseded::before { background: var(--ink-faint); }
+    .tl-date { font: 600 11px/1 "IBM Plex Mono", monospace; color: var(--ink-faint); }
+    .tl-title { font: 500 13.5px/1.4 "IBM Plex Sans", sans-serif; color: var(--ink); margin-top: 2px; cursor: pointer; }
+    .tl-title:hover { color: var(--mind); }
+    .tl-sub { display: none; white-space: pre-wrap; margin-top: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); font: 400 12.5px/1.6 "IBM Plex Sans", sans-serif; }
+    .tl-item.open .tl-sub { display: block; }
+
+    /* ── Graph (operator-centred node-link) ── */
+    #dossierGraph { position: relative; }
+    #graphCanvas { width: 100%; height: 460px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); display: block; cursor: grab; }
+    .graph-legend { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; font: 600 11px/1 "IBM Plex Mono", monospace; color: var(--ink-soft); }
+    .graph-legend .lg { display: inline-flex; align-items: center; gap: 5px; }
+    .graph-legend .dot { width: 10px; height: 10px; border-radius: 50%; }
+    .graph-detail { margin-top: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); font: 400 13px/1.6 "IBM Plex Sans", sans-serif; display: none; white-space: pre-wrap; }
+    .graph-detail.show { display: block; }
+    .graph-detail .gd-title { font: 600 14px/1.3 "IBM Plex Sans", sans-serif; color: var(--ink); }
     .tabs { display: flex; gap: 2px; margin-bottom: 18px; border-bottom: 1px solid var(--line); }
     .tabs button {
       border: none; background: transparent; color: var(--ink-soft);
@@ -431,19 +463,35 @@
       <div class="rows" id="laterContent"></div>
     </div>
     <div id="dossierView">
-      <div class="later-head">
-        <div class="later-filters" id="dossierType">
-          <button data-type="" class="active">All</button>
-          <button data-type="identity">Identity</button>
-          <button data-type="preferences">Prefs</button>
-          <button data-type="person">People</button>
-          <button data-type="account">Accounts</button>
-          <button data-type="note">Notes</button>
-          <button data-type="event">Events</button>
-        </div>
-        <input id="dossierSearch" class="dossier-search" placeholder="search title / text…" />
+      <div class="dossier-modes" id="dossierModes">
+        <button data-mode="files" class="active">Files</button>
+        <button data-mode="timeline">Timeline</button>
+        <button data-mode="graph">Graph</button>
       </div>
-      <div class="rows" id="dossierContent"></div>
+      <div id="dossierFiles" class="dmode show">
+        <div class="later-head">
+          <div class="later-filters" id="dossierType">
+            <button data-type="" class="active">All</button>
+            <button data-type="identity">Identity</button>
+            <button data-type="preferences">Prefs</button>
+            <button data-type="person">People</button>
+            <button data-type="account">Accounts</button>
+            <button data-type="note">Notes</button>
+            <button data-type="event">Events</button>
+          </div>
+          <input id="dossierSearch" class="dossier-search" placeholder="search title / text…" />
+        </div>
+        <div class="rows" id="dossierContent"></div>
+      </div>
+      <div id="dossierTimeline" class="dmode">
+        <div class="later-head"><div class="later-filters" id="timelineDomains"></div></div>
+        <div id="timelineContent"></div>
+      </div>
+      <div id="dossierGraph" class="dmode">
+        <div class="graph-legend" id="graphLegend"></div>
+        <canvas id="graphCanvas"></canvas>
+        <div id="graphDetail" class="graph-detail"></div>
+      </div>
     </div>
     <div id="memoryView">
       <div class="tabs">

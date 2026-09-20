@@ -17,6 +17,7 @@ import type { BrainObserver } from "../src/runtime/types.ts";
 import type { ApprovalPort, ApprovalRequest, ApprovalDecision } from "../src/policy/index.ts";
 import { createAlil, debugEnabled } from "../src/app/index.ts";
 import type { ChannelBinding } from "../src/app/index.ts";
+import { buildDossierGraph } from "../src/dossier/index.ts";
 
 const PORT = Number(process.env.PORT ?? 8787);
 const PUBLIC = join(dirname(fileURLToPath(import.meta.url)), "public");
@@ -182,6 +183,32 @@ const server = createServer(async (req, res) => {
     }));
     return json(200, { items });
   }
+
+  // ── Dossier timeline (read-only): the trajectory as newest-first transitions, filterable ──
+  // Registered BEFORE the /:slug route below so "timeline"/"graph" aren't captured as slugs.
+  if (req.method === "GET" && url.pathname === "/api/dossier/timeline") {
+    const domain = url.searchParams.get("domain");
+    const limitRaw = url.searchParams.get("limit");
+    const limit = limitRaw ? Math.max(1, Number(limitRaw) || 0) : undefined;
+    let events = alil.dossier.timeline();
+    if (domain) events = events.filter((e) => String(e.frontmatter["domain"] ?? "") === domain);
+    if (limit) events = events.slice(0, limit);
+    const rows = events.map((e) => ({
+      when: String(e.frontmatter["when"] ?? e.frontmatter.updated).slice(0, 10),
+      title: e.frontmatter.title,
+      domain: String(e.frontmatter["domain"] ?? ""),
+      subject: String(e.frontmatter["subject"] ?? ""),
+      slug: e.frontmatter.slug,
+    }));
+    const domains = [...new Set(alil.dossier.timeline().map((e) => String(e.frontmatter["domain"] ?? "")).filter(Boolean))].sort();
+    return json(200, { rows, domains });
+  }
+
+  // ── Dossier graph (read-only): operator-centred node-link graph derived from the files ──
+  if (req.method === "GET" && url.pathname === "/api/dossier/graph") {
+    return json(200, buildDossierGraph(alil.dossier.list()));
+  }
+
   const dm = url.pathname.match(/^\/api\/dossier\/([^/]+)$/);
   if (req.method === "GET" && dm) {
     const f = alil.dossier.get(decodeURIComponent(dm[1]!));
