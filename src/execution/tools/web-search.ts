@@ -1,4 +1,19 @@
 import type { ToolImpl, ToolContext, ValidateResult, ToolRunResult } from "./types.ts";
+import { safeFetch } from "./web-fetch.ts";
+
+/**
+ * The egress fetcher web.search uses — defaults to the hardened safeFetch (validate + resolve +
+ * pin + redirect re-validation, shared with web.fetch). Injectable so tests can supply the SERP
+ * HTML hermetically without hitting the network or the real DNS/pinning path.
+ */
+export type SearchFetcher = (url: string, opts: { timeoutMs: number; headers: Record<string, string> }) => Promise<{ status: number; body: string }>;
+let fetcher: SearchFetcher = (url, opts) => safeFetch(url, opts).then((r) => ({ status: r.status, body: r.body }));
+/** Test seam: override the search fetcher; returns a restore function. */
+export function __setSearchFetcher(f: SearchFetcher): () => void {
+  const prev = fetcher;
+  fetcher = f;
+  return () => { fetcher = prev; };
+}
 
 interface WebSearchArgs {
   query: string;
@@ -53,15 +68,15 @@ export const webSearch: ToolImpl<WebSearchArgs> = {
 
   async run(args: WebSearchArgs, _ctx: ToolContext): Promise<ToolRunResult> {
     const limit = args.maxResults ?? DEFAULT_MAX_RESULTS;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
     let html: string;
     let status: number;
     try {
       const url = `${ENDPOINT}?q=${encodeURIComponent(args.query)}&count=${Math.min(limit, HARD_MAX)}`;
-      const res = await fetch(url, {
-        method: "GET",
-        signal: controller.signal,
+      // Reuse the hardened egress path: resolve + validate + pin the search host, and re-validate
+      // every redirect hop through isPrivateHost, so search shares web.fetch's SSRF/DNS-rebind
+      // guard rather than issuing an unchecked request.
+      const res = await fetcher(url, {
+        timeoutMs: TIMEOUT_MS,
         headers: {
           "user-agent": USER_AGENT,
           accept: "text/html,application/xhtml+xml",
@@ -69,12 +84,9 @@ export const webSearch: ToolImpl<WebSearchArgs> = {
         },
       });
       status = res.status;
-      html = await res.text();
+      html = res.body;
     } catch (e) {
-      const reason = controller.signal.aborted ? `timed out after ${TIMEOUT_MS}ms` : (e as Error).message;
-      throw new Error(`search failed: ${reason}`);
-    } finally {
-      clearTimeout(timer);
+      throw new Error(`search failed: ${(e as Error).message}`);
     }
 
     // Fail honestly. A non-OK status, a bot-challenge page, or a zero-result parse must NOT be

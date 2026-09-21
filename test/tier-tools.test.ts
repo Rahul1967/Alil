@@ -10,8 +10,8 @@ import { fsWrite } from "../src/execution/tools/fs-write.ts";
 import { fsGrep } from "../src/execution/tools/fs-grep.ts";
 import { fsGlob } from "../src/execution/tools/fs-glob.ts";
 import { shell } from "../src/execution/tools/shell.ts";
-import { webFetch, isPrivateHost } from "../src/execution/tools/web-fetch.ts";
-import { webSearch } from "../src/execution/tools/web-search.ts";
+import { webFetch, isPrivateHost, isPrivateIp, resolveAndValidate } from "../src/execution/tools/web-fetch.ts";
+import { webSearch, __setSearchFetcher } from "../src/execution/tools/web-search.ts";
 import { Sandbox, ReadTracker } from "../src/execution/index.ts";
 import type { ToolContext } from "../src/execution/index.ts";
 
@@ -175,6 +175,28 @@ test("web.fetch blocks private/loopback hosts", () => {
   assert.equal(webFetch.validate({ url: "https://example.com" }).ok, true);
 });
 
+test("isPrivateIp classifies reserved ranges incl. IPv6-mapped metadata (DNS-rebind hardening)", () => {
+  for (const ip of [
+    "127.0.0.1", "10.1.2.3", "192.168.0.1", "172.16.0.1", "172.31.255.255",
+    "169.254.169.254", "100.64.0.1", "0.0.0.0", "224.0.0.1",
+    "::1", "::", "fc00::1", "fd12:3456::1", "fe80::1",
+    "::ffff:169.254.169.254", "::ffff:10.0.0.1", "999.1.1.1",
+  ]) {
+    assert.equal(isPrivateIp(ip), true, `expected private: ${ip}`);
+  }
+  for (const ip of ["8.8.8.8", "1.1.1.1", "172.15.0.1", "172.32.0.1", "2606:4700:4700::1111"]) {
+    assert.equal(isPrivateIp(ip), false, `expected public: ${ip}`);
+  }
+});
+
+test("resolveAndValidate rejects a literal private/metadata IP without DNS", async () => {
+  await assert.rejects(() => resolveAndValidate("169.254.169.254"), /private\/reserved/);
+  await assert.rejects(() => resolveAndValidate("127.0.0.1"), /private\/reserved/);
+  await assert.rejects(() => resolveAndValidate("::ffff:169.254.169.254"), /private\/reserved/);
+  // A literal public IP is returned as the pin target unchanged.
+  assert.equal(await resolveAndValidate("8.8.8.8"), "8.8.8.8");
+});
+
 // ─── web.search (validation only, no network) ───
 
 test("web.search validates query and caps maxResults", () => {
@@ -202,15 +224,14 @@ function bingFixture(): string {
   </body></html>`;
 }
 
-async function withFetch(stub: () => Promise<Response>, fn: () => Promise<void>): Promise<void> {
-  const original = globalThis.fetch;
-  globalThis.fetch = stub as never;
-  try { await fn(); } finally { globalThis.fetch = original; }
+async function withFetch(stub: () => Promise<{ status: number; body: string }>, fn: () => Promise<void>): Promise<void> {
+  const restore = __setSearchFetcher(async () => stub());
+  try { await fn(); } finally { restore(); }
 }
 
 test("web.search parses Bing results and decodes wrapped URLs", async () => {
   await withFetch(
-    async () => new Response(bingFixture(), { status: 200 }),
+    async () => ({ status: 200, body: bingFixture() }),
     async () => {
       const res = await webSearch.run({ query: "mitochondria aging" }, {} as never);
       const data = res.data as { results: { title: string; url: string; snippet: string }[] };
@@ -225,7 +246,7 @@ test("web.search parses Bing results and decodes wrapped URLs", async () => {
 
 test("web.search fails honestly on an anti-bot challenge (not a silent 0 results)", async () => {
   await withFetch(
-    async () => new Response("<html><body>Please verify you are human (captcha)</body></html>", { status: 200 }),
+    async () => ({ status: 200, body: "<html><body>Please verify you are human (captcha)</body></html>" }),
     async () => {
       await assert.rejects(() => webSearch.run({ query: "x" }, {} as never), /challenge|search failed/i);
     },
@@ -234,7 +255,7 @@ test("web.search fails honestly on an anti-bot challenge (not a silent 0 results
 
 test("web.search fails honestly on a non-OK status", async () => {
   await withFetch(
-    async () => new Response("nope", { status: 503 }),
+    async () => ({ status: 503, body: "nope" }),
     async () => {
       await assert.rejects(() => webSearch.run({ query: "x" }, {} as never), /HTTP 503|search failed/i);
     },
@@ -243,7 +264,7 @@ test("web.search fails honestly on a non-OK status", async () => {
 
 test("web.search treats an empty parse as an error, never a clean no-results", async () => {
   await withFetch(
-    async () => new Response("<html><body>" + "y".repeat(2000) + "</body></html>", { status: 200 }),
+    async () => ({ status: 200, body: "<html><body>" + "y".repeat(2000) + "</body></html>" }),
     async () => {
       await assert.rejects(() => webSearch.run({ query: "x" }, {} as never), /no parseable results|search failed/i);
     },

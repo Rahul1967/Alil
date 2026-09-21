@@ -38,10 +38,12 @@ const CREDENTIAL_TOKENS: RegExp[] = [
 ];
 
 // Arg keys treated as filesystem paths (exact glob match) vs. free-form command lines
-// (token scan). Anything else is left alone — a `secret` substring in a message body or a
-// memory note must NOT be hard-denied; only paths and command strings are.
+// (token scan) vs. URL/URI values (token scan + embedded-credential check). Anything else is
+// left alone — a `secret` substring in a message body or a memory note must NOT be hard-denied;
+// only paths, command strings, and URLs are.
 const PATH_KEYS = new Set(["path", "cwd", "file", "src", "dest", "from", "to"]);
 const COMMAND_KEYS = new Set(["command", "cmd", "script"]);
+const URL_KEYS = new Set(["url", "uri", "endpoint", "href", "location", "callback", "webhook"]);
 
 /**
  * Hard-blocks any action touching a credential-shaped path OR referencing one in a free-form
@@ -63,6 +65,19 @@ export const credentialBlock: GuardHook = {
         }
       }
       if (COMMAND_KEYS.has(key)) {
+        for (const tok of CREDENTIAL_TOKENS) {
+          if (tok.test(value)) {
+            return deny("hook:credential-block", `${key} references a credential file (pattern ${tok})`);
+          }
+        }
+      }
+      if (URL_KEYS.has(key)) {
+        // A URL/URI can smuggle a credential two ways: embedded userinfo (https://user:pass@host)
+        // exfiltrates a secret to the host; or a credential-file path/target (file:///…/.env,
+        // ?path=~/.ssh/id_rsa). Block both. Kept broad — a URL arg has no business carrying these.
+        if (/^[a-z][a-z0-9+.-]*:\/\/[^/@\s]*:[^/@\s]+@/i.test(value)) {
+          return deny("hook:credential-block", `${key} embeds userinfo credentials in the URL`);
+        }
         for (const tok of CREDENTIAL_TOKENS) {
           if (tok.test(value)) {
             return deny("hook:credential-block", `${key} references a credential file (pattern ${tok})`);
