@@ -32,7 +32,7 @@ function liveAttachments(): Attachment[] {
   recentAttachments = recentAttachments.filter((r) => r.at >= cutoff).slice(-RECENT_ATTACHMENT_MAX);
   return recentAttachments.map((r) => r.att);
 }
-const modelId = process.env.BEDROCK_MODEL_ID ?? "us.anthropic.claude-sonnet-4-5-20250929-v1:0";
+const modelId = process.env.BEDROCK_MODEL_ID ?? "global.anthropic.claude-sonnet-5";
 
 const token = process.env.TELEGRAM_BOT_TOKEN ?? process.argv[2];
 const allowedUserId = Number(process.env.TELEGRAM_ALLOWED_USER_ID ?? process.argv[3]);

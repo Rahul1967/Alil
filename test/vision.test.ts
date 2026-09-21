@@ -110,7 +110,7 @@ test("bedrock emits a native image block on a vision model, before the text", as
   } as never);
   const { spec, provider } = new ProviderRegistry()
     .register(bedrock)
-    .resolve("us.anthropic.claude-sonnet-4-5-20250929-v1:0");
+    .resolve("global.anthropic.claude-sonnet-5");
   assert.equal(spec.capabilities.vision, true);
 
   await provider.invoke(
@@ -136,7 +136,7 @@ test("bedrock drops image bytes for a non-vision model, keeping the text", async
   } as never);
   const { spec } = new ProviderRegistry()
     .register(bedrock)
-    .resolve("us.anthropic.claude-sonnet-4-5-20250929-v1:0");
+    .resolve("global.anthropic.claude-sonnet-5");
 
   // Force a non-vision spec to exercise the degrade path.
   const noVision = { ...spec, capabilities: { ...spec.capabilities, vision: false } };

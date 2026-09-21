@@ -22,7 +22,7 @@ import { buildDossierGraph } from "../src/dossier/index.ts";
 const PORT = Number(process.env.PORT ?? 8787);
 const PUBLIC = join(dirname(fileURLToPath(import.meta.url)), "public");
 const CHANNEL = "browser";
-const modelId = process.env.BEDROCK_MODEL_ID ?? "us.anthropic.claude-sonnet-4-5-20250929-v1:0";
+const modelId = process.env.BEDROCK_MODEL_ID ?? "global.anthropic.claude-sonnet-5";
 
 // ── Browser HITL: an approval parks here until the user taps Approve/Reject in the page ─────────
 const APPROVAL_TIMEOUT_MS = 5 * 60_000;

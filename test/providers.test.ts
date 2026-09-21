@@ -19,7 +19,7 @@ test("registry resolves a Bedrock model to the Bedrock provider", () => {
   // Construct with a stub client so no AWS credentials are needed at resolve time.
   const bedrock = new BedrockProvider({ send: async () => ({}) } as never);
   const reg = new ProviderRegistry().register(bedrock);
-  const { spec, provider } = reg.resolve("us.anthropic.claude-sonnet-4-5-20250929-v1:0");
+  const { spec, provider } = reg.resolve("global.anthropic.claude-sonnet-5");
   assert.equal(spec.provider, "bedrock");
   assert.equal(provider.name, "bedrock");
 });
@@ -56,11 +56,11 @@ test("bedrock maps a multi-result tool turn to a single user message with all to
     },
   } as never);
   const { spec } = new ProviderRegistry().register(bedrock).resolve(
-    "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "global.anthropic.claude-sonnet-5",
   );
   await bedrock.invoke(
     {
-      model: "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+      model: "global.anthropic.claude-sonnet-5",
       messages: [
         { role: "user", content: "hi" },
         { role: "assistant", toolCalls: [

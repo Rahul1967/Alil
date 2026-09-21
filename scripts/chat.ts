@@ -16,7 +16,7 @@ import type { ApprovalPort, ApprovalRequest, ApprovalDecision } from "../src/pol
 import type { BrainObserver } from "../src/runtime/types.ts";
 import type { PlanNode } from "../src/runtime/index.ts";
 
-const modelId = process.env.BEDROCK_MODEL_ID ?? "us.anthropic.claude-sonnet-4-5-20250929-v1:0";
+const modelId = process.env.BEDROCK_MODEL_ID ?? "global.anthropic.claude-sonnet-5";
 const rl = createInterface({ input: stdin, output: stdout });
 
 // ── Terminal-specific channel bits ─────────────────────────────────────────────

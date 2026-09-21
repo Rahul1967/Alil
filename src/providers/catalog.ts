@@ -35,11 +35,11 @@ export const CATALOG: readonly ModelSpec[] = [
   },
 
   // ─── Bedrock (Converse API, IAM auth) ───
-  // Verified live in us-east-1 (cross-region inference profile).
+  // Verified ACTIVE as a global cross-region inference profile.
   {
-    id: "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    id: "global.anthropic.claude-sonnet-5",
     provider: "bedrock",
-    displayName: "Claude Sonnet 4.5 (Bedrock)",
+    displayName: "Claude Sonnet 5 (Bedrock)",
     contextWindow: 200_000,
     maxOutputTokens: 8_192,
     pricing: { inputPerMTok: 0, outputPerMTok: 0 }, // TODO(pricing)
