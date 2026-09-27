@@ -229,15 +229,17 @@ export class DossierStore {
    * "subject written, event lost"). Kept selective: only called for material transitions, and
    * never for `event`/`index`/self-singletons, so the timeline can't cascade or self-reference.
    */
-  #transitionWrites(subject: DossierFrontmatter, what: string, provenance: Provenance): PlannedWrite[] {
-    const when = this.#now().toISOString();
+  #transitionWrites(subject: DossierFrontmatter, what: string, provenance: Provenance, whenIso?: string, extraEvents: DossierFile[] = []): PlannedWrite[] {
+    const when = whenIso ?? this.#now().toISOString();
     const day = when.slice(0, 10);
     const domain = primaryDomain(subject);
-    // Unique, sortable, collision-proof slug: dated + subject + a short disambiguator.
+    // Unique, sortable, collision-proof slug: dated + subject + a short disambiguator. Also avoid
+    // colliding with events staged earlier in the same batch (extraEvents), not just those on disk.
+    const staged = new Set(extraEvents.map((e) => e.frontmatter.slug));
     const base = `${day}-${subject.slug}`;
     let slug = base;
     let n = 2;
-    while (this.get(slug)) slug = `${base}-${n++}`;
+    while (this.get(slug) || staged.has(slug)) slug = `${base}-${n++}`;
 
     const title = `${subject.title}: ${what}`;
     const eventFm: DossierFrontmatter = {
@@ -263,11 +265,64 @@ export class DossierStore {
     };
 
     const writes: PlannedWrite[] = [{ rel: eventRel, data: serialize(eventFm, eventBody) }];
-    // Timeline projection must reflect the event we're about to write, so seed it with `eventFile`
-    // rather than re-reading from disk (which wouldn't yet contain it within this atomic commit).
-    const timeline = this.#timelineWrite([...this.timeline(), eventFile]);
+    // Timeline projection must reflect the event we're about to write (plus any events staged
+    // earlier in the same batch), so seed it rather than re-reading from disk (which wouldn't yet
+    // contain them within this atomic commit).
+    const timeline = this.#timelineWrite([...this.timeline(), ...extraEvents, eventFile]);
     if (timeline) writes.push(timeline);
     return writes;
+  }
+
+  /**
+   * One-time migration for a dossier populated BEFORE the trajectory layer existed: emit a
+   * "began tracking" `event` for every substantive file that has no event yet, dated to that
+   * file's own `created` date (faithful history, not "now"), then regenerate `timeline.md`. All
+   * new events + the timeline land in ONE atomic commit. Idempotent: a subject that already has an
+   * event is skipped, so re-running is a no-op. Returns the number of events created.
+   */
+  backfillTimeline(provenance: Provenance): number {
+    // Subjects that already have at least one event — skip them (idempotent).
+    const withEvent = new Set(
+      this.list().filter((f) => f.frontmatter.type === "event").map((e) => String(e.frontmatter["subject"] ?? "")),
+    );
+    const subjects = this.list().filter(
+      (f) => isTransitionWorthy(f.frontmatter.type) && !withEvent.has(f.frontmatter.slug),
+    );
+    if (subjects.length === 0) return 0;
+
+    // Oldest-created first, so slugs and the timeline read in chronological order.
+    subjects.sort((a, b) => (a.frontmatter.created < b.frontmatter.created ? -1 : 1));
+
+    const writes: PlannedWrite[] = [];
+    const stagedEvents: DossierFile[] = [];
+    for (const subj of subjects) {
+      const created = subj.frontmatter.created || this.#today();
+      // Date the synthetic event to the file's creation day (midday UTC so the date is stable).
+      const whenIso = `${created}T12:00:00.000Z`;
+      const w = this.#transitionWrites(subj.frontmatter, "began tracking", provenance, whenIso, stagedEvents);
+      // The last write in each call is the timeline projection; keep only the event writes here and
+      // rebuild the timeline once at the end from all staged events.
+      const eventWrite = w[0]!;
+      writes.push(eventWrite);
+      stagedEvents.push(this.#parsePlanned(eventWrite));
+    }
+    // Single timeline projection reflecting every backfilled event.
+    const timeline = this.#timelineWrite([...this.timeline(), ...stagedEvents]);
+    if (timeline) writes.push(timeline);
+
+    this.#commit(writes);
+    return stagedEvents.length;
+  }
+
+  /** Parse a just-built PlannedWrite (frontmatter+body) back into a DossierFile for projection. */
+  #parsePlanned(w: PlannedWrite): DossierFile {
+    const { frontmatter, body } = parse(w.data);
+    return {
+      path: join(this.#root, w.rel),
+      relPath: w.rel,
+      frontmatter: frontmatter as DossierFrontmatter,
+      body,
+    };
   }
 
   /** All `event` files, newest transition first (by `when`, falling back to `updated`). */

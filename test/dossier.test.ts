@@ -475,3 +475,63 @@ test("the write-lock is released after a successful commit (next write succeeds)
   assert.ok(!existsSync(join(root, ".dossier.lock")), "lockfile must be gone between commits");
   await rm(root, { recursive: true, force: true });
 });
+
+// ── backfillTimeline: populate the trajectory for files created before the layer existed ──
+
+/** Write a dossier file directly (bypassing create's event emission) to simulate a legacy file. */
+function seedLegacyFile(root: string, relDir: string, slug: string, type: string, title: string, created: string, tags: string[] = []): void {
+  const fm = [`type: ${type}`, `title: ${title}`, `slug: ${slug}`, `tags: [${tags.join(", ")}]`, "status: active", `created: ${created}`, `updated: ${created}`].join("\n");
+  const dir = relDir ? join(root, relDir) : root;
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${slug}.md`), `---\n${fm}\n---\n\n## Facts\n- seeded\n`);
+}
+
+test("backfillTimeline emits a dated 'began tracking' event per legacy file, then projects timeline", async () => {
+  const root = await tmpRoot();
+  const store = new DossierStore({ root, now: () => new Date("2026-09-27T00:00:00Z") });
+  // Legacy files created on different past dates, with no event files (predating the layer).
+  seedLegacyFile(root, "finance", "hdfc-salary", "account", "HDFC Salary", "2026-09-01", ["financial"]);
+  seedLegacyFile(root, "people", "meghna", "person", "Meghna", "2026-09-02", ["family"]);
+  seedLegacyFile(root, "", "identity", "identity", "About", "2026-09-01"); // singleton — must be skipped
+  assert.equal(store.timeline().length, 0, "no events before backfill");
+
+  const n = store.backfillTimeline({ origin: "model" });
+  assert.equal(n, 2, "one event per substantive legacy file (identity singleton excluded)");
+
+  const events = store.timeline();
+  assert.equal(events.length, 2);
+  // Events are dated to each file's `created`, not "now".
+  const hdfc = events.find((e) => e.frontmatter["subject"] === "hdfc-salary")!;
+  assert.match(String(hdfc.frontmatter["when"]), /^2026-09-01T/);
+  assert.match(hdfc.frontmatter.title, /HDFC Salary: began tracking/);
+  const meg = events.find((e) => e.frontmatter["subject"] === "meghna")!;
+  assert.match(String(meg.frontmatter["when"]), /^2026-09-02T/);
+  // timeline.md was projected, grouped by domain.
+  const tl = store.get("timeline")!;
+  assert.match(tl.body, /## financial/);
+  assert.match(tl.body, /## family/);
+  await rm(root, { recursive: true, force: true });
+});
+
+test("backfillTimeline is idempotent — a second run adds nothing", async () => {
+  const root = await tmpRoot();
+  const store = new DossierStore({ root, now: () => new Date("2026-09-27T00:00:00Z") });
+  seedLegacyFile(root, "finance", "acct", "account", "Acct", "2026-09-01", ["financial"]);
+  assert.equal(store.backfillTimeline({ origin: "model" }), 1);
+  assert.equal(store.backfillTimeline({ origin: "model" }), 0, "no new events on a second run");
+  assert.equal(store.timeline().length, 1, "still exactly one event");
+  await rm(root, { recursive: true, force: true });
+});
+
+test("backfillTimeline does not double-track a file that already has an event", async () => {
+  const root = await tmpRoot();
+  const store = new DossierStore({ root, now: () => new Date("2026-09-27T00:00:00Z") });
+  // A NORMALLY-created file already has its "began tracking" event.
+  store.create({ type: "account", title: "New Bank", tags: ["financial"] }, OP);
+  // A legacy file with none.
+  seedLegacyFile(root, "notes", "old-note", "note", "Old Note", "2026-09-01", []);
+  const created = store.backfillTimeline({ origin: "model" });
+  assert.equal(created, 1, "only the legacy file gets a backfilled event");
+  assert.equal(store.timeline().length, 2, "one from create + one from backfill");
+  await rm(root, { recursive: true, force: true });
+});
