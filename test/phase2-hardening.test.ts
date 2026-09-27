@@ -175,6 +175,10 @@ test("credential-block screens url/uri keys for embedded creds and credential-fi
   assert.equal(credentialBlock.check(netAction("endpoint", "https://x.com/pull?path=~/.aws/credentials"))?.decision, "deny");
   // A normal public URL with no credentials passes.
   assert.equal(credentialBlock.check(netAction("url", "https://example.com/page?q=hello")), null);
+  // Regression: a legitimate host that merely CONTAINS ".aws"/".ssh" as a substring must NOT be
+  // blocked — only the path/query/userinfo is screened, not the hostname.
+  assert.equal(credentialBlock.check(netAction("url", "https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html")), null);
+  assert.equal(credentialBlock.check(netAction("url", "https://ssh.example.com/guide")), null);
 });
 
 // ─── §0.5 sandbox blocks a symlink inside the workspace that points out ───

@@ -73,13 +73,22 @@ export const credentialBlock: GuardHook = {
       }
       if (URL_KEYS.has(key)) {
         // A URL/URI can smuggle a credential two ways: embedded userinfo (https://user:pass@host)
-        // exfiltrates a secret to the host; or a credential-file path/target (file:///…/.env,
-        // ?path=~/.ssh/id_rsa). Block both. Kept broad — a URL arg has no business carrying these.
-        if (/^[a-z][a-z0-9+.-]*:\/\/[^/@\s]*:[^/@\s]+@/i.test(value)) {
-          return deny("hook:credential-block", `${key} embeds userinfo credentials in the URL`);
+        // exfiltrates a secret to the host; or a credential-file target (file:///…/.env,
+        // ?path=~/.ssh/id_rsa). Screen ONLY the sensitive components (userinfo, path, query) — NOT
+        // the hostname, so a legitimate host like docs.aws.amazon.com isn't blocked by a ".aws"
+        // substring. A non-URL-parseable value falls back to scanning the raw string as a path.
+        let target = value;
+        try {
+          const u = new URL(value);
+          if (u.username || u.password) {
+            return deny("hook:credential-block", `${key} embeds userinfo credentials in the URL`);
+          }
+          target = decodeURIComponent(u.pathname + u.search); // host excluded on purpose
+        } catch {
+          // not a full URL (e.g. a relative ref) — scan the raw value as a path
         }
         for (const tok of CREDENTIAL_TOKENS) {
-          if (tok.test(value)) {
+          if (tok.test(target)) {
             return deny("hook:credential-block", `${key} references a credential file (pattern ${tok})`);
           }
         }

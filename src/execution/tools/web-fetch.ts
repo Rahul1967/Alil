@@ -225,14 +225,15 @@ function pinnedFetch(parsed: URL, pinnedIp: string, timeoutMs: number, headers: 
   return new Promise<PinnedResponse>((resolve, reject) => {
     const req = requestFn(
       {
-        host: parsed.hostname, // used for Host header + SNI
+        // Connect directly to the pre-validated IP (defeats DNS rebinding — no re-resolution),
+        // but keep the Host header and TLS SNI/cert-validation as the ORIGINAL hostname so virtual
+        // hosting and certificate checks still work.
+        host: pinnedIp,
         servername: isHttps ? parsed.hostname : undefined,
         port,
         path: parsed.pathname + parsed.search,
         method: "GET",
         headers: { "user-agent": "Alil/0.1 (+personal-assistant)", ...headers, host: parsed.host },
-        // Pin the socket to the validated IP — Node connects here, ignoring any re-resolution.
-        lookup: (_hostname, _opts, cb) => cb(null, pinnedIp, pinnedIp.includes(":") ? 6 : 4),
         timeout: timeoutMs > 0 ? timeoutMs : 1,
       },
       (res) => {
