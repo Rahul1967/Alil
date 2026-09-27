@@ -576,6 +576,22 @@ hash-chained ledger; security-critical slices get an adversarial test *before* t
 
 **Next.**
 - Optional local Tesseract `doc.ocr` for offline/air-gapped text extraction; terminal `!attach`.
+- **Pluggable web egress backends (research done 2026-09; verified).** Keep the hardened egress
+  layer (resolve+validate+pin IP, redirect re-validation, credential screening, ingested-taint) as a
+  tool-agnostic wrapper, and add optional, configurable backends behind it — degrading honestly to
+  the current keyless defaults when unconfigured:
+  - `web.fetch` "readable" mode via **Jina Reader `r.jina.ai`** (keyless, ~20 RPM, returns clean
+    Markdown instead of raw HTML — fewer tokens, less noise); keep the raw pinned fetch as default/
+    fallback.
+  - `web.search` via **Tavily** (free API key, 1k credits/mo; AI-ranked, scored, LLM-ready results),
+    with the existing Bing-HTML scrape as the keyless fallback. Replaces the brittle SERP parsing.
+  - Optional **Crawl4AI** self-hosted adapter (Apache-2.0, unlimited, JS render + deep crawl) for a
+    fully local, no-third-party path — aligns with files-are-truth/local-first.
+  - Trade-off to gate on: any hosted reader/search backend means target URLs and queries leave the
+    machine to that provider, so these stay explicit/opt-in behind the boundary, never the default.
+  - (Corrected vendor claims: Jina search `s.jina.ai` is NOT keyless — needs a free key; only the
+    reader `r.jina.ai` is keyless. Firecrawl's 1k free credits burn fast: search 2/10-results,
+    scrape 1/page, +4 for JSON extraction.)
 - Dossier sqlite/FTS index when scan latency or relevance ranking demands (timeline automation now shipped).
 - Signed/sandboxed skill runtime with capability manifests (§04 supply-chain row) — the gate before
   any public skill registry.
