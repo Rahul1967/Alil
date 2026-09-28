@@ -636,6 +636,15 @@ hash-chained ledger; security-critical slices get an adversarial test *before* t
   - (Corrected vendor claims: Jina search `s.jina.ai` is NOT keyless — needs a free key; only the
     reader `r.jina.ai` is keyless. Firecrawl's 1k free credits burn fast: search 2/10-results,
     scrape 1/page, +4 for JSON extraction.)
+- **MCP full code-mode (deferred by design; needs research + a dependency/security decision).**
+  Today `mcp.batch` (§08d) is the SAFE subset: a declarative host-side pipeline (`{{stepId}}`
+  data-flow, only summaries return, no model-authored code). Full code-mode — the model *writes*
+  code that calls MCP tools, executed in a sandbox with only the final result returning — is the
+  bigger token win for deep tool chaining, but requires a REAL code-execution sandbox: `node:vm` is
+  not a security boundary, so it means a heavy new dependency (`isolated-vm`, or Wasm/Wasmtime) plus
+  a threat model (no network in the sandbox, per-call broker still crossing `PolicyBoundary`,
+  credentials held host-side, output filtered). Pick up later with a spike: choose the isolate,
+  confirm the dependency, and design the host broker before any code runs.
 - Dossier sqlite/FTS index when scan latency or relevance ranking demands (timeline automation now shipped).
 - Signed/sandboxed skill runtime with capability manifests (§04 supply-chain row) — the gate before
   any public skill registry.
