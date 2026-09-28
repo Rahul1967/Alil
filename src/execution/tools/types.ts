@@ -6,6 +6,7 @@ import type { ProspectiveStore } from "../../memory/prospective.ts";
 import type { DocExtractor } from "../docs/types.ts";
 import type { WorldStore } from "../../world/store.ts";
 import type { DossierStore } from "../../dossier/store.ts";
+import type { McpRegistry } from "../mcp/registry.ts";
 
 export interface ToolContext {
   sandbox: Sandbox;
@@ -28,6 +29,8 @@ export interface ToolContext {
   world?: { store?: WorldStore };
   /** Operator dossier (durable model of the user) for the dossier.* tools. */
   dossier?: { store?: DossierStore };
+  /** On-demand MCP layer for the mcp.* meta-tools. Undefined when no MCP servers are configured. */
+  mcp?: { registry?: McpRegistry };
   /**
    * The active outbound channel's capabilities (e.g. Telegram). `sendFile` delivers a file to
    * the user; undefined on channels without file support (the send_file tool then reports so).

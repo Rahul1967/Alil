@@ -409,6 +409,39 @@ the existing "not transcribed" note instead of failing. This makes native vision
 scanned documents; a separate Tesseract engine stays an optional offline fallback, not a
 prerequisite.
 
+### 08d · MCP (external tools, on-demand)
+
+Alil connects to [Model Context Protocol](https://modelcontextprotocol.io) servers, but **never
+injects their tool schemas into context** — the well-documented "tools tax" (10k–130k tokens/turn
+across multiple servers, which also *lowers* selection accuracy). Instead the model gets three
+small, always-on native meta-tools and discovers external tools progressively (the official
+catalog → inspect → execute pattern):
+
+- `mcp.search({query})` — deterministic BM25-lite over cached tool *names + one-liners* (no
+  schemas). Read/low; auto-allowed.
+- `mcp.inspect({server,name})` — the full schema + effect classification for ONE tool. Read/low.
+- `mcp.call({server,name,args})` — invoke it. Declared **execute/high so the boundary ALWAYS gates
+  it** (never auto-allowed, never grant-covered — an external call reaches arbitrary code). The
+  result is tagged `{origin:"ingested"}`, so it is fenced and taints follow-on actions (cross-tool
+  output is untrusted input — prompt-injection defense).
+
+The advertised tool array stays a stable 3 entries regardless of how many servers/tools exist, so
+provider prompt-caching isn't invalidated. Design properties:
+
+- **Lazy + memoized.** `McpRegistry` connects to a server only on first use and caches its
+  `tools/list`; a missing binary surfaces as a call failure, never a startup crash.
+- **Effect-aware reliability.** Per-call timeout (with cancellation), retry with backoff+jitter for
+  **read-only** tools only (a write is never auto-retried — no duplicated side effects), and a
+  per-server circuit breaker that fails fast when a server is down. MCP's `isError:true` is a
+  normal response surfaced as a recoverable observation, not a transport error.
+- **Conservative classification.** A tool is `read`/low only if it declares `readOnlyHint`;
+  everything else is a `write` (destructive → high). Server `minEffect` can only raise caution.
+- **Transport-isolated.** The MCP SDK lives behind one `McpTransport` adapter (stdio in Phase 1;
+  Streamable-HTTP is a drop-in Phase-2 adapter), so the registry/tools are SDK-free and
+  unit-testable with a mock. Config: `config/mcp.json` (empty ⇒ MCP off). Code-mode / programmatic
+  tool calling (script in a sandbox, only the result returns) is a Phase-3 option reusing the
+  existing sandbox.
+
 ## 09 · Operator dossier (the model of the user)
 
 JARVIS's superpower was never the tools — it was that every tool call was conditioned on a deep,

@@ -18,6 +18,10 @@ import type { ProspectiveStore } from "../memory/index.ts";
 import type { Intention, IncomingEvent } from "../memory/types.ts";
 import { WorldStore } from "../world/index.ts";
 import { DossierStore, planPreferencesMigration } from "../dossier/index.ts";
+import { existsSync, readFileSync } from "node:fs";
+import { McpRegistry } from "../execution/mcp/registry.ts";
+import { stdioTransportFactory } from "../execution/mcp/sdk-transport.ts";
+import type { McpServerConfig } from "../execution/mcp/types.ts";
 import { IngestionStore } from "../ingestion/index.ts";
 import type { Attachment } from "../ingestion/index.ts";
 import { AuditLedger, Scheduler } from "../gateway/index.ts";
@@ -60,6 +64,12 @@ export interface AlilConfig {
   worldMarkdownPath?: string;
   /** Directory the operator-dossier markdown files live under. Default workspace/DOSSIER. */
   dossierRoot?: string;
+  /**
+   * Path to an MCP server-config JSON file ({ servers: McpServerConfig[] }). When present and
+   * non-empty, the mcp.* meta-tools connect lazily to those servers (on-demand — no per-turn tool
+   * tax). Default `config/mcp.json`; absent/empty ⇒ MCP is off and the meta-tools report so.
+   */
+  mcpConfigPath?: string;
   auditPath?: string;
   guards?: GuardLimits;
   maxParallel?: number;
@@ -346,6 +356,11 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     // Native module / DB unavailable — run without persistence rather than crash.
   }
 
+  // On-demand MCP layer: load server configs (if any) and build a lazily-connecting registry. The
+  // mcp.* meta-tools are always advertised (3 stable, cheap entries), but individual MCP tool
+  // schemas are NEVER injected into context — the model discovers them via mcp.search/inspect.
+  const mcpRegistry = loadMcpRegistry(config.mcpConfigPath ?? "config/mcp.json");
+
   // Executor registry = the advertised tools PLUS the operator-only migration tool (not in the
   // model-facing catalog, so the model never sees it; reachable only via alil.migratePreferences()).
   const tools = new ToolRegistry([...DEFAULT_TOOLS, dossierMigratePreferences]);
@@ -360,6 +375,7 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
       prospective: prospCtx,
       world: { store: world },
       dossier: { store: dossier },
+      ...(mcpRegistry ? { mcp: { registry: mcpRegistry } } : {}),
       ...(binding.sendFile ? { channel: { sendFile: binding.sendFile } } : {}),
     }),
     approvals: binding.approvals,
@@ -455,4 +471,23 @@ function anySignal(a?: AbortSignal, b?: AbortSignal): AbortSignal | undefined {
     s.addEventListener("abort", () => c.abort(), { once: true });
   }
   return c.signal;
+}
+
+/**
+ * Load MCP server configs from a JSON file and build a lazily-connecting registry, or return null
+ * when the file is absent/empty/invalid (MCP off — the meta-tools then report "no servers"). The
+ * file shape is `{ "servers": McpServerConfig[] }`. Connections are deferred until the model first
+ * uses mcp.search/inspect/call, so a missing binary never blocks startup — it surfaces as a call
+ * failure the model can report. A malformed config is ignored rather than crashing the app.
+ */
+function loadMcpRegistry(path: string): McpRegistry | null {
+  try {
+    if (!existsSync(path)) return null;
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { servers?: McpServerConfig[] };
+    const servers = (parsed.servers ?? []).filter((s) => s && typeof s.name === "string" && s.name.length > 0);
+    if (servers.length === 0) return null;
+    return new McpRegistry({ configs: servers, transportFactory: stdioTransportFactory });
+  } catch {
+    return null; // malformed config or read error ⇒ MCP off, never a startup crash
+  }
 }

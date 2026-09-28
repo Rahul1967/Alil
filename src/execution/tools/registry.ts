@@ -34,6 +34,9 @@ import { dossierCreate } from "./dossier-create.ts";
 import { dossierUpdate } from "./dossier-update.ts";
 import { dossierSupersede } from "./dossier-supersede.ts";
 import { dossierDelete } from "./dossier-delete.ts";
+import { mcpSearch } from "./mcp-search.ts";
+import { mcpInspect } from "./mcp-inspect.ts";
+import { mcpCall } from "./mcp-call.ts";
 
 /** name → tool. Adding a tool = one entry here (plus its file). */
 export class ToolRegistry {
@@ -88,4 +91,7 @@ export const DEFAULT_TOOLS: AnyTool[] = [
   dossierUpdate,
   dossierSupersede,
   dossierDelete,
+  mcpSearch,
+  mcpInspect,
+  mcpCall,
 ];
