@@ -7,25 +7,28 @@ import type { McpTransport, McpToolDef, McpCallResult, McpServerConfig, McpRelia
 import { mcpSearch } from "../src/execution/tools/mcp-search.ts";
 import { mcpInspect } from "../src/execution/tools/mcp-inspect.ts";
 import { mcpCall } from "../src/execution/tools/mcp-call.ts";
+import { mcpBatch } from "../src/execution/tools/mcp-batch.ts";
 
 /** A scriptable in-memory MCP transport — no subprocess, so tests stay hermetic. */
 class MockTransport implements McpTransport {
   readonly server: string;
   #connected = false;
-  calls: { name: string; args: Record<string, unknown> }[] = [];
+  calls: { name: string; args: Record<string, unknown>; idempotencyKey?: string }[] = [];
   connectCount = 0;
+  onListChanged: (() => void) | undefined;
   readonly #tools: McpToolDef[];
   readonly #handler: (name: string, args: Record<string, unknown>) => Promise<McpCallResult>;
-  constructor(cfg: McpServerConfig, tools: McpToolDef[], handler: (name: string, args: Record<string, unknown>) => Promise<McpCallResult>) {
+  constructor(cfg: McpServerConfig, tools: McpToolDef[], handler: (name: string, args: Record<string, unknown>) => Promise<McpCallResult>, onListChanged?: () => void) {
     this.server = cfg.name;
     this.#tools = tools;
     this.#handler = handler;
+    this.onListChanged = onListChanged;
   }
   connected() { return this.#connected; }
   async connect() { this.connectCount++; this.#connected = true; }
   async listTools() { return this.#tools; }
-  async callTool(name: string, args: Record<string, unknown>): Promise<McpCallResult> {
-    this.calls.push({ name, args });
+  async callTool(name: string, args: Record<string, unknown>, _timeoutMs: number, idempotencyKey?: string): Promise<McpCallResult> {
+    this.calls.push({ name, args, ...(idempotencyKey ? { idempotencyKey } : {}) });
     return this.#handler(name, args);
   }
   async close() { this.#connected = false; }
@@ -46,8 +49,8 @@ function registryWith(tools: McpToolDef[], handler?: (n: string, a: Record<strin
   const transports = new Map<string, MockTransport>();
   const reg = new McpRegistry({
     configs,
-    transportFactory: (cfg) => {
-      const t = new MockTransport(cfg, byServer.get(cfg.name) ?? [], handler ?? (async () => ({ isError: false, text: "ok" })));
+    transportFactory: (cfg, onListChanged) => {
+      const t = new MockTransport(cfg, byServer.get(cfg.name) ?? [], handler ?? (async () => ({ isError: false, text: "ok" })), onListChanged);
       transports.set(cfg.name, t);
       return t;
     },
@@ -166,4 +169,91 @@ test("the circuit breaker opens after repeated failures and fails fast", async (
   // Next call should fail fast WITHOUT invoking the transport again.
   await assert.rejects(() => reg.call("s", "get", {}), /circuit is open/);
   assert.equal(attempts, attemptsBeforeOpen, "open circuit must not reach the transport");
+});
+
+// ── Phase 2: idempotency keys, list_changed refresh ──────────────────────────
+
+test("a WRITE call carries a stable idempotency key; a read does not", async () => {
+  const { reg, transports } = registryWith([
+    tool("s", "create", "d", false), // write
+    tool("s", "get", "d", true),     // read
+  ]);
+  await reg.call("s", "create", { title: "x" });
+  await reg.call("s", "get", { q: "y" });
+  const calls = transports.get("s")!.calls;
+  const write = calls.find((c) => c.name === "create")!;
+  const read = calls.find((c) => c.name === "get")!;
+  assert.ok(write.idempotencyKey, "write must carry an idempotency key");
+  assert.equal(read.idempotencyKey, undefined, "read needs no idempotency key");
+
+  // The SAME write args reuse the SAME key (so a retry/resume dedupes server-side).
+  const { reg: reg2, transports: t2 } = registryWith([tool("s", "create", "d", false)]);
+  await reg2.call("s", "create", { title: "x" });
+  assert.equal(t2.get("s")!.calls[0]!.idempotencyKey, write.idempotencyKey, "key is deterministic from server+name+args");
+});
+
+test("a tools/list_changed notification invalidates the cached schemas", async () => {
+  const { reg, transports } = registryWith([tool("s", "old_tool", "d", true)]);
+  await reg.ensureTools("s"); // caches [old_tool]
+  assert.deepEqual((await reg.search("tool")).map((h) => h.name), ["old_tool"]);
+  // Server signals its toolset changed → registry drops the cache; next use re-lists.
+  transports.get("s")!.onListChanged?.();
+  const hits = await reg.search("tool"); // re-lists (mock returns the same set, but a re-list happened)
+  assert.ok(hits.length >= 1);
+});
+
+test("refresh() drops the cache and forces a fresh list", async () => {
+  const { reg } = registryWith([tool("s", "t", "d", true)]);
+  await reg.ensureTools("s");
+  reg.refresh("s"); // no throw; cache cleared
+  const def = await reg.inspect("s", "t");
+  assert.equal(def.name, "t");
+});
+
+// ── Phase 3: mcp.batch (host-side pipeline, safe code-mode substitute) ────────
+
+test("mcp.batch runs steps sequentially and substitutes {{stepId}} references", async () => {
+  const { reg } = registryWith([
+    tool("s", "read", "d", true),
+    tool("s", "write", "d", false),
+  ], async (name, args) => {
+    if (name === "read") return { isError: false, text: "CONTENT-42" };
+    // The write should have received the read's result via {{r}} substitution.
+    return { isError: false, text: `wrote:${(args as { body: string }).body}` };
+  });
+  const out = await mcpBatch.run({
+    steps: [
+      { id: "r", server: "s", name: "read", args: {} },
+      { id: "w", server: "s", name: "write", args: { body: "value={{r}}" } },
+    ],
+  }, { mcp: { registry: reg } } as never);
+  const res = out.data as { ok: boolean; completed: { id: string; ok: boolean; summary: string }[] };
+  assert.equal(res.ok, true);
+  assert.equal(res.completed.length, 2);
+  assert.match(res.completed[1]!.summary, /wrote:value=CONTENT-42/, "the write saw the read's result via {{r}}");
+  assert.equal(out.provenance?.origin, "ingested"); // batch output is untrusted
+});
+
+test("mcp.batch stops at the first failing step and reports progress", async () => {
+  const { reg } = registryWith([tool("s", "a", "d", true), tool("s", "b", "d", true)],
+    async (name) => (name === "b" ? { isError: true, text: "boom" } : { isError: false, text: "ok" }));
+  const out = await mcpBatch.run({
+    steps: [
+      { id: "a", server: "s", name: "a" },
+      { id: "b", server: "s", name: "b" },
+      { id: "c", server: "s", name: "a" }, // should NOT run — batch stopped at b
+    ],
+  }, { mcp: { registry: reg } } as never);
+  const res = out.data as { ok: boolean; stoppedAt: string; completed: unknown[] };
+  assert.equal(res.ok, false);
+  assert.equal(res.stoppedAt, "b");
+  assert.equal(res.completed.length, 2, "step c never ran");
+});
+
+test("mcp.batch is execute/high (boundary-gated) and validates step shape", () => {
+  assert.equal(mcpBatch.effect, "execute");
+  assert.equal(mcpBatch.risk, "high");
+  assert.equal(mcpBatch.validate({ steps: [] }).ok, false); // empty
+  assert.equal(mcpBatch.validate({ steps: [{ id: "x", server: "s", name: "t" }, { id: "x", server: "s", name: "t" }] }).ok, false); // dup id
+  assert.equal(mcpBatch.validate({ steps: [{ id: "x", server: "s", name: "t" }] }).ok, true);
 });

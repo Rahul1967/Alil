@@ -436,11 +436,22 @@ provider prompt-caching isn't invalidated. Design properties:
   normal response surfaced as a recoverable observation, not a transport error.
 - **Conservative classification.** A tool is `read`/low only if it declares `readOnlyHint`;
   everything else is a `write` (destructive → high). Server `minEffect` can only raise caution.
-- **Transport-isolated.** The MCP SDK lives behind one `McpTransport` adapter (stdio in Phase 1;
-  Streamable-HTTP is a drop-in Phase-2 adapter), so the registry/tools are SDK-free and
-  unit-testable with a mock. Config: `config/mcp.json` (empty ⇒ MCP off). Code-mode / programmatic
-  tool calling (script in a sandbox, only the result returns) is a Phase-3 option reusing the
-  existing sandbox.
+- **Transport-isolated.** The MCP SDK lives behind one `McpTransport` adapter (stdio **and
+  Streamable HTTP**), so the registry/tools are SDK-free and unit-testable with a mock. Config:
+  `config/mcp.json` (empty ⇒ MCP off).
+- **Idempotency + freshness.** A **write** call carries a deterministic idempotency key
+  (sha256 of server+name+args) so a retry/resume can't duplicate a side effect on a server that
+  honors it; reads don't. A server's `notifications/tools/list_changed` invalidates the cached
+  schemas (also via `refresh()`).
+- **Batch (safe code-mode).** `mcp.batch` runs a short host-side pipeline of calls so large
+  intermediate results never pass through context — a later step's string arg can reference an
+  earlier step's result via `{{stepId}}`, and only compact summaries return. It is the SAFE subset
+  of programmatic tool calling: **no model-authored code runs**, so no execution sandbox is needed.
+  Also execute/high (boundary-gated), tainted, stops at the first failing step. Full code-mode
+  (arbitrary model-written code in an isolate) is deliberately deferred — Alil's existing `Sandbox`
+  is a filesystem jail, not a code-execution boundary, and `node:vm` is not a security boundary; a
+  real isolate (`isolated-vm`/Wasm) would be a new heavy dependency + security review, so it stays
+  an explicit future decision rather than shipped unsafely.
 
 ## 09 · Operator dossier (the model of the user)
 

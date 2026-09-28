@@ -45,8 +45,9 @@ export interface McpTransport {
   connect(): Promise<void>;
   /** List the server's tools (schemas). Callers memoize the result. */
   listTools(): Promise<McpToolDef[]>;
-  /** Invoke one tool. Must resolve within `timeoutMs`, else reject (caller sends cancellation). */
-  callTool(name: string, args: Record<string, unknown>, timeoutMs: number): Promise<McpCallResult>;
+  /** Invoke one tool. Must resolve within `timeoutMs`, else reject (caller sends cancellation).
+   * `idempotencyKey` (when provided) is passed to the server so a retried WRITE can be deduped. */
+  callTool(name: string, args: Record<string, unknown>, timeoutMs: number, idempotencyKey?: string): Promise<McpCallResult>;
   /** Tear down the connection (stdio: kill the subprocess). Idempotent. */
   close(): Promise<void>;
   connected(): boolean;
@@ -96,6 +97,27 @@ export interface McpSearchHit {
   name: string;
   description: string;
   score: number;
+}
+
+/** One step of an mcp.batch pipeline: a call whose string args may reference prior steps via {{id}}. */
+export interface McpBatchStep {
+  id: string;
+  server: string;
+  name: string;
+  args?: Record<string, unknown>;
+}
+
+/** Compact per-step outcome returned from a batch (the full text stays host-side). */
+export interface McpBatchStepResult {
+  id: string;
+  ok: boolean;
+  summary: string; // truncated result text, or the error message
+}
+
+export interface McpBatchResult {
+  completed: McpBatchStepResult[];
+  ok: boolean;
+  stoppedAt?: string; // the step id where the batch stopped, if it failed
 }
 
 /**

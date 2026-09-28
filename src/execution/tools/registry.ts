@@ -37,6 +37,7 @@ import { dossierDelete } from "./dossier-delete.ts";
 import { mcpSearch } from "./mcp-search.ts";
 import { mcpInspect } from "./mcp-inspect.ts";
 import { mcpCall } from "./mcp-call.ts";
+import { mcpBatch } from "./mcp-batch.ts";
 
 /** name → tool. Adding a tool = one entry here (plus its file). */
 export class ToolRegistry {
@@ -94,4 +95,5 @@ export const DEFAULT_TOOLS: AnyTool[] = [
   mcpSearch,
   mcpInspect,
   mcpCall,
+  mcpBatch,
 ];

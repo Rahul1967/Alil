@@ -20,7 +20,7 @@ import { WorldStore } from "../world/index.ts";
 import { DossierStore, planPreferencesMigration } from "../dossier/index.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { McpRegistry } from "../execution/mcp/registry.ts";
-import { stdioTransportFactory } from "../execution/mcp/sdk-transport.ts";
+import { sdkTransportFactory } from "../execution/mcp/sdk-transport.ts";
 import type { McpServerConfig } from "../execution/mcp/types.ts";
 import { IngestionStore } from "../ingestion/index.ts";
 import type { Attachment } from "../ingestion/index.ts";
@@ -486,7 +486,7 @@ function loadMcpRegistry(path: string): McpRegistry | null {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as { servers?: McpServerConfig[] };
     const servers = (parsed.servers ?? []).filter((s) => s && typeof s.name === "string" && s.name.length > 0);
     if (servers.length === 0) return null;
-    return new McpRegistry({ configs: servers, transportFactory: stdioTransportFactory });
+    return new McpRegistry({ configs: servers, transportFactory: sdkTransportFactory });
   } catch {
     return null; // malformed config or read error ⇒ MCP off, never a startup crash
   }

@@ -1,10 +1,13 @@
 import type {
   McpTransport, McpServerConfig, McpToolDef, McpCallResult, McpReliability, McpSearchHit,
+  McpBatchStep, McpBatchResult, McpBatchStepResult,
 } from "./types.ts";
 import { DEFAULT_MCP_RELIABILITY, classifyMcpTool } from "./types.ts";
+import { createHash } from "node:crypto";
 
-/** Factory that builds a transport for a server config — the SDK adapter in prod, a mock in tests. */
-export type TransportFactory = (config: McpServerConfig) => McpTransport;
+/** Factory that builds a transport for a server config — the SDK adapter in prod, a mock in tests.
+ * `onListChanged` lets a server's tools/list_changed notification invalidate the cached schemas. */
+export type TransportFactory = (config: McpServerConfig, onListChanged?: () => void) => McpTransport;
 
 interface CircuitState {
   failures: number;
@@ -104,7 +107,7 @@ export class McpRegistry {
    * MCP's `isError: true` is a normal response, not a transport error — we surface it as a failed
    * result the model can react to, and do NOT retry it (the args were wrong, not the transport).
    */
-  async call(server: string, name: string, args: Record<string, unknown>): Promise<McpCallResult> {
+  async call(server: string, name: string, args: Record<string, unknown>, idempotencyKey?: string): Promise<McpCallResult> {
     if (this.#circuitOpen(server)) {
       throw new Error(`mcp: server "${server}" circuit is open (recent repeated failures) — not calling; retry later`);
     }
@@ -113,13 +116,17 @@ export class McpRegistry {
     const def = await this.inspect(server, name);
     const retryable = def.readOnlyHint === true; // only reads are safe to auto-retry
     const timeoutMs = cfg.timeoutMs ?? this.#rel.defaultTimeoutMs;
+    // A WRITE gets a stable idempotency key so a retry (or a resumed run) can't duplicate the side
+    // effect on a server that honors it. Reads don't need one (they're naturally idempotent). The
+    // key is derived from server+name+args so the SAME call reuses the SAME key across attempts.
+    const key = retryable ? undefined : (idempotencyKey ?? idempotencyKeyFor(server, name, args));
 
     let lastErr: unknown;
     const attempts = retryable ? this.#rel.maxRetries + 1 : 1;
     for (let attempt = 0; attempt < attempts; attempt++) {
       try {
         const t = await this.#connect(server);
-        const res = await t.callTool(name, args, timeoutMs);
+        const res = await t.callTool(name, args, timeoutMs, key);
         this.#recordSuccess(server);
         return res; // includes isError:true when the TOOL failed — a valid, non-retried outcome
       } catch (err) {
@@ -129,6 +136,41 @@ export class McpRegistry {
       }
     }
     throw new Error(`mcp: call to ${server}/${name} failed after ${attempts} attempt(s): ${(lastErr as Error)?.message ?? String(lastErr)}`);
+  }
+
+  /** Drop the cached schemas for a server (or all), forcing a fresh tools/list on next use. Called
+   * on a tools/list_changed notification, or manually. */
+  refresh(server?: string): void {
+    if (server) this.#toolCache.delete(server);
+    else this.#toolCache.clear();
+  }
+
+  /**
+   * Execute a declarative pipeline of MCP calls host-side, so large intermediate results DON'T pass
+   * through the model's context — only a compact per-step summary returns. This is the safe subset
+   * of "code mode": no model-authored code runs (no execution sandbox needed), just data-flow by
+   * reference. A step may reference a prior step's textual result with `{{stepId}}` inside any
+   * string arg; the host substitutes it before the call. Steps run sequentially (a later step can
+   * depend on an earlier one). Every underlying call still flows through `call()` (retry, timeout,
+   * circuit breaker, idempotency), and the whole batch is one boundary-gated mcp.batch action.
+   * Stops at the first failing step and reports progress so the model can self-correct.
+   */
+  async batch(steps: McpBatchStep[]): Promise<McpBatchResult> {
+    const results: McpBatchStepResult[] = [];
+    const byId = new Map<string, string>(); // stepId → its result text (for substitution)
+    for (const step of steps) {
+      const resolvedArgs = substituteRefs(step.args ?? {}, byId);
+      try {
+        const res = await this.call(step.server, step.name, resolvedArgs);
+        byId.set(step.id, res.text);
+        results.push({ id: step.id, ok: !res.isError, summary: truncate(res.text, 500) });
+        if (res.isError) return { completed: results, ok: false, stoppedAt: step.id };
+      } catch (err) {
+        results.push({ id: step.id, ok: false, summary: (err as Error).message });
+        return { completed: results, ok: false, stoppedAt: step.id };
+      }
+    }
+    return { completed: results, ok: true };
   }
 
   /** Close every open transport (e.g. on shutdown). */
@@ -144,7 +186,7 @@ export class McpRegistry {
     if (t && t.connected()) return t;
     const cfg = this.#configs.get(server);
     if (!cfg) throw new Error(`mcp: unknown server "${server}"`);
-    t = t ?? this.#makeTransport(cfg);
+    t = t ?? this.#makeTransport(cfg, () => this.#toolCache.delete(server)); // list_changed ⇒ drop cache
     await t.connect();
     this.#transports.set(server, t);
     return t;
@@ -208,4 +250,30 @@ function backoffWithJitter(base: number, attempt: number): number {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Derive a stable idempotency key for a write call from (server, name, args). The SAME logical call
+ * yields the SAME key across retries/resumes, so a server that honors it can dedupe and avoid a
+ * duplicated side effect (the classic timeout→retry→double-invoice failure). Args are canonicalized
+ * (sorted keys) so key stability doesn't depend on property order.
+ */
+function idempotencyKeyFor(server: string, name: string, args: Record<string, unknown>): string {
+  const canonical = JSON.stringify(args, Object.keys(args).sort());
+  return createHash("sha256").update(`${server}\u0000${name}\u0000${canonical}`).digest("hex").slice(0, 32);
+}
+
+/** Replace `{{stepId}}` references in string args with a prior step's result text (batch data-flow). */
+function substituteRefs(args: Record<string, unknown>, byId: Map<string, string>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(args)) {
+    out[k] = typeof v === "string"
+      ? v.replace(/\{\{([a-zA-Z0-9_-]+)\}\}/g, (m, id) => byId.get(id) ?? m)
+      : v;
+  }
+  return out;
+}
+
+function truncate(s: string, max: number): string {
+  return s.length > max ? s.slice(0, max) + "…" : s;
 }
