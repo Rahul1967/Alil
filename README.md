@@ -65,6 +65,18 @@ npm run telegram  # Telegram channel
 
 All channels share the same core, so they have identical capabilities by construction — adding a channel means implementing a binding, not changing the core.
 
+The browser channel listens on `127.0.0.1` only; set `HOST=0.0.0.0` to expose it (only behind your own auth — the page can approve actions).
+
+## Lenses
+
+A lens specializes Alil for one domain (research, finance, anything) without making it a different agent: the same memory, tools and boundary, with a domain stance, domain tags and keywords that surface related procedures, past sessions and dossier files first, and optional **stricter** policy rules. A lens can only tighten policy, never grant authority.
+
+```bash
+mkdir -p workspace/LENSES && cp -r config/lenses/* workspace/LENSES/   # the research + finance examples
+```
+
+Then `/lens` lists lenses, `/lens research` switches, `/lens off` returns to plain Alil, and `/lens retag` re-tags past sessions after you edit a lens's keywords (terminal and Telegram; the browser has a picker in the header). A lens is one Markdown file, `workspace/LENSES/<id>/LENS.md`; see `docs/DESIGN.md` §10b for the format.
+
 ## Project layout
 
 ```

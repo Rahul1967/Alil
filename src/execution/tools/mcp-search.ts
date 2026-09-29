@@ -1,4 +1,5 @@
 import type { ToolImpl, ToolContext, ValidateResult, ToolRunResult } from "./types.ts";
+import { activeLens } from "./lens-context.ts";
 
 interface McpSearchArgs {
   query: string;
@@ -45,7 +46,8 @@ export const mcpSearch: ToolImpl<McpSearchArgs> = {
   async run(args: McpSearchArgs, ctx: ToolContext): Promise<ToolRunResult> {
     const registry = ctx.mcp?.registry;
     if (!registry) return { summary: "mcp: no external tool servers configured", data: [] };
-    const hits = await registry.search(args.query, args.limit ?? 8);
+    const lens = activeLens(ctx);
+    const hits = await registry.search(args.query, args.limit ?? 8, lens?.tools.mcpServers.length ? { boostServers: lens.tools.mcpServers } : {});
     return {
       summary: `mcp.search "${args.query}" → ${hits.length} tool(s)`,
       data: hits.map((h) => ({ server: h.server, name: h.name, description: h.description })),

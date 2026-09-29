@@ -74,13 +74,25 @@ export const DEFAULT_MEMORY_INSTRUCTIONS: Fact[] = [
   {
     key: "mem.proc.create",
     kind: "memory_instruction",
-    text: "CREATE ON VERIFIED SUCCESS. After a non-trivial task SUCCEEDS and no stored method already covered it, propose saving it with memory.procedure.create. Only save methods that are (a) proven — you saw them work, (b) repeatable — you'd plausibly do this again, and (c) non-trivial — worth more than re-deriving. Do NOT save one-off answers, trivial steps, failed or unverified attempts, or anything containing secrets/credentials. Provide: a stable dot-name (e.g. 'deploy.staging'); a trigger that describes WHEN to use it in the words a future search would use; the generalized method; the exact verbatim steps that worked; and the evidence (the task/date it succeeded on). This is a write and needs the user's approval, so propose it directly rather than asking in prose.",
+    text: "CREATE ON VERIFIED SUCCESS. After a non-trivial task SUCCEEDS and no stored method already covered it, propose saving it with memory.procedure.create. Only save methods that are (a) proven — you saw them work, (b) repeatable — you'd plausibly do this again, and (c) non-trivial — worth more than re-deriving. Do NOT save one-off answers, trivial steps, failed or unverified attempts, or anything containing secrets/credentials. Provide: a stable dot-name (e.g. 'deploy.staging'); a trigger that describes WHEN to use it in the words a future search would use; the generalized method; the exact verbatim steps that worked; the evidence (the task/date it succeeded on); and tags — at least one domain tag saying what the method is about, reusing existing tags (the active lens's tags when one is active) rather than inventing near-synonyms. This is a write and needs the user's approval, so propose it directly rather than asking in prose.",
     provenance: { origin: "system" },
   },
   {
     key: "mem.proc.update",
     kind: "memory_instruction",
     text: "UPDATE INSTEAD OF DUPLICATING. When a new run teaches you a better, corrected, or changed way to do a task you already have a method for (a step failed, a flag changed, the environment moved), revise the existing method with memory.procedure.update — pass only the fields that change; it bumps the version. Also: if memory.procedure.create reports a near-duplicate, do not force a second entry — update the named existing method instead. Keep one good method per task, not many stale variants.",
+    provenance: { origin: "system" },
+  },
+  {
+    key: "mem.proc.outcome",
+    kind: "memory_instruction",
+    text: "RECORD HOW IT WENT. After you follow a fetched method, call memory.procedure.outcome with success true or false. Fetching is not success — the track record is what ranks reliable methods above flaky ones. If a method failed because it is wrong or out of date, fix it with memory.procedure.update, or set its status to 'deprecated' so search stops offering it. To narrow a search to a domain, pass `tags` to memory.procedure.search (or memory.query).",
+    provenance: { origin: "system" },
+  },
+  {
+    key: "mem.lens.what",
+    kind: "memory_instruction",
+    text: "LENSES. The operator can put you under a lens (e.g. a domain focus): you stay the same mind with the same memory and tools, but an 'Active lens' section tells you the domain stance, and lens-related methods, past sessions and facts are ranked first for you. A lens never grants authority — its rules can only make actions stricter. You cannot switch lenses; only the operator can (/lens <id>). If a conversation clearly belongs to an available lens that is not active, you may suggest the switch in one line. You may propose a new lens with lens.create when the operator asks for one.",
     provenance: { origin: "system" },
   },
   {

@@ -1,8 +1,10 @@
 import type { ToolImpl, ToolContext, ValidateResult, ToolRunResult } from "./types.ts";
+import { lensFocus, readTags, tagRegistry } from "./lens-context.ts";
 
 interface MemoryQueryArgs {
   query: string;
   k: number;
+  tags?: string[];
 }
 
 const MAX_K = 20;
@@ -23,6 +25,7 @@ export const memoryQuery: ToolImpl<MemoryQueryArgs> = {
     properties: {
       query: { type: "string", description: "What to recall, e.g. 'the postgres connection pool settings'." },
       k: { type: "number", description: `How many results (1–${MAX_K}, default ${DEFAULT_K}).` },
+      tags: { type: "array", items: { type: "string" }, description: "Only return sessions tagged with at least one of these (optional)." },
     },
     required: ["query"],
     additionalProperties: false,
@@ -43,17 +46,23 @@ export const memoryQuery: ToolImpl<MemoryQueryArgs> = {
       }
       k = Math.max(1, Math.min(MAX_K, Math.floor(args["k"])));
     }
-    return { ok: true, value: { query: query.trim(), k } };
+    const tags = readTags(args["tags"], "memory.query");
+    if (!tags.ok) return tags;
+    return { ok: true, value: { query: query.trim(), k, ...(tags.tags?.length ? { tags: tags.tags } : {}) } };
   },
 
   async run(args: MemoryQueryArgs, ctx: ToolContext): Promise<ToolRunResult> {
     const store = ctx.memory?.store;
     if (!store) throw new Error("memory is not available");
-    const hits = await store.searchEpisodes(args.query, args.k);
+    const hits = await store.searchEpisodes(args.query, args.k, {
+      ...(args.tags ? { tags: tagRegistry(ctx).normalizeAll(args.tags) } : {}),
+      lens: lensFocus(ctx, "episodes"),
+    });
     const data = hits.map((h) => ({
       episodeId: h.episodeId,
       when: h.when,
       summary: h.text,
+      ...(h.tags.length ? { tags: h.tags } : {}),
       tainted: h.provenance.origin === "ingested" || (h.provenance.taintedBy?.length ?? 0) > 0,
     }));
     return {

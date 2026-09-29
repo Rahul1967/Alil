@@ -32,11 +32,15 @@ export interface BrainPorts {
   world?: WorldPort;
   /** Optional always-on operator profile injected into context. Absent ⇒ no operator block. */
   profile?: ProfilePort;
+  /** Optional extra context blocks for this turn (e.g. the active lens's methods preview). */
+  context?: { blocks(input: BrainInput): Promise<string[]> };
 }
 
 export interface RunOptions {
   /** Cancels the turn: the in-flight model call is aborted and the loop stops cleanly. */
   signal?: AbortSignal;
+  /** Model override for this turn (e.g. the active lens's model). Default: the configured model. */
+  modelId?: string;
 }
 
 /**
@@ -64,7 +68,8 @@ export class Brain {
   }
 
   async run(input: BrainInput, opts: RunOptions = {}): Promise<BrainTurn> {
-    const { spec, provider } = this.#registry.resolve(this.#config.modelId);
+    const modelId = opts.modelId ?? this.#config.modelId;
+    const { spec, provider } = this.#registry.resolve(modelId);
     const guards = new Guards(this.#config.guards, this.#clock);
     const observer = this.#ports.observer;
     const signal = opts.signal;
@@ -110,7 +115,8 @@ export class Brain {
     // user → assistant(tool_use) → tool(result) alternation.
     const worldState = this.#ports.world?.stateBlock() ?? null;
     const operatorProfile = this.#ports.profile?.preamble() ?? null;
-    const messages = initialMessages({ input, recalled, skills, worldState, operatorProfile });
+    const extraBlocks = (await this.#ports.context?.blocks(input)) ?? [];
+    const messages = initialMessages({ input, recalled, skills, worldState, operatorProfile, extraBlocks });
 
     for (;;) {
       if (signal?.aborted) return aborted();
@@ -129,7 +135,7 @@ export class Brain {
       }
 
       const invocation: ModelInvocation = {
-        model: this.#config.modelId,
+        model: modelId,
         system: systemPrompt,
         messages,
         ...(tools.length > 0 ? { tools } : {}),

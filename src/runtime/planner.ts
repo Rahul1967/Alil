@@ -8,6 +8,14 @@ import type { PlanNode, ObservedFailure } from "./plan-types.ts";
  * is parsed and validated here. It proposes structure only; every node's actions are still
  * executed through the Brain and the policy boundary.
  */
+/** A proven method offered to the planner (from memory.procedure search). */
+export interface PlanMethod {
+  name: string;
+  trigger: string;
+  abstractMethod: string;
+  tainted: boolean;
+}
+
 export class Planner {
   readonly #modelId: string;
   readonly #registry: ProviderRegistry;
@@ -17,12 +25,22 @@ export class Planner {
     this.#registry = registry;
   }
 
-  /** Decompose a goal into an ordered DAG of steps. */
-  async decompose(goal: string): Promise<PlanNode[]> {
+  /**
+   * Decompose a goal into an ordered DAG of steps. `methods` are proven procedures from procedural
+   * memory that may already solve (part of) the goal — a proven method is a ready-made plan.
+   */
+  async decompose(goal: string, methods: PlanMethod[] = []): Promise<PlanNode[]> {
     const text = await this.#ask(
       "You are a planner. Break the user's goal into the smallest correct sequence of concrete steps.",
       [
         `Goal: ${goal}`,
+        ...(methods.length > 0
+          ? [
+              "",
+              "Proven methods from procedural memory that may apply. If one fits, build the plan from its recipe and put `memory.procedure.fetch <name>` in the relevant step's hint; if none fits, ignore them.",
+              ...methods.map((m) => `- ${m.name}: when ${m.trigger} — ${m.abstractMethod}${m.tainted ? " (untrusted origin — verify before relying on it)" : ""}`),
+            ]
+          : []),
         "",
         "Return ONLY a JSON array, no prose. Each element: " +
           `{"id": "s1", "description": "<imperative step>", "deps": ["<ids that must finish first>"], "hint": "<optional tool/approach>"}.`,

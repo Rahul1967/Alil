@@ -226,8 +226,18 @@ dump" finding: the abstraction generalizes across similar tasks better than raw 
 4. **Update on new findings.** `memory.procedure.update` revises an existing method (bumps
    `version`, rescoring), also gated.
 
-**Maintenance.** `uses`/`last_used_at`/`score` drive ranking and let persistently low-scoring
-or stale methods be deprecated (Memp's dynamic regimen), surfaced for pruning in the dashboard.
+**Tags, outcomes, deprecation (lenses, DESIGN §10b).** Each method also carries `tags` (what it
+is about — required on create, approved with the write, lexically indexed) and a `lens` stamp
+(where it was learned — applied by the harness). Search ranks only procedure chunks, accepts
+explicit `tags` (hard filter) and, with a lens active, adds a lens stream + boost. Fetching is a
+*use* only; `memory.procedure.outcome` records success/failure (`successes`/`failures`/`score`),
+which feeds a small ranking prior. `memory.procedure.update status:"deprecated"` retires a wrong
+method (search skips it). Create/update are high risk, so a tainted turn is hard-denied. With a
+lens active, a capped `[lens methods]` preview (names + triggers, never steps) is the one bounded
+exception to "never pushed".
+
+**Maintenance.** `uses`/`last_used_at`/outcomes drive ranking and let persistently failing or
+stale methods be deprecated (Memp's dynamic regimen), surfaced for pruning in the dashboard.
 Methods are **plain NL, never executable** — Memp shows text methods transfer across models and
 keep the store inspectable.
 

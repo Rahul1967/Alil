@@ -12,8 +12,9 @@ export interface EventBusDeps {
   world?: WorldStore;
   /** Fires matching prospective event-intentions ("when an email from X arrives…"). */
   scheduler?: { fireEvent(event: IncomingEvent): Promise<void> };
-  /** Rules that may wake an unprompted turn. */
-  triggers?: TriggerRule[];
+  /** Rules that may wake an unprompted turn. A function is re-read per event (e.g. lens-owned
+   * watches that follow the lens files). */
+  triggers?: TriggerRule[] | (() => TriggerRule[]);
   /** Called when a trigger fires — the entrypoint seeds + runs an unprompted (gated) turn. */
   onWake?: (wake: WakeRequest) => Promise<void>;
   /** Bounds unprompted wakes. Absent ⇒ unlimited (not recommended in production). */
@@ -74,7 +75,8 @@ export class EventBus {
     // 3. Anomaly / watch triggers → unprompted, rate-limited turn.
     if (!this.#d.triggers || !this.#d.onWake) return;
     const world = this.#d.world?.snapshot() ?? null;
-    for (const rule of this.#d.triggers) {
+    const rules = typeof this.#d.triggers === "function" ? this.#d.triggers() : this.#d.triggers;
+    for (const rule of rules) {
       const instruction = rule.evaluate(tainted, world);
       if (instruction === null) continue;
       if (this.#d.limiter && !this.#d.limiter.allow()) {

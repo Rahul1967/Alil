@@ -1,4 +1,5 @@
 import { Planner } from "../runtime/planner.ts";
+import type { PlanMethod } from "../runtime/planner.ts";
 import { PlanRunner } from "../runtime/plan-runner.ts";
 import { SubagentRunner } from "../runtime/subagent.ts";
 import { SubagentNodeExecutor } from "../runtime/subagent-node-executor.ts";
@@ -21,6 +22,10 @@ export interface PlanServiceDeps {
   subagentTools?: string[];
   /** Guard budget per node subagent. */
   guards?: GuardLimits;
+  /** Proven methods for a goal (lens-focused procedural search), offered to the planner. */
+  methods?: (goal: string) => Promise<PlanMethod[]>;
+  /** Extra subagent prompt per run (the active lens's stance). */
+  subagentPromptSuffix?: () => string | null;
 }
 
 export interface PlanRunOptions {
@@ -49,6 +54,7 @@ export class PlanService {
       catalog: deps.catalog,
       boundary: deps.boundary,
       ...(deps.world ? { world: deps.world } : {}),
+      ...(deps.subagentPromptSuffix ? { promptSuffix: deps.subagentPromptSuffix } : {}),
     });
   }
 
@@ -63,6 +69,7 @@ export class PlanService {
       ...(opts.approvePlan ? { approvePlan: opts.approvePlan } : {}),
       ...(opts.dryRun ? { dryRun: opts.dryRun } : {}),
       ...(opts.observer ? { observer: opts.observer } : {}),
+      ...(this.#d.methods ? { methods: this.#d.methods } : {}),
     });
     return runner.run(goal);
   }

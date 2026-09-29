@@ -42,4 +42,22 @@ function migrate(db: DB): void {
   if (icols.length > 0 && !icols.some((c) => c.name === "last_surfaced_at")) {
     db.exec("ALTER TABLE intention ADD COLUMN last_surfaced_at INTEGER");
   }
+
+  // Lenses (DESIGN §10b): tags + lens stamps across tiers, procedure status + outcome stats.
+  addColumn(db, "intention", "lens", "TEXT");
+  addColumn(db, "timeline", "lens", "TEXT");
+  addColumn(db, "episodes", "tags", "TEXT NOT NULL DEFAULT '[]'");
+  addColumn(db, "episodes", "lenses", "TEXT NOT NULL DEFAULT '[]'");
+  addColumn(db, "canonical", "tags", "TEXT NOT NULL DEFAULT '[]'");
+  addColumn(db, "canonical", "lens", "TEXT");
+  addColumn(db, "procedure", "tags", "TEXT NOT NULL DEFAULT '[]'");
+  addColumn(db, "procedure", "lens", "TEXT");
+  addColumn(db, "procedure", "status", "TEXT NOT NULL DEFAULT 'active'");
+  addColumn(db, "procedure", "successes", "INTEGER NOT NULL DEFAULT 0");
+  addColumn(db, "procedure", "failures", "INTEGER NOT NULL DEFAULT 0");
+}
+
+function addColumn(db: DB, table: string, column: string, ddl: string): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (cols.length > 0 && !cols.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
 }

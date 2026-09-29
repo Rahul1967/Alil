@@ -5,3 +5,4 @@ export type { AmbientDeps } from "./ambient.ts";
 export { createAlil, Alil } from "./core.ts";
 export type { ChannelBinding, AlilConfig, RunTurnOptions } from "./core.ts";
 export { debugEnabled } from "./debug.ts";
+export { handleLensCommand } from "./lens-command.ts";

@@ -12,7 +12,7 @@ interface ProcedureFetchArgs {
 export const memoryProcedureFetch: ToolImpl<ProcedureFetchArgs> = {
   name: "memory.procedure.fetch",
   description:
-    "Fetch the full verbatim steps and supporting evidence for one proven method, by its name (as returned by memory.procedure.search). Use this once a searched method looks right, then follow the steps.",
+    "Fetch the full verbatim steps and supporting evidence for one proven method, by its name (as returned by memory.procedure.search). Use this once a searched method looks right, then follow the steps. Afterwards, record whether it worked with memory.procedure.outcome.",
   parameters: {
     type: "object",
     properties: {
@@ -46,6 +46,9 @@ export const memoryProcedureFetch: ToolImpl<ProcedureFetchArgs> = {
         method: p.abstractMethod,
         steps: p.verbatimSteps,
         evidence: p.evidence,
+        tags: p.tags,
+        ...(p.successes + p.failures > 0 ? { track: `${p.successes} worked / ${p.failures} failed` } : {}),
+        ...(p.status === "deprecated" ? { deprecated: true } : {}),
         tainted: p.provenance.origin === "ingested" || (p.provenance.taintedBy?.length ?? 0) > 0,
       },
     };

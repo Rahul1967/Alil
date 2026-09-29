@@ -6,7 +6,7 @@ import type { Provenance, TranscriptLine, ActionContract, ToolResult, Fragment }
 import { ProviderRegistry, BedrockProvider } from "../providers/index.ts";
 import { PromptAssembler, FilePersonaSource } from "../prompts/index.ts";
 import type { KnowledgeSource } from "../prompts/types.ts";
-import { PolicyBoundary, YamlRuleSource, credentialBlock, GrantStore } from "../policy/index.ts";
+import { PolicyBoundary, YamlRuleSource, LayeredRuleSource, credentialBlock, GrantStore } from "../policy/index.ts";
 import type { ApprovalPort } from "../policy/index.ts";
 import { ToolRegistry, Executor, Sandbox, ReadTracker, RegistryToolCatalog, DEFAULT_TOOLS } from "../execution/index.ts";
 import { dossierMigratePreferences } from "../execution/tools/dossier-migrate-prefs.ts";
@@ -33,6 +33,9 @@ import { DebugLogger, composeObservers, tapRecall, tapWorld, tapAudit } from "./
 import type { PlanResult } from "../runtime/plan-types.ts";
 import type { TriggerRule } from "../gateway/ingest/types.ts";
 import type { RateLimiter } from "../gateway/ingest/rate-limiter.ts";
+import { keywordTrigger, defaultInstruction } from "../gateway/ingest/triggers.ts";
+import { LensService, LensStore, lensPromptLayer } from "../lens/index.ts";
+import type { Lens } from "../lens/index.ts";
 
 /**
  * A channel binding supplies ONLY what is channel-specific: how the operator approves, how a
@@ -64,6 +67,8 @@ export interface AlilConfig {
   worldMarkdownPath?: string;
   /** Directory the operator-dossier markdown files live under. Default workspace/DOSSIER. */
   dossierRoot?: string;
+  /** Directory the lens files live under (`<root>/<id>/LENS.md`). Default workspace/LENSES. */
+  lensRoot?: string;
   /**
    * Path to an MCP server-config JSON file ({ servers: McpServerConfig[] }). When present and
    * non-empty, the mcp.* meta-tools connect lazily to those servers (on-demand — no per-turn tool
@@ -89,6 +94,9 @@ export interface RunTurnOptions {
   preempt?: boolean;
   /** Files the operator attached this turn (already placed via alil.ingestion.receive). */
   attachments?: Attachment[];
+  /** Run this one turn under a specific lens (null = no lens) instead of the channel's active one
+   * — e.g. a reminder fires in the lens it was created under. */
+  lens?: string | null;
 }
 
 /**
@@ -113,6 +121,9 @@ export class Alil {
   readonly #ingestion: IngestionStore;
   readonly #scheduler: Scheduler | null;
   readonly #mcp: McpRegistry | null;
+  readonly #lenses: LensService;
+  readonly #registry: ProviderRegistry;
+  readonly #defaultModel: string;
   readonly #actions: ActionSink;
   #prefsMigrationTried = false; // one-time-per-process guard for the canonical→dossier prefs move
 
@@ -133,6 +144,47 @@ export class Alil {
     this.#scheduler = built.scheduler;
     this.#eventBus = built.eventBus;
     this.#mcp = built.mcp;
+    this.#lenses = built.lenses;
+    this.#registry = built.registry;
+    this.#defaultModel = _config.modelId;
+  }
+
+  /** Lenses: the store (list/get/write) and the channel's active lens. Read-only for the model. */
+  get lenses(): LensService {
+    return this.#lenses;
+  }
+
+  /**
+   * Switch this channel's lens (null = no lens). OPERATOR-ONLY by construction: only channel
+   * commands and the UI call this — no tool can, so neither the model nor tainted content can
+   * switch a lens. Recorded in the audit ledger.
+   */
+  setLens(id: string | null): Lens | null {
+    const from = this.#lenses.activeId();
+    const lens = this.#lenses.set(id);
+    this.#audit.append("lens.switch", { channel: this.channel, from, to: lens?.id ?? null });
+    return lens;
+  }
+
+  /** Recompute every episode's keyword-derived tags against the current lens definitions. */
+  async retagEpisodes(): Promise<number> {
+    if (!this.#memory) return 0;
+    const registry = this.#lenses.registry();
+    const n = await this.#memory.store.retagEpisodes((t) => registry.derive(t));
+    this.#audit.append("lens.retag", { channel: this.channel, changed: n });
+    return n;
+  }
+
+  /** The model for a turn: the lens's model when it names one the registry can serve. */
+  #modelFor(lens: Lens | null): string {
+    if (!lens?.model || lens.model === this.#defaultModel) return this.#defaultModel;
+    try {
+      this.#registry.resolve(lens.model);
+      return lens.model;
+    } catch {
+      this.#audit.append("lens.model-unavailable", { lens: lens.id, model: lens.model });
+      return this.#defaultModel;
+    }
   }
 
   /** The world-model, for channels that want to surface present-tense state. */
@@ -211,8 +263,9 @@ export class Alil {
         .fireEvent({ channel: this.channel, text, ...(provenance.sender ? { from: provenance.sender } : {}), provenance })
         .catch(() => {});
     }
-    return this.#queue.submit(async (queueSignal): Promise<BrainTurn> => {
+    return this.#queue.submit((queueSignal): Promise<BrainTurn> => this.#lenses.withTurnLens(opts.lens, async (): Promise<BrainTurn> => {
       const at = new Date().toISOString();
+      const lens = this.#lenses.active();
       const episodeId = this.#episodes ? await this.#episodes.beginTurn(at) : "ep";
       const input: BrainInput = {
         sessionId: this.channel,
@@ -223,17 +276,20 @@ export class Alil {
           : {}),
       };
       this.#logger?.turnStart(this.channel, opts.label ?? "turn", text, provenance);
-      const turn = await this.#brain.run(input, { signal: anySignal(queueSignal, opts.signal) });
+      const signal = anySignal(queueSignal, opts.signal);
+      const modelId = this.#modelFor(lens);
+      const turn = await this.#brain.run(input, { ...(signal ? { signal } : {}), ...(modelId !== this.#defaultModel ? { modelId } : {}) });
       this.#logger?.turnEnd(turn);
       if (turn.stopReason === "complete" && this.#memory) {
-        this.#memory.timeline.append({ at, channel: this.channel, provenance, episodeId, role: "user", text });
+        const lensField = lens ? { lens: lens.id } : {};
+        this.#memory.timeline.append({ at, channel: this.channel, provenance, episodeId, role: "user", text, ...lensField });
         if (turn.assistantText !== undefined) {
-          this.#memory.timeline.append({ at, channel: this.channel, provenance: { origin: "model" }, episodeId, role: "assistant", text: turn.assistantText });
+          this.#memory.timeline.append({ at, channel: this.channel, provenance: { origin: "model" }, episodeId, role: "assistant", text: turn.assistantText, ...lensField });
         }
-        this.#audit.append("turn", { channel: this.channel, episodeId, iterations: turn.iterations, ...(opts.label ? { label: opts.label } : {}) });
+        this.#audit.append("turn", { channel: this.channel, episodeId, iterations: turn.iterations, ...(opts.label ? { label: opts.label } : {}), ...lensField, ...(modelId !== this.#defaultModel ? { model: modelId } : {}) });
       }
       return turn;
-    }, opts.preempt ? { preempt: true } : {});
+    }), opts.preempt ? { preempt: true } : {});
   }
 
   /** Decompose + execute (subagent-backed, parallel) a goal. Serialized on the shared queue. */
@@ -299,6 +355,8 @@ interface BuiltCore {
   scheduler: Scheduler | null;
   eventBus: EventBus;
   mcp: McpRegistry | null;
+  lenses: LensService;
+  registry: ProviderRegistry;
 }
 
 /**
@@ -318,9 +376,28 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     path: config.worldPath ?? "workspace/.alil/world.json",
     markdownPath: config.worldMarkdownPath ?? "workspace/WORLD.md",
   });
+  // Lenses (DESIGN §10b): operator-owned files, one active lens per channel (persisted in the memory
+  // kv table once memory opens — the service restores it lazily on first use).
+  const lensKv: { db?: MemorySystem["db"] } = {};
+  const lensKey = `lens:${binding.channel}`;
+  const lenses = new LensService({
+    store: new LensStore(config.lensRoot ?? `${sandboxRoot}/LENSES`),
+    load: () => (lensKv.db?.prepare("SELECT value FROM kv WHERE key = ?").get(lensKey) as { value: string } | undefined)?.value ?? null,
+    save: (id) => {
+      if (!lensKv.db) return;
+      if (id === null) lensKv.db.prepare("DELETE FROM kv WHERE key = ?").run(lensKey);
+      else lensKv.db.prepare("INSERT INTO kv(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(lensKey, id);
+    },
+  });
+  /** The active lens, only if it weights this tier (a zero weight opts the tier out). */
+  const lensFor = (tier: "procedures" | "episodes" | "dossier" | "canonical"): Lens | null => {
+    const l = lenses.active();
+    return l && l.surface[tier] > 0 ? l : null;
+  };
   // Operator dossier: markdown files are the source of truth; the store reads/writes them and
-  // renders the always-on operator preamble. Channel-agnostic, like the world-model.
-  const dossier = new DossierStore({ root: config.dossierRoot ?? `${sandboxRoot}/DOSSIER` });
+  // renders the always-on operator preamble. Channel-agnostic, like the world-model. Tags go
+  // through the shared lens tag registry so lens synonyms apply here too.
+  const dossier = new DossierStore({ root: config.dossierRoot ?? `${sandboxRoot}/DOSSIER`, normalizeTags: (t) => lenses.registry().normalizeAll(t) });
   // One sandbox jail, shared by the executor's filesystem tools and the ingestion boundary, so an
   // attachment lands in the same workspace doc.read/fs.read later resolve paths against.
   const sandbox = new Sandbox(sandboxRoot);
@@ -339,6 +416,7 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     void seedMemoryInstructions(memory.store);
     memCtx.store = memory.store;
     prospCtx.store = memory.prospective;
+    lensKv.db = memory.db;
     // Auto-inject only the recent episodes; canonical is standing context, and searching past
     // memory is a tool the model invokes (memory.query / memory.procedure.search), not a redundant
     // per-turn semantic push. PLUS: context-triggered intentions whose cue is relevant to this turn
@@ -347,17 +425,20 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     const mem = memory; // narrow for the closure
     memoryPort = {
       async recall(query: string): Promise<Fragment[]> {
-        const [eps, facts] = await Promise.all([baseRecall.recall(query), matchContextFacts(mem, query)]);
-        return [...eps, ...facts];
+        const [eps, facts, lensEps] = await Promise.all([baseRecall.recall(query), matchContextFacts(mem, query), lensEpisodes(mem, lenses, query)]);
+        const have = new Set(eps.map((f) => f.source));
+        return [...eps, ...lensEps.filter((f) => !have.has(f.source)), ...facts];
       },
     };
-    knowledge = new CanonicalKnowledge(memory.store);
+    // Tagged canonical facts render only while a lens with an overlapping tag is active.
+    knowledge = new CanonicalKnowledge(memory.store, { lensTags: () => lensFor("canonical")?.tags ?? [] });
     episodes = new EpisodeManager({
       db: memory.db,
       timeline: memory.timeline,
       store: memory.store,
       summarizer: new ExtractiveSummarizer(),
       onMemoryWrite: (e) => auditSink.append("episode.distill", { episodeId: e.episodeId, lines: e.lines }),
+      tagger: () => { const r = lenses.registry(); return (t: string) => r.derive(t); },
     });
   } catch {
     // Native module / DB unavailable — run without persistence rather than crash.
@@ -371,8 +452,17 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
   // Executor registry = the advertised tools PLUS the operator-only migration tool (not in the
   // model-facing catalog, so the model never sees it; reachable only via alil.migratePreferences()).
   const tools = new ToolRegistry([...DEFAULT_TOOLS, dossierMigratePreferences]);
+  // Retag episodes after a lens file is written (its keywords may surface old history).
+  const onLensChanged = async (): Promise<void> => {
+    if (!memory) return;
+    const r = lenses.registry();
+    const changed = await memory.store.retagEpisodes((t) => r.derive(t));
+    auditSink.append("lens.retag", { channel: binding.channel, changed });
+  };
   const boundary = new PolicyBoundary({
-    rules: new YamlRuleSource(config.policyPath ?? "config/policy.yaml"),
+    // Base policy + the active lens's overlay. LayeredRuleSource keeps only deny/ask overlay rules
+    // and the base mode, so a lens can only tighten.
+    rules: new LayeredRuleSource(new YamlRuleSource(config.policyPath ?? "config/policy.yaml"), () => lenses.overlay()),
     tools,
     hooks: [credentialBlock],
     executor: new Executor({
@@ -382,6 +472,7 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
       prospective: prospCtx,
       world: { store: world },
       dossier: { store: dossier },
+      lens: { service: lenses, onChanged: onLensChanged },
       ...(mcpRegistry ? { mcp: { registry: mcpRegistry } } : {}),
       ...(binding.sendFile ? { channel: { sendFile: binding.sendFile } } : {}),
     }),
@@ -389,6 +480,7 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     grants: new GrantStore(),
     workspaceRoot: sandboxRoot,
     audit: auditSink,
+    lensId: () => lenses.activeId(),
   });
 
   const observer = logger ? composeObservers(binding.observer, logger) : binding.observer;
@@ -396,10 +488,15 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     memory: logger ? tapRecall(memoryPort, logger) : memoryPort,
     skills: { eligible: async () => [] },
     tools: new RegistryToolCatalog(DEFAULT_TOOLS),
-    prompt: new PromptAssembler(new FilePersonaSource(), { env: { now: () => new Date() }, ...(knowledge ? { knowledge } : {}) }),
+    prompt: new PromptAssembler(new FilePersonaSource(), {
+      env: { now: () => new Date() },
+      ...(knowledge ? { knowledge } : {}),
+      lens: () => { const l = lenses.active(); return l ? lensPromptLayer(l) : null; },
+    }),
     actions: boundary,
     world: logger ? tapWorld(world, logger) : world,
-    profile: { preamble: () => dossier.operatorPreamble() },
+    profile: { preamble: () => { const l = lensFor("dossier"); return dossier.operatorPreamble(l ? { title: l.title, tags: l.tags } : null); } },
+    context: { blocks: (input) => lensContextBlocks(memory, lenses, input) },
     ...(observer ? { observer } : {}),
   };
   const brain = new Brain({ modelId: config.modelId, guards: config.guards ?? DEFAULT_GUARDS }, registry, ports);
@@ -407,6 +504,15 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
   const planService = new PlanService({
     registry, modelId: config.modelId, catalog: new RegistryToolCatalog(DEFAULT_TOOLS),
     boundary, world, maxParallel: config.maxParallel ?? 2,
+    // A proven method is a ready-made plan: offer the lens-focused top matches to the planner.
+    ...(memory ? {
+      methods: async (goal: string) => {
+        const hits = await memory!.store.searchProcedures(goal, 3, { lens: lenses.focus("procedures") });
+        return hits.map((h) => ({ name: h.name, trigger: h.trigger, abstractMethod: h.abstractMethod, tainted: isTaintedProv(h.provenance) }));
+      },
+    } : {}),
+    // Plan-node subagents inherit the lens's focus (stance), never its authority.
+    subagentPromptSuffix: () => { const l = lenses.active(); return l ? lensPromptLayer(l) : null; },
   });
 
   // The core needs `alil` to route scheduled/ambient turns; build the plumbing that closes over it.
@@ -420,7 +526,8 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
             ? { origin: "system", taintedBy: event!.provenance.taintedBy ?? [event!.channel] }
             : { origin: "system" };
           const banner = event ? `[event trigger fired: ${event.channel}] ` : "[scheduled reminder fired] ";
-          const turn = await alil.runTurn(`${banner}${intention.action}`, provenance, { label: "intention" });
+          // Fires in the lens it was created under (null ⇒ explicitly no lens).
+          const turn = await alil.runTurn(`${banner}${intention.action}`, provenance, { label: "intention", lens: intention.lens });
           await binding.notify?.(turn.assistantText ?? "(no text)", { source: "scheduled", label: intention.title });
         },
       })
@@ -431,13 +538,18 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     ...(scheduler ? { scheduler } : {}),
     ...(config.triggers ? { triggers: config.triggers } : {}),
     ...(config.ambientLimiter ? { limiter: config.ambientLimiter } : {}),
+    // Lens-owned keyword watches, re-read per event so they follow the lens files.
+    dynamicTriggers: () => lenses.list().lenses.flatMap((l) => l.triggers.map((t) =>
+      keywordTrigger(`lens:${l.id}:${t.name}`, t.keywords, (e) => `${t.instruction ? `${t.instruction}\n\n` : ""}${defaultInstruction(`lens:${l.id}:${t.name}`, e)}`))),
     onWake: async (w) => {
-      const turn = await alil.runTurn(w.instruction, w.event.provenance, { label: `ambient:${w.rule}` });
+      // A lens-owned watch wakes its turn in that lens.
+      const lensWake = /^lens:([a-z][a-z0-9-]*):/.exec(w.rule)?.[1];
+      const turn = await alil.runTurn(w.instruction, w.event.provenance, { label: `ambient:${w.rule}`, ...(lensWake ? { lens: lensWake } : {}) });
       await binding.notify?.(turn.assistantText ?? "(no action)", { source: "ambient", label: w.rule });
     },
   });
 
-  alil = new Alil(config, binding, { brain, actions: boundary, planService, ledger: audit, auditSink, logger, memory, episodes, world, dossier, ingestion, scheduler, eventBus, mcp: mcpRegistry });
+  alil = new Alil(config, binding, { brain, actions: boundary, planService, ledger: audit, auditSink, logger, memory, episodes, world, dossier, ingestion, scheduler, eventBus, mcp: mcpRegistry, lenses, registry });
   return alil;
 }
 
@@ -465,6 +577,57 @@ async function matchContextFacts(mem: MemorySystem, query: string): Promise<Frag
     mem.prospective.markSurfaced(h.id, now);
   }
   return out;
+}
+
+function isTaintedProv(p: Provenance): boolean {
+  return p.origin === "ingested" || (p.taintedBy?.length ?? 0) > 0;
+}
+
+/**
+ * The lens stream for the per-turn episode push: up to two lens-relevant past sessions matching
+ * this message (beyond the recent ones already pushed). Empty with no lens / zero episode weight.
+ * Taint rides along on each hit's provenance.
+ */
+async function lensEpisodes(mem: MemorySystem, lenses: LensService, query: string): Promise<Fragment[]> {
+  const focus = lenses.focus("episodes");
+  if (!focus || !query.trim()) return [];
+  const hits = await mem.store.searchEpisodes(query, 4, { lens: focus });
+  return hits.filter((h) => h.lensMatch).slice(0, 2).map((h) => ({
+    text: `(${focus.id} lens · ${h.when ?? "undated"}) ${h.text}`,
+    provenance: h.provenance,
+    source: `episode:${h.episodeId}`,
+  }));
+}
+
+const METHODS_PREVIEW_MAX = 8;
+
+/**
+ * Extra per-turn context blocks:
+ *  - with a lens active: a capped METHODS PREVIEW — names + triggers of the lens's proven methods
+ *    (never their steps; those stay pull-only via memory.procedure.fetch), so the model doesn't
+ *    forget it has domain expertise to search.
+ *  - with no lens active: a one-line SUGGESTION when a trusted message clearly matches a lens.
+ *    Suggest only — the model can't switch lenses, and tainted input never produces a suggestion.
+ */
+async function lensContextBlocks(mem: MemorySystem | null, lenses: LensService, input: BrainInput): Promise<string[]> {
+  const lens = lenses.active();
+  if (lens) {
+    if (!mem || lens.surface.procedures <= 0) return [];
+    const mine = (await mem.store.procedureList())
+      .filter((p) => p.status === "active" && (p.lens === lens.id || p.tags.some((t) => lens.tags.includes(t))))
+      .sort((a, b) => (b.successes - b.failures) - (a.successes - a.failures) || b.uses - a.uses)
+      .slice(0, METHODS_PREVIEW_MAX);
+    if (mine.length === 0) return [];
+    const rows = mine.map((p) => `- ${p.name} — when ${p.trigger}${isTaintedProv(p.provenance) ? " ⚠untrusted" : ""}`);
+    return [`[lens methods · ${lens.id}]\nProven methods you have for this lens (fetch one with memory.procedure.fetch before improvising):\n${rows.join("\n")}`];
+  }
+  const p = input.message.provenance;
+  const trusted = (p.origin === "operator" || p.origin === "user_channel") && !(p.taintedBy?.length);
+  if (!trusted) return [];
+  const suggestion = lenses.registry().suggest(input.message.text);
+  return suggestion
+    ? [`[lens suggestion]\nThis looks related to the "${suggestion.title}" lens (/lens ${suggestion.id}). If a focused session would help, you may suggest the operator switch; you cannot switch it yourself.`]
+    : [];
 }
 
 /** An AbortSignal that fires when either input signal aborts (for merging queue + caller cancel). */

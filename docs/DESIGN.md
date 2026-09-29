@@ -1,6 +1,6 @@
 # Alil — a JARVIS-class assistant harness with structural guardrails
 
-**Consolidated design · v0.3 · 2026-09-01**
+**Consolidated design · v0.4 · 2026-09-29**
 Basis: deep-research run (24 sources, 23 adversarially verified claims; run `wf_8f86dc94-b17`), plus
 the Phase-2 JARVIS-fit evaluation and the memory/dossier/ingestion design rounds.
 
@@ -16,7 +16,8 @@ core runtime infrastructure — not prompts, not plugins.
 >
 > Sections **01–05** are the harness architecture and guardrails (the trust layer). Sections
 > **06–10** are the cognitive organs built on top (present-tense world-model, planning, ambient
-> perception, subagents, prospective memory, the operator dossier, file ingestion). Section **11**
+> perception, subagents, prospective memory, the operator dossier, file ingestion, and lenses —
+> §10b, specialized focus over one mind). Section **11**
 > is the as-built code map and current status; **12** is history and roadmap.
 
 ---
@@ -556,6 +557,177 @@ The structural mitigations, highest-leverage first:
    no matching successful `tool_result` in the preceding observations, ÷ total completion claims.
    Computable from the transcript; proves the mitigations work and catches regressions. (Planned.)
 
+### 10b · Lenses (specialized focus over one mind)
+
+A **lens** makes Alil specialized — a finance lens, a research lens, any domain the operator
+defines — without making it a different agent. It sits in the intersection of two circles: *Alil*
+(one continuous mind: all memory, the dossier, the world-model, every tool, the single boundary) and
+*a domain specialist* (a domain stance, domain methods, domain tools first, domain-specific
+caution). A lens changes **focus and strictness, never authority**.
+
+It is deliberately not a subagent. A subagent (§08b) is a fresh Brain with no recall, no history,
+and a narrowed tool grant — a disposable worker. A lens is Alil itself, looking through a filter.
+
+| | Alil (no lens) | Alil + lens | Subagent |
+|---|---|---|---|
+| Identity / continuity | one mind | **the same mind** | throwaway worker |
+| Memory | everything | **everything, lens-relevant surfaced first** | none |
+| Tools | all | **all, lens-emphasized ranked first** | narrow subset |
+| Policy | base rules | **base + tighten-only lens overlay** | base + scope deny |
+| Learning | untagged | **stamped + tagged, so domain expertise accrues** | nothing persists |
+
+**The harness is lens-agnostic.** No source file names a specific lens. Finance, research, health —
+each is one data file. Every key the harness uses to surface related episodes, procedures, memory,
+and tools is read from the active lens's definition, so creating a lens never requires code.
+
+#### The lens file
+
+`workspace/LENSES/<id>/LENS.md` — operator-owned Markdown, diffable like every other truth file.
+The YAML frontmatter is the manifest; the body is the lens **stance** (how to reason in this
+domain, what to flag, tone), rendered into the system prompt as an `## Active lens` layer after
+`SOUL.md` and after the safety-critical base prompt, never before it.
+
+```yaml
+id: research
+title: Research
+tags: [research, papers, literature, experiments]   # what this lens is ABOUT
+synonyms: { paper: papers, lit-review: literature, study: papers }
+keywords: [arxiv, citation, hypothesis, dataset, benchmark, survey]
+surface:              # per-tier boost weights for lens-relevant items (0 = no boost)
+  procedures: 1.0
+  episodes: 0.8
+  dossier: 0.5
+  canonical: 0.5
+tools:
+  emphasize: [web.search, web.fetch, doc.read]       # ranking only — never grants
+  mcpServers: [arxiv]
+triggers: []          # optional ambient watch rules owned by this lens
+model: null           # optional model override for this lens
+policy: []            # tighten-only overlay (see below)
+```
+
+A finance lens differs only in data — e.g. `tags: [financial, investing, tax, loans, budgeting]`,
+`mcpServers: [nse-bhavcopy, cm-market]`, and a policy overlay making money movement critical.
+
+#### One tag system across every tier
+
+- **Tag registry.** One normalized vocabulary = the base controlled vocabulary (§09) ∪ every
+  lens's declared `tags` and `synonyms`. One normalizer (lowercase, hyphenate, synonym-map) is
+  shared by procedures, episodes, dossier files, canonical facts, and intentions. Creating a lens
+  extends the vocabulary automatically.
+- **Two labels on every stored item:**
+  - **`lens:<id>` stamp** — *where* it was learned. Applied by the harness from the active lens;
+    the model cannot choose or forge it.
+  - **`tags`** — *what* it is about. Proposed by the model on write, shown in the approval prompt,
+    approved with the write. An item can carry tags spanning several lenses, so a method tagged
+    `financial` and `work` surfaces under both.
+- **Keyword-derived tags (a projection).** When an episode closes, a deterministic keyword match
+  (no LLM) against every lens's `keywords` adds derived tags. Derived tags are a **rebuildable
+  projection**, never truth: when a lens is created or its keywords change, a re-tag pass lets old
+  history surface under it. Approved tags are truth; derived tags are always recomputable.
+
+#### Surfacing: one `LensContext`, every path
+
+Per turn the harness reads the active lens file (tags, keywords, weights, tool emphasis, overlay)
+through one `LensService` (`src/lens/service.ts`) that every surfacing path consults.
+
+**How a lens search runs.** The model's query is never rewritten. The existing search runs
+unchanged over its own tier (candidates **A**). A lens adds a second stream (candidates **B**): the
+same query widened by the lens `keywords`, ranked only over lens-relevant items (lens-stamped, or a
+tag in common). A B item qualifies only on a lexical hit or cosine ≥ 0.3, so an unrelated lens item
+doesn't ride along on every search. A and B are merged (deduped) and re-ranked: fused relevance +
+`weight × one rank unit` for lens-relevant items + a small outcome prior. Streams are needed, not
+just re-ranking: a re-rank can only reorder what search already returned.
+
+| Path | Lens effect |
+|---|---|
+
+| Path | Lens effect |
+|---|---|
+| `memory.procedure.search` | lens stream + boost; a capped **methods preview** (names + triggers only) shown as a `[lens methods]` block when the lens is active |
+| Episode push / `memory.query` | lens stream + boost over lens-stamped/-tagged episodes; the per-turn push adds up to two lens-relevant sessions |
+| Dossier `[operator]` block | add a capped slice of files tagged with the lens's tags |
+| Canonical facts | lens-tagged facts render only while that lens is active |
+| `mcp.search` / tool listing | matching tools on the lens's MCP servers score ×1.5; emphasized native tools are named in the lens prompt layer; schemas still never injected (§08d) |
+| Planner | search lens procedures before decomposing — a proven method is a ready-made plan |
+| Policy | base rules + the lens overlay (tighten-only) |
+| Intentions, triggers, audit | record the lens id; a reminder fires in the lens it was created under; a lens-owned keyword trigger wakes its turn in that lens |
+| Model | a lens may name a model; used when the registry can serve it, else the default (audited) |
+| No lens active | a trusted message that clearly matches a lens gets a one-line `[lens suggestion]` block (never for tainted input; never a switch) |
+
+**Boost, never hide.** Lens relevance reorders; it does not filter, so general knowledge stays
+reachable. A hard filter applies only when the model passes explicit `tags` to a search.
+
+**No lens ⇒ today's behavior.** An empty `LensContext` must reproduce current behavior exactly;
+this is a regression test, not a convention.
+
+#### Procedural memory is the lens's expertise
+
+The lens stance is *how it thinks*; the procedures tagged with its tags are *what it knows how to
+do*. Procedural memory (MEMORY.md §7a) therefore gets first-class lens support:
+
+- `tags` on procedures (a JSON column — libraries are small, so filtering is in-process; tags are
+  also indexed in FTS so a query can hit a tag the trigger doesn't mention; the vector stays the
+  trigger's). `memory.procedure.create` requires at least one domain tag; the lens stamp is
+  automatic. Explicit `tags` on search filter hard.
+- Search ranks only procedure chunks (fixed: it used to compete with episode chunks in the shared
+  recall index and was crowded out as episodes grew). The same fix applies to episode search,
+  context cues, and the create-time dedupe.
+- Ranking = RRF(vector, FTS) over streams A ∪ B + lens boost + an outcome prior (Laplace-smoothed
+  success rate, ±0.5 rank unit; zero for a method with no recorded outcomes, so an untouched
+  library ranks exactly as before).
+- **Outcome feedback** separate from use: `memory.procedure.outcome` records success/failure;
+  fetching is only a use.
+- A **deprecated** status (`memory.procedure.update status:"deprecated"`) retires a wrong method;
+  search skips it unless `include_deprecated`.
+- Procedure create/update are **high risk**: a procedure is replayed as trusted how-to, so a
+  tainted turn's write is a hard deny (previously documented but not enforced — medium-risk writes
+  only escalated to ask).
+- The bounded methods preview is a deliberate, capped exception to §7a's "never pushed" rule:
+  names and triggers only; steps stay pull-only via `memory.procedure.fetch`.
+
+#### Policy overlay — tighten-only
+
+A lens may add only `deny` and `ask` rules. The strict loader (`src/lens/manifest.ts`) **rejects**
+an `allow` rule, a `mode`/`grants`/`permissions` key, any `tools` key other than
+`emphasize`/`mcpServers`, and any unknown key. `LayeredRuleSource` (`src/policy/rules.ts`) composes
+base + overlay at runtime and, as defense in depth, keeps only deny/ask overlay rules and the base
+mode. A lens whose file breaks keeps serving its **last good** definition, so a bad edit can never
+drop an active overlay. Supporting changes (all built):
+
+- **Argument matchers** — `match.args: { <arg>: <glob> }` on string args (e.g. MCP
+  `{ name: "*order*" }`); a missing or non-string arg never matches.
+- **`raiseRisk`** — a rule may raise a matched action's risk (never lower it). `critical` makes it
+  non-grantable and hard-denied when tainted.
+- **`fresh: true`** — an `ask` rule a standing grant can never cover.
+- **Operator-pinned MCP classification** — `config/mcp.json` `tools: { <name>: { effect, risk } }`
+  is the only way an `mcp.call` is anything but execute/high (a server's `readOnlyHint` is untrusted
+  and never lowers it); `mcp.batch` relaxes only when every step is pinned, taking the strictest.
+  A pinned read runs unprompted; after a read taints the turn, a later pinned read *asks* instead
+  of being hard-denied. A trade can be pinned `spend`/`critical`.
+- **Validate before approval** — the boundary runs the tool's argument validation before asking
+  the operator, so a call that would be rejected (e.g. a loosening `lens.create`) never costs an
+  approval prompt. The executor still re-validates after approval.
+
+#### Activation, lifecycle, invariants
+
+- **One active lens per channel**, persisted in the memory `kv` table (`lens:<channel>`).
+  Switching is explicit (`/lens <id>` · `/lens off` · `/lens retag` in terminal/Telegram via
+  `src/app/lens-command.ts`; the header picker in the browser, `GET/POST /api/lens`). There is no
+  switching tool, so neither the model nor **tainted content can ever switch a lens**; the model
+  may only suggest one.
+- **Creation:** the operator hand-writes a lens file (examples in `config/lenses/`; copy them into
+  `workspace/LENSES/`), or Alil proposes one through `lens.create` — a **high-risk** write (a stance
+  reaches the system prompt, so a tainted turn is hard-denied; never grant-covered), validated by
+  the same strict loader, followed by a harness-injected read-back and a re-tag pass. Editing an
+  existing lens is `lens.create` with `overwrite: true`.
+- **Subagents and plan nodes inherit the lens's stance and tags, never its authority** — tools
+  stay a subset of the parent's (§08b).
+- The active lens is recorded on every audit `policy` and `turn` record, and on episodes
+  (the set of lenses active during the episode).
+- Security-sensitive slices (tighten-only loader, lens switching under taint, fresh-approval
+  semantics) get adversarial tests before the code.
+
 ## 11 · Implementation status & code map
 
 **As of 2026-09-01.** This section is the single as-built view; update it when a slice lands.
@@ -585,6 +757,9 @@ Legend: ✅ built · 🟡 partial · ⬜ planned.
 | Grounding: read-side — listings surface real entries in the observation (§10a #3) | ✅ | `fs.list`/`fs.glob` put names in the summary; prompt rule to answer listings from a live call |
 | Grounding: done-claim gate, fabrication-rate telemetry (§10a #2, #5) | ⬜ | planned; reuses provenance/taint |
 | Skill runtime (signed, sandboxed, manifest-enforced) | ⬜ | design only; see §04 supply-chain row |
+| Lenses (§10b): lens files, tag registry, surfacing on every path, tighten-only overlay, `/lens` + UI picker, `lens.create` | ✅ | `src/lens/`, `src/app/core.ts`, `src/app/lens-command.ts`, `lens-create.ts`, `config/lenses/` |
+| Procedural memory: tags, kind-restricted search, outcome scoring, deprecation (§10b) | ✅ | `src/memory/store.ts`, `memory-procedure-*` tools (incl. `memory-procedure-outcome.ts`) |
+| Policy: argument matchers, `raiseRisk`, `fresh`, layered overlay, pinned MCP classification, validate-before-approval | ✅ | `src/policy/rules.ts`, `engine.ts`, `boundary.ts`, `classifier.ts`, `src/execution/mcp/` |
 
 **Channels built:** terminal (`scripts/chat.ts`), browser (`ui/`), Telegram
 (`src/channels/telegram.ts`). Slack/Discord/WhatsApp/voice are **not** built; each would be a new
@@ -617,8 +792,27 @@ hash-chained ledger; security-critical slices get an adversarial test *before* t
 - *File ingestion:* the channel-agnostic boundary + Telegram/browser wiring.
 - *Vision:* `vision.view` + provider image blocks (Anthropic/Bedrock), capability-gated,
   taint-fenced; scanned/image-only PDF pages readable via `doc.read see:true` (rendered to images).
+- *Lenses (§10b, 2026-09-29):* lens files + strict tighten-only loader, shared tag registry,
+  lens streams + boost in episodic/procedural search, methods preview, lens prompt layer, dossier
+  slice, lens-scoped canonical facts, stamps on every write, keyword-derived episode tags with a
+  re-tag pass, fire-in-lens reminders and lens-owned triggers, planner methods, subagent stance
+  inheritance, per-lens model, `/lens` + browser picker, gated `lens.create`. Groundwork shipped
+  with it: argument matchers, `raiseRisk`, `fresh` rules, `LayeredRuleSource`, operator-pinned MCP
+  classification, validate-before-approval; and fixes for tier-search crowding, fetch-as-success
+  scoring, zero model pricing (the cost guard could never trip), event taint laundering via
+  caller-supplied provenance, the UI listening on all interfaces, Telegram `/plan` auto-approval,
+  and unenforced tainted procedure writes.
 
 **Next.**
+- **Lens follow-ups (found while building §10b).**
+  - Browser `/api/plan` still passes `approvePlan: async () => true` (execute is an explicit click,
+    but replans are auto-approved); give it the in-page approval flow Telegram now has.
+  - The audit-ledger, world-model and policy paths default to `workspace/…` independently of
+    `ALIL_SANDBOX_ROOT`; derive them from the sandbox root so an isolated run is fully isolated.
+  - `memory.write` is medium risk, so a tainted turn can still *propose* a canonical fact (ask, not
+    deny) even though canonical is always in context; decide whether it should be high like
+    procedure writes.
+  - Composing several active lenses at once (deliberately out of scope: one lens per channel).
 - Optional local Tesseract `doc.ocr` for offline/air-gapped text extraction; terminal `!attach`.
 - **Pluggable web egress backends (research done 2026-09; verified).** Keep the hardened egress
   layer (resolve+validate+pin IP, redirect re-validation, credential screening, ingested-taint) as a

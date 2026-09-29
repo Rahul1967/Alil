@@ -20,6 +20,9 @@ import type { ChannelBinding } from "../src/app/index.ts";
 import { buildDossierGraph } from "../src/dossier/index.ts";
 
 const PORT = Number(process.env.PORT ?? 8787);
+// Loopback by default: the page can approve actions and inject events, so it must not be reachable
+// from the network unless the operator opts in (e.g. HOST=0.0.0.0 behind their own auth).
+const HOST = process.env.HOST ?? "127.0.0.1";
 const PUBLIC = join(dirname(fileURLToPath(import.meta.url)), "public");
 const CHANNEL = "browser";
 const modelId = process.env.BEDROCK_MODEL_ID ?? "global.anthropic.claude-sonnet-5";
@@ -125,7 +128,27 @@ const server = createServer(async (req, res) => {
   const json = (code: number, body: unknown) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
 
   if (req.method === "GET" && url.pathname === "/api/health") {
-    return json(200, { ok: true, model: modelId, memory: alil.memoryOn ? "on" : "off" });
+    return json(200, { ok: true, model: modelId, memory: alil.memoryOn ? "on" : "off", lens: alil.lenses.activeId() });
+  }
+
+  // ── Lenses: list + switch. Switching is an operator action (this page), never a tool. ──
+  if (req.method === "GET" && url.pathname === "/api/lens") {
+    const { lenses, errors } = alil.lenses.list();
+    return json(200, {
+      active: alil.lenses.activeId(),
+      root: alil.lenses.store.root,
+      lenses: lenses.map((l) => ({ id: l.id, title: l.title, description: l.description, tags: l.tags, policyRules: l.policy.length })),
+      errors,
+    });
+  }
+  if (req.method === "POST" && url.pathname === "/api/lens") {
+    try {
+      const body = JSON.parse((await readBody(req)) || "{}") as { id?: string | null };
+      const lens = alil.setLens(typeof body.id === "string" && body.id ? body.id : null);
+      return json(200, { active: lens?.id ?? null });
+    } catch (e) {
+      return json(400, { error: (e as Error).message });
+    }
   }
 
   // Proactive messages (scheduled reminders + ambient wakes) newer than ?since=<id>.
@@ -282,14 +305,14 @@ const server = createServer(async (req, res) => {
         payload = { items: rows.map((r) => ({ seq: r.seq, at: r.at, channel: r.channel, role: r.role, provenance: parseProv(r.provenance), text: r.text })), total: count("timeline"), limit, offset };
       } else if (which === "episodes") {
         const { limit, offset } = paging(20, 500);
-        const rows = memory.db.prepare("SELECT id, start_seq, end_seq, started_at, ended_at, summary, salient_facts FROM episodes ORDER BY start_seq DESC LIMIT ? OFFSET ?").all(limit, offset) as { id: string; start_seq: number; end_seq: number | null; started_at: string; ended_at: string | null; summary: string | null; salient_facts: string | null }[];
-        payload = { items: rows.map((r) => ({ id: r.id, startSeq: r.start_seq, endSeq: r.end_seq, startedAt: r.started_at, endedAt: r.ended_at, open: r.end_seq === null, summary: r.summary, salientFacts: r.salient_facts ? (JSON.parse(r.salient_facts) as string[]) : [] })), total: count("episodes"), limit, offset };
+        const rows = memory.db.prepare("SELECT id, start_seq, end_seq, started_at, ended_at, summary, salient_facts, tags, lenses FROM episodes ORDER BY start_seq DESC LIMIT ? OFFSET ?").all(limit, offset) as { id: string; start_seq: number; end_seq: number | null; started_at: string; ended_at: string | null; summary: string | null; salient_facts: string | null; tags: string | null; lenses: string | null }[];
+        payload = { items: rows.map((r) => ({ id: r.id, startSeq: r.start_seq, endSeq: r.end_seq, startedAt: r.started_at, endedAt: r.ended_at, open: r.end_seq === null, summary: r.summary, salientFacts: r.salient_facts ? (JSON.parse(r.salient_facts) as string[]) : [], tags: r.tags ? (JSON.parse(r.tags) as string[]) : [], lenses: r.lenses ? (JSON.parse(r.lenses) as string[]) : [] })), total: count("episodes"), limit, offset };
       } else if (which === "canonical") {
         const rows = memory.db.prepare("SELECT key, kind, text, provenance, source, created_at FROM canonical ORDER BY kind ASC, created_at DESC").all() as { key: string | null; kind: string; text: string; provenance: string; source: string | null; created_at: string }[];
         payload = rows.map((r) => ({ key: r.key, kind: r.kind, text: r.text, provenance: parseProv(r.provenance), source: r.source, createdAt: r.created_at }));
       } else if (which === "procedures") {
-        const rows = memory.db.prepare("SELECT name, trigger, abstract_method, verbatim_steps, evidence, uses, score, last_used_at, version, provenance, updated_at FROM procedure ORDER BY updated_at DESC").all() as { name: string; trigger: string; abstract_method: string; verbatim_steps: string; evidence: string; uses: number; score: number; last_used_at: string | null; version: number; provenance: string; updated_at: string }[];
-        payload = rows.map((r) => ({ name: r.name, trigger: r.trigger, method: r.abstract_method, steps: r.verbatim_steps, evidence: r.evidence, uses: r.uses, score: r.score, lastUsedAt: r.last_used_at, version: r.version, provenance: parseProv(r.provenance), updatedAt: r.updated_at }));
+        const rows = memory.db.prepare("SELECT name, trigger, abstract_method, verbatim_steps, evidence, uses, score, last_used_at, version, provenance, updated_at, tags, lens, status, successes, failures FROM procedure ORDER BY updated_at DESC").all() as { name: string; trigger: string; abstract_method: string; verbatim_steps: string; evidence: string; uses: number; score: number; last_used_at: string | null; version: number; provenance: string; updated_at: string; tags: string | null; lens: string | null; status: string | null; successes: number; failures: number }[];
+        payload = rows.map((r) => ({ name: r.name, trigger: r.trigger, method: r.abstract_method, steps: r.verbatim_steps, evidence: r.evidence, uses: r.uses, score: r.score, lastUsedAt: r.last_used_at, version: r.version, provenance: parseProv(r.provenance), updatedAt: r.updated_at, tags: r.tags ? (JSON.parse(r.tags) as string[]) : [], lens: r.lens, status: r.status ?? "active", successes: r.successes, failures: r.failures }));
       } else if (which === "stats") {
         payload = { timeline: count("timeline"), episodes: count("episodes"), canonical: count("canonical"), procedures: count("procedure"), chunks: count("recall_chunk") };
       } else {
@@ -380,8 +403,8 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`Alil browser channel → http://localhost:${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.log(`Alil browser channel → http://${HOST === "127.0.0.1" ? "localhost" : HOST}:${PORT}`);
   console.log(`  model: ${modelId} · memory: ${alil.memoryOn ? "on" : "off"}${debug ? " · debug: on" : ""}`);
   console.log(`  reads run automatically; writes/high-risk tools prompt for Approve/Reject in the page`);
 });

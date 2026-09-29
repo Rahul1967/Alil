@@ -32,6 +32,7 @@ interface IntentionRow {
   fired_at: number | null;
   attempts: number;
   provenance: string;
+  lens: string | null;
 }
 
 /** case-insensitive substring test; an absent needle matches anything. */
@@ -62,8 +63,8 @@ export class ProspectiveStore {
     this.#db = db;
     this.#ins = db.prepare(
       `INSERT INTO intention(id, title, action, kind, trigger, fire_at, cron_expr, event_match, context_cue, nag,
-                             status, dedup_key, expires_at, created_at, fired_at, attempts, provenance)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, NULL, 0, ?)`,
+                             status, dedup_key, expires_at, created_at, fired_at, attempts, provenance, lens)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, NULL, 0, ?, ?)`,
     );
     this.#get = db.prepare(`SELECT * FROM intention WHERE id = ?`);
     this.#getByDedup = db.prepare(`SELECT * FROM intention WHERE dedup_key = ?`);
@@ -129,6 +130,7 @@ export class ProspectiveStore {
       n.expiresAt ?? null,
       Date.now(),
       JSON.stringify(n.provenance),
+      n.lens ?? null,
     );
     return { intention: toIntention(this.#get.get(id) as IntentionRow), created: true };
   }
@@ -232,5 +234,6 @@ function toIntention(r: IntentionRow): Intention {
     firedAt: r.fired_at,
     attempts: r.attempts,
     provenance: JSON.parse(r.provenance) as Provenance,
+    lens: r.lens ?? null,
   };
 }

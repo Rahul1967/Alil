@@ -7,6 +7,7 @@ import type { DocExtractor } from "../docs/types.ts";
 import type { WorldStore } from "../../world/store.ts";
 import type { DossierStore } from "../../dossier/store.ts";
 import type { McpRegistry } from "../mcp/registry.ts";
+import type { LensService } from "../../lens/service.ts";
 
 export interface ToolContext {
   sandbox: Sandbox;
@@ -29,6 +30,12 @@ export interface ToolContext {
   world?: { store?: WorldStore };
   /** Operator dossier (durable model of the user) for the dossier.* tools. */
   dossier?: { store?: DossierStore };
+  /**
+   * Lenses (DESIGN §10b): the active lens (for stamps, tag normalization, and search focus) and the
+   * lens file store (for lens.create). `onChanged` runs after a lens file is written (re-tag pass).
+   * Tools may READ the active lens; nothing here lets a tool switch it.
+   */
+  lens?: { service?: LensService; onChanged?: () => Promise<void> | void };
   /** On-demand MCP layer for the mcp.* meta-tools. Undefined when no MCP servers are configured. */
   mcp?: { registry?: McpRegistry };
   /**
@@ -62,6 +69,13 @@ export interface ToolRunResult {
   provenance?: Provenance;
 }
 
+/** Effect/risk/reversibility for one call — the classifier's output for an action. */
+export interface ToolClassification {
+  effect: Effect;
+  risk: Risk;
+  reversible: boolean;
+}
+
 /** A base64 image + its IANA media type, produced by a vision read tool. */
 export interface ImageRef {
   data: string; // base64, no `data:` prefix
@@ -81,6 +95,13 @@ export interface ToolImpl<T = Record<string, unknown>> {
   readonly risk: Risk;
   readonly reversible: boolean;
   validate(args: Record<string, unknown>): ValidateResult<T>;
+  /**
+   * Optional per-call classification from OPERATOR configuration (never from the model): e.g.
+   * mcp.call looks up a tool the operator pinned in config/mcp.json. Return null to keep the
+   * declared effect/risk. The classifier calls this; the args are untrusted model output, so an
+   * implementation must derive the classification only from host-side config keyed by them.
+   */
+  refine?(args: Record<string, unknown>, ctx: ToolContext): ToolClassification | null;
   run(args: T, ctx: ToolContext): Promise<ToolRunResult>;
   /**
    * Optional harness-injected read-back for a MUTATING tool. After a successful `run`, the executor

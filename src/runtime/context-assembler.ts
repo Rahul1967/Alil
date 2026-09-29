@@ -17,8 +17,10 @@ export function initialMessages(params: {
   skills: SkillRef[];
   worldState?: string | null;
   operatorProfile?: string | null;
+  /** Extra labeled blocks (e.g. the active lens's methods preview), rendered after current state. */
+  extraBlocks?: string[];
 }): ChatMessage[] {
-  const { input, recalled, skills, worldState, operatorProfile } = params;
+  const { input, recalled, skills, worldState, operatorProfile, extraBlocks } = params;
   const messages: ChatMessage[] = [];
 
   const contextBlocks: string[] = [];
@@ -32,6 +34,7 @@ export function initialMessages(params: {
   if (worldState) {
     contextBlocks.push(`[current state]\n${worldState}`);
   }
+  for (const block of extraBlocks ?? []) contextBlocks.push(block);
   // Files the operator attached this turn. Listed, not inlined — the model opens what it needs
   // with doc.read (pdf/docx/xlsx/csv) or fs.read (text), keeping large files off the hot path.
   if (input.attachments && input.attachments.length > 0) {

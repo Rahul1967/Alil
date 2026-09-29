@@ -91,6 +91,7 @@
     .dot.on { background: var(--op); color: var(--op); animation: pulse 2.6s ease-out infinite; }
     @keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--op) 55%, transparent); } 70%,100% { box-shadow: 0 0 0 6px transparent; } }
     .spacer { flex: 1; }
+    .lens-pick select { font: inherit; color: var(--ink); background: transparent; border: none; cursor: pointer; max-width: 12em; }
     .toggle { display: flex; gap: 3px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 3px; }
     .toggle button {
       height: 30px; padding: 0 14px; border: none; border-radius: 7px; background: transparent;
@@ -426,6 +427,9 @@
       <h1>alil<span class="k">.</span></h1>
     </div>
     <span class="readout"><span class="dot" id="dot"></span><span id="status">connecting…</span></span>
+    <label class="readout lens-pick" title="Lens: Alil's focus. Same memory and tools; stricter rules only.">lens
+      <select id="lensSelect"><option value="">none</option></select>
+    </label>
     <span class="spacer"></span>
     <div class="toggle">
       <button id="tabChat" class="active">Chat</button>

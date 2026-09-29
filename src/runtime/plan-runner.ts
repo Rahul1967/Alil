@@ -1,4 +1,4 @@
-import type { Planner } from "./planner.ts";
+import type { Planner, PlanMethod } from "./planner.ts";
 import type { WorldStore } from "../world/store.ts";
 import {
   type PlanNode,
@@ -33,6 +33,8 @@ export interface PlanRunnerDeps {
   approvePlan?: (nodes: PlanNode[]) => Promise<boolean>;
   /** Plan mode: decompose (and gate) only, execute nothing. Returns status "planned". */
   dryRun?: boolean;
+  /** Proven methods for the goal (procedural memory, lens-focused), shown to the planner. */
+  methods?: (goal: string) => Promise<PlanMethod[]>;
 }
 
 /**
@@ -55,7 +57,8 @@ export class PlanRunner {
     const taskId = this.#d.taskId ?? `task_${goal.slice(0, 24)}`;
     this.#d.world?.upsertTask({ id: taskId, goal, status: "planning", provenance: { origin: "model" } });
 
-    let nodes = capNodes(await this.#d.planner.decompose(goal), this.#limits.maxNodes);
+    const methods = this.#d.methods ? await this.#d.methods(goal).catch(() => []) : [];
+    let nodes = capNodes(await this.#d.planner.decompose(goal, methods), this.#limits.maxNodes);
     this.#d.observer?.onPlan?.(nodes);
 
     // Plan-level HITL: approve the whole DAG once before anything runs.

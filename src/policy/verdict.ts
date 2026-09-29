@@ -4,6 +4,8 @@ export interface Verdict {
   decision: Decision;
   reason: string;
   decidedBy: string; // e.g. "deny-rule", "hook:credential-block", "mode", "provenance"
+  /** Set on an `ask` from a `fresh` rule: a standing grant must not cover it. */
+  fresh?: boolean;
 }
 
 const RANK: Record<Decision, number> = { allow: 0, ask: 1, defer: 2, deny: 3 };

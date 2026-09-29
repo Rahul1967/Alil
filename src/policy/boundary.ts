@@ -6,6 +6,7 @@ import { classify } from "./classifier.ts";
 import { evaluate } from "./engine.ts";
 import { escalateForProvenance, isTainted } from "./provenance-check.ts";
 import { ask } from "./verdict.ts";
+import { applyRiskRaises } from "./rules.ts";
 import type { ToolRegistry } from "../execution/tools/registry.ts";
 import type { Executor } from "../execution/executor.ts";
 import type { ApprovalPort } from "./approval/types.ts";
@@ -37,6 +38,8 @@ export interface BoundaryDeps {
    * content binding is skipped; args + cwd binding still apply.
    */
   workspaceRoot?: string;
+  /** Optional: the active lens id, recorded on every decision (attribution — never a policy input). */
+  lensId?: () => string | null;
 }
 
 /**
@@ -56,8 +59,10 @@ export class PolicyBoundary implements ActionSink {
     const { tools, hooks } = this.#deps;
     const config = await this.#deps.rules.load();
 
-    // 1. Classify (unknown tool ⇒ forced ask).
-    const { action, unknown } = classify(proposed.action, tools);
+    // 1. Classify (unknown tool ⇒ forced ask), then apply rule-driven risk raises (raise-only).
+    const classified = classify(proposed.action, tools, this.#deps.executor.context);
+    const unknown = classified.unknown;
+    const action = applyRiskRaises(classified.action, config.rules);
 
     // 2. Pipeline verdict, then 3. provenance escalation.
     const base = unknown ? ask("classifier", `unknown tool "${action.tool}"`) : evaluate(action, config, hooks);
@@ -75,11 +80,22 @@ export class PolicyBoundary implements ActionSink {
     }
 
     // ask / defer → HITL.
-    return this.#requestAndAct(action, verdict.decision, verdict.decidedBy, verdict.reason);
+    return this.#requestAndAct(action, verdict.decision, verdict.decidedBy, verdict.reason, verdict.fresh === true);
   }
 
-  async #requestAndAct(action: ActionContract, decision: string, decidedBy: string, reason: string): Promise<ToolResult> {
+  async #requestAndAct(action: ActionContract, decision: string, decidedBy: string, reason: string, fresh = false): Promise<ToolResult> {
     const { approvals, grants } = this.#deps;
+
+    // Don't spend an approval on an action that can't run: arguments the tool would reject are an
+    // error now, before the operator is asked (the executor still re-validates after approval).
+    const tool = this.#deps.tools.get(action.tool);
+    if (tool) {
+      const v = tool.validate(action.args);
+      if (!v.ok) {
+        this.#record(action, decision, decidedBy, reason, "rejected:invalid-args", { error: v.error });
+        return { actionId: action.id, outcome: "error", summary: `invalid args: ${v.error}` };
+      }
+    }
 
     // Fail-closed: no approval channel ⇒ deny.
     if (!approvals) {
@@ -90,7 +106,8 @@ export class PolicyBoundary implements ActionSink {
     // A standing grant can cover this without prompting — but NOT for execute-effect or
     // high/critical-risk actions. Those (e.g. shell/rm) must be approved fresh every time; a
     // broad grant must never silently auto-approve a destructive command.
-    const grantable = action.effect !== "execute" && action.risk !== "high" && action.risk !== "critical";
+    // A `fresh` rule (e.g. a lens overlay) also opts out of grants: always ask anew.
+    const grantable = !fresh && action.effect !== "execute" && action.risk !== "high" && action.risk !== "critical";
     if (grants && grantable) {
       const g = grants.match(action);
       if (g) {
@@ -155,6 +172,7 @@ export class PolicyBoundary implements ActionSink {
       ...(action.provenance.taintedBy?.length ? { taintedBy: action.provenance.taintedBy } : {}),
       argsPreview: JSON.stringify(action.args).slice(0, 200),
       actionId: action.id,
+      ...(this.#deps.lensId?.() ? { lens: this.#deps.lensId() } : {}),
       ...extra,
     });
   }

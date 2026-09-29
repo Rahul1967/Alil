@@ -15,6 +15,11 @@ export class Executor {
     this.#ctx = ctx;
   }
 
+  /** The tool context (read by the classifier for operator-config-driven `refine`). */
+  get context(): ToolContext {
+    return this.#ctx;
+  }
+
   async execute(action: ActionContract, tool: AnyTool): Promise<ToolResult> {
     // Idempotency: a repeated action id returns the prior result without re-running.
     const prior = this.#done.get(action.id);

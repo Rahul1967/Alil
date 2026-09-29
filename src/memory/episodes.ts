@@ -10,7 +10,7 @@
  */
 import { randomUUID } from "node:crypto";
 import type { Database as DB, Statement } from "better-sqlite3";
-import type { Episode, EpisodeSummarizer, MemoryStore, Timeline } from "./types.ts";
+import type { Episode, EpisodeSummarizer, MemoryStore, Tagger, Timeline } from "./types.ts";
 import type { CanonicalPromoter } from "./promoter.ts";
 
 /** Default inactivity gap that closes an episode (30 min). */
@@ -94,6 +94,11 @@ export interface EpisodeManagerDeps {
   promoter?: CanonicalPromoter;
   /** Audit seam — fired when a closed episode is distilled into memory (a behavior-changing write). */
   onMemoryWrite?: (e: { episodeId: string; summary: string; salientFacts: string[]; lines: number; pinned: string[] }) => void;
+  /**
+   * Keyword tagger (the lens TagRegistry). Applied to the distilled summary + salient facts — the
+   * same text retagEpisodes() uses — so an episode's derived tags are always recomputable.
+   */
+  tagger?: () => Tagger;
 }
 
 export class EpisodeManager {
@@ -104,6 +109,7 @@ export class EpisodeManager {
   readonly #gapMs: number;
   readonly #promoter: CanonicalPromoter | undefined;
   readonly #onMemoryWrite: EpisodeManagerDeps["onMemoryWrite"];
+  readonly #tagger: EpisodeManagerDeps["tagger"];
 
   constructor(deps: EpisodeManagerDeps) {
     this.#episodes = new EpisodeStore(deps.db);
@@ -113,6 +119,7 @@ export class EpisodeManager {
     this.#gapMs = deps.gapMs ?? DEFAULT_GAP_MS;
     this.#promoter = deps.promoter;
     this.#onMemoryWrite = deps.onMemoryWrite;
+    this.#tagger = deps.tagger;
   }
 
   /** Call at the start of a turn. Rolls the episode over if idle; returns the active id. */
@@ -129,8 +136,10 @@ export class EpisodeManager {
     const lines = this.#timeline.range(closed.startSeq, closed.endSeq ?? closed.startSeq);
     if (lines.length === 0) return;
     const { summary, salientFacts } = await this.#summarizer.summarize(lines);
+    const lenses = [...new Set(lines.map((l) => l.lens).filter((l): l is string => !!l))];
+    const tags = this.#tagger ? [...new Set(this.#tagger()([summary, ...salientFacts].join("\n")))].sort() : [];
     // Gated/audited memory.write: distilling an episode changes future behavior.
-    await this.#store.index({ ...closed, summary, salientFacts }, lines);
+    await this.#store.index({ ...closed, summary, salientFacts, tags, lenses }, lines);
     // Canonical auto-write: promote durable, trusted facts from this episode.
     const pinned = this.#promoter ? (await this.#promoter.promoteFromLines(lines)).map((f) => f.key) : [];
     this.#onMemoryWrite?.({ episodeId: closed.id, summary, salientFacts, lines: lines.length, pinned });

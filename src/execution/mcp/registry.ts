@@ -2,8 +2,9 @@ import type {
   McpTransport, McpServerConfig, McpToolDef, McpCallResult, McpReliability, McpSearchHit,
   McpBatchStep, McpBatchResult, McpBatchStepResult,
 } from "./types.ts";
-import { DEFAULT_MCP_RELIABILITY, classifyMcpTool } from "./types.ts";
+import { DEFAULT_MCP_RELIABILITY, classifyMcpTool, parsePinned } from "./types.ts";
 import { createHash } from "node:crypto";
+import type { Effect, Risk } from "../../core/types.ts";
 
 /** Factory that builds a transport for a server config — the SDK adapter in prod, a mock in tests.
  * `onListChanged` lets a server's tools/list_changed notification invalidate the cached schemas. */
@@ -107,7 +108,7 @@ export class McpRegistry {
    * is loaded. Deterministic BM25-lite scoring over each tool's name+description (local, no model).
    * Returns name + one-liner only — cheap by design (the schema is fetched later via inspect).
    */
-  async search(query: string, limit = 8): Promise<McpSearchHit[]> {
+  async search(query: string, limit = 8, opts: { boostServers?: string[] } = {}): Promise<McpSearchHit[]> {
     // Ensure every ENABLED, reachable server is listed at least once (skip disabled + open-circuit).
     for (const server of this.#configs.keys()) {
       if (!this.#enabled(server) || this.#circuitOpen(server)) continue;
@@ -116,7 +117,13 @@ export class McpRegistry {
     // Only rank tools from currently-enabled servers (a server disabled after caching is excluded).
     const terms = tokenize(query);
     const tools = this.#allCachedTools().filter((t) => this.#enabled(t.server));
-    const scored = tools.map((t) => ({ t, score: bm25Lite(terms, `${t.name} ${t.description}`) }));
+    // A lens's servers rank first among matches (a boost on real matches — it never adds a
+    // non-matching tool, and a disabled server stays invisible).
+    const boost = new Set(opts.boostServers ?? []);
+    const scored = tools.map((t) => {
+      const base = bm25Lite(terms, `${t.name} ${t.description}`);
+      return { t, score: base > 0 && boost.has(t.server) ? base * 1.5 : base };
+    });
     return scored
       .filter((s) => s.score > 0)
       .sort((a, b) => b.score - a.score)
@@ -135,10 +142,20 @@ export class McpRegistry {
     return def;
   }
 
+  /**
+   * The operator-pinned classification for a tool (config `tools`), or null. Synchronous and
+   * config-only — no connect, no server input — so the boundary can consult it at classify time.
+   */
+  pinned(server: string, name: string): { effect: Effect; risk: Risk; reversible: boolean } | null {
+    const cfg = this.#configs.get(server);
+    if (!cfg || cfg.enabled === false || !cfg.tools || !Object.hasOwn(cfg.tools, name)) return null;
+    return parsePinned(cfg.tools[name]);
+  }
+
   /** Effect/risk classification for a tool, so mcp.call can build the ActionContract for the boundary. */
   async classify(server: string, name: string): Promise<{ effect: string; risk: string; reversible: boolean }> {
     const def = await this.inspect(server, name);
-    return classifyMcpTool(def, this.#configs.get(server)?.minEffect);
+    return this.pinned(server, name) ?? classifyMcpTool(def, this.#configs.get(server)?.minEffect);
   }
 
   /**

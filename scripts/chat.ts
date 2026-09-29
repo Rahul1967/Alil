@@ -10,7 +10,7 @@
  */
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import { createAlil, debugEnabled } from "../src/app/index.ts";
+import { createAlil, debugEnabled, handleLensCommand } from "../src/app/index.ts";
 import type { ChannelBinding } from "../src/app/index.ts";
 import type { ApprovalPort, ApprovalRequest, ApprovalDecision } from "../src/policy/index.ts";
 import type { BrainObserver } from "../src/runtime/types.ts";
@@ -71,7 +71,7 @@ const binding: ChannelBinding = {
 
 const alil = createAlil({ modelId, debug }, binding);
 alil.start();
-console.log(`Alil terminal channel · model: ${modelId} · memory: ${alil.memoryOn ? "on" : "off"}${debug ? " · debug: on" : ""}`);
+console.log(`Alil terminal channel · model: ${modelId} · memory: ${alil.memoryOn ? "on" : "off"} · lens: ${alil.lenses.activeId() ?? "none"}${debug ? " · debug: on" : ""}`);
 
 // ── REPL loop ───────────────────────────────────────────────────────────────
 let current: AbortController | null = null;
@@ -116,6 +116,11 @@ for (;;) {
   const planMatch = text.match(/^\/plan(-dry)?\s+([\s\S]+)$/);
   if (planMatch) {
     await runPlan(planMatch[2]!.trim(), planMatch[1] === "-dry").catch((e) => console.log(`  [plan error] ${(e as Error).message}\n`));
+    continue;
+  }
+  const lensReply = await handleLensCommand(alil, text);
+  if (lensReply !== null) {
+    console.log(`  ${lensReply.replace(/\n/g, "\n  ")}\n`);
     continue;
   }
   if (text.startsWith("/event ")) {

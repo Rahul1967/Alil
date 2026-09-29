@@ -18,6 +18,11 @@ export interface DossierStoreOptions {
   /** Max chars in the always-on operator preamble (~4 chars/token). Default 1600 (~400 tokens). */
   preambleMaxChars?: number;
   /**
+   * Tag normalizer shared with every other tier (the lens TagRegistry), so a lens's synonyms apply
+   * to dossier tags too. Default: the built-in normalizeTags.
+   */
+  normalizeTags?: (tags: string[]) => string[];
+  /**
    * Milliseconds to wait for the cross-process write lock before failing closed. Default 5000.
    * A single logical mutation is fast, so a caller blocked this long means another process is
    * genuinely writing (or a stale lock remains after a crash — see `.dossier.lock`).
@@ -54,12 +59,14 @@ export class DossierStore {
   readonly #root: string;
   readonly #now: () => Date;
   readonly #preambleMax: number;
+  readonly #normalizeTags: (tags: string[]) => string[];
   readonly #lockTimeoutMs: number;
 
   constructor(opts: DossierStoreOptions) {
     this.#root = opts.root;
     this.#now = opts.now ?? (() => new Date());
     this.#preambleMax = opts.preambleMaxChars ?? DEFAULT_PREAMBLE_MAX;
+    this.#normalizeTags = opts.normalizeTags ?? normalizeTags;
     this.#lockTimeoutMs = opts.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
   }
 
@@ -134,7 +141,7 @@ export class DossierStore {
       title: input.title,
       slug,
       ...(input.description ? { description: input.description } : {}),
-      tags: normalizeTags(input.tags ?? []),
+      tags: this.#normalizeTags(input.tags ?? []),
       status: input.status ?? "active",
       ...(input.confidence ? { confidence: input.confidence } : {}),
       provenance: provenance.origin,
@@ -166,7 +173,7 @@ export class DossierStore {
       ...(patch.frontmatter ?? {}),
       slug: f.frontmatter.slug, // slug is immutable identity
       type: f.frontmatter.type,
-      tags: normalizeTags((patch.frontmatter?.["tags"] as string[]) ?? f.frontmatter.tags),
+      tags: this.#normalizeTags((patch.frontmatter?.["tags"] as string[]) ?? f.frontmatter.tags),
       provenance: provenance.origin,
       updated: this.#today(),
     };
@@ -206,17 +213,38 @@ export class DossierStore {
    * block injected every turn (like the world state block). Capped so it can't re-bloat context.
    * Returns null when neither singleton exists yet.
    */
-  operatorPreamble(): string | null {
+  operatorPreamble(lens?: { title: string; tags: string[] } | null): string | null {
     const identity = this.get("identity");
     const prefs = this.get("preferences");
-    if (!identity && !prefs) return null;
+    const slice = lens ? this.lensSlice(lens.tags) : null;
+    if (!identity && !prefs && !slice) return null;
     const parts: string[] = [];
     if (identity) parts.push(bodyContent(identity.body));
     if (prefs && prefs.frontmatter.confidence !== "low") parts.push(bodyContent(prefs.body));
     let text = parts.filter(Boolean).join("\n").trim();
-    if (!text) return null;
     if (text.length > this.#preambleMax) text = text.slice(0, this.#preambleMax).trimEnd() + " …";
-    return text;
+    if (slice) text = `${text}${text ? "\n\n" : ""}Relevant to the active lens (${lens!.title}) — open with dossier.read:\n${slice}`;
+    return text || null;
+  }
+
+  /**
+   * A capped index of the dossier files tagged with any of `tags` (active, not low-confidence): one
+   * line per file (slug, title, description) — pointers, not bodies, so the lens adds orientation
+   * without re-bloating context. Null when nothing matches.
+   */
+  lensSlice(tags: string[], maxFiles = 8, maxChars = 800): string | null {
+    if (tags.length === 0) return null;
+    const lines: string[] = [];
+    let used = 0;
+    for (const f of this.query({ tagsAny: tags, status: "active" })) {
+      const fm = f.frontmatter;
+      if (fm.confidence === "low" || fm.type === "event" || fm.type === "index" || fm.type === "identity" || fm.type === "preferences") continue;
+      const line = `- ${fm.slug} (${fm.type}): ${fm.title}${fm.description ? ` — ${fm.description}` : ""}`;
+      if (lines.length >= maxFiles || used + line.length > maxChars) break;
+      lines.push(line);
+      used += line.length;
+    }
+    return lines.length > 0 ? lines.join("\n") : null;
   }
 
   // ── Trajectory layer: event files + the timeline projection (DESIGN §09) ─────

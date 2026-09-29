@@ -74,6 +74,44 @@ export interface McpServerConfig {
   timeoutMs?: number;
   /** Effect ceiling: even if a tool claims read-only, never classify below this. Optional hardening. */
   minEffect?: Effect;
+  /**
+   * OPERATOR-pinned classification per tool name. This is the only way an mcp.call can be anything
+   * other than execute/high: a server's own annotations (readOnlyHint) are untrusted and never
+   * lower it. Pin a quote lookup as `{effect:"read", risk:"low"}` to let it run unprompted, or a
+   * trade as `{effect:"spend", risk:"critical"}` so it is always asked fresh.
+   */
+  tools?: Record<string, McpPinnedClassification>;
+}
+
+/** An operator-pinned MCP tool classification (config/mcp.json `tools`). */
+export interface McpPinnedClassification {
+  effect: Effect;
+  risk: Risk;
+  reversible?: boolean;
+}
+
+const EFFECTS: readonly Effect[] = ["read", "network", "write", "execute", "spend"];
+const RISKS: readonly Risk[] = ["low", "medium", "high", "critical"];
+
+/** Validate a pinned classification from config. Invalid ⇒ null (the conservative default stands). */
+export function parsePinned(v: unknown): { effect: Effect; risk: Risk; reversible: boolean } | null {
+  if (typeof v !== "object" || v === null) return null;
+  const o = v as Record<string, unknown>;
+  if (!EFFECTS.includes(o["effect"] as Effect) || !RISKS.includes(o["risk"] as Risk)) return null;
+  return { effect: o["effect"] as Effect, risk: o["risk"] as Risk, reversible: o["reversible"] === true };
+}
+
+/** Combine per-step classifications into the strictest one (for mcp.batch). */
+export function strictestClassification(list: { effect: Effect; risk: Risk; reversible: boolean }[]): { effect: Effect; risk: Risk; reversible: boolean } {
+  let effect: Effect = "read";
+  let risk: Risk = "low";
+  let reversible = true;
+  for (const c of list) {
+    if (EFFECTS.indexOf(c.effect) > EFFECTS.indexOf(effect)) effect = c.effect;
+    if (RISKS.indexOf(c.risk) > RISKS.indexOf(risk)) risk = c.risk;
+    reversible &&= c.reversible;
+  }
+  return { effect, risk, reversible };
 }
 
 /** Reliability knobs for mcp.call (effect-aware retry, backoff, circuit breaker). */

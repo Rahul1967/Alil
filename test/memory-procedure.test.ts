@@ -127,7 +127,7 @@ test("tools: effects/gating are correct and wired to the store", async () => {
     assert.equal(memoryProcedureSearch.validate({ task: "" }).ok, false);
 
     const created = await memoryProcedureCreate.run(
-      { name: "backup.db", trigger: "backing up the sqlite memory file", abstract_method: "copy the WAL-checkpointed db", verbatim_steps: "1. checkpoint\n2. cp memory.db backup/", evidence: "ran 2026-08-24" },
+      { name: "backup.db", trigger: "backing up the sqlite memory file", abstract_method: "copy the WAL-checkpointed db", verbatim_steps: "1. checkpoint\n2. cp memory.db backup/", evidence: "ran 2026-08-24", tags: ["admin"] },
       ctx,
     );
     assert.match(created.summary, /saved procedure 'backup.db'/);
@@ -146,5 +146,5 @@ test("tools: effects/gating are correct and wired to the store", async () => {
 test("procedure tools fail gracefully without memory", async () => {
   const ctx: ToolContext = { sandbox: new Sandbox(tmpdir()) };
   await assert.rejects(memoryProcedureSearch.run({ task: "x", k: 3 }, ctx), /memory is not available/);
-  await assert.rejects(memoryProcedureCreate.run({ name: "a", trigger: "b", abstract_method: "c", verbatim_steps: "d", evidence: "" }, ctx), /memory is not available/);
+  await assert.rejects(memoryProcedureCreate.run({ name: "a", trigger: "b", abstract_method: "c", verbatim_steps: "d", evidence: "", tags: ["x"] }, ctx), /memory is not available/);
 });

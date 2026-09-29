@@ -1,10 +1,12 @@
 import type { ToolImpl, ToolContext, ValidateResult, ToolRunResult } from "./types.ts";
 import type { CanonicalKind } from "../../memory/types.ts";
+import { activeLens, readTags, tagRegistry } from "./lens-context.ts";
 
 interface MemoryWriteArgs {
   key: string;
   kind: CanonicalKind;
   text: string;
+  tags?: string[];
 }
 
 // The model may only write user-facing facts — never its own operating manual (kind
@@ -27,6 +29,7 @@ export const memoryWrite: ToolImpl<MemoryWriteArgs> = {
       key: { type: "string", description: "Stable identifier, e.g. 'user.name' or 'rule.tone'." },
       kind: { type: "string", enum: ["preference", "rule"], description: "'preference' (user fact) or 'rule' (standing instruction)." },
       text: { type: "string", description: "The fact, phrased as a durable statement, e.g. \"The user's name is Rahul Jain.\"" },
+      tags: { type: "array", items: { type: "string" }, description: "Optional domain tags. A tagged fact is shown to you only while a lens with a matching tag is active — use for domain-only rules; leave empty for facts that always apply." },
     },
     required: ["key", "text"],
     additionalProperties: false,
@@ -44,13 +47,16 @@ export const memoryWrite: ToolImpl<MemoryWriteArgs> = {
     if (typeof kindRaw !== "string" || !WRITABLE_KINDS.has(kindRaw as CanonicalKind)) {
       return { ok: false, error: "memory.write `kind` must be 'preference' or 'rule'" };
     }
-    return { ok: true, value: { key: key.trim(), kind: kindRaw as CanonicalKind, text: text.trim() } };
+    const tags = readTags(args["tags"], "memory.write");
+    if (!tags.ok) return tags;
+    return { ok: true, value: { key: key.trim(), kind: kindRaw as CanonicalKind, text: text.trim(), ...(tags.tags?.length ? { tags: tags.tags } : {}) } };
   },
 
   async run(args: MemoryWriteArgs, ctx: ToolContext): Promise<ToolRunResult> {
     const store = ctx.memory?.store;
     if (!store) throw new Error("memory is not available");
-    await store.upsertFact({ key: args.key, kind: args.kind, text: args.text, provenance: { origin: "operator" } });
-    return { summary: `remembered ${args.key} (${args.kind}): ${args.text}` };
+    const tags = args.tags ? tagRegistry(ctx).normalizeAll(args.tags) : [];
+    await store.upsertFact({ key: args.key, kind: args.kind, text: args.text, provenance: { origin: "operator" }, tags, lens: activeLens(ctx)?.id ?? null });
+    return { summary: `remembered ${args.key} (${args.kind}): ${args.text}${tags.length ? ` [${tags.join(", ")}]` : ""}` };
   },
 };

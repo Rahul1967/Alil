@@ -9,7 +9,10 @@ export * from "./verdict.ts";
 export {
   YamlRuleSource,
   StaticRuleSource,
+  LayeredRuleSource,
   ruleApplies,
+  applyRiskRaises,
+  validateRuleExtras,
 } from "./rules.ts";
 export type {
   RuleSource,

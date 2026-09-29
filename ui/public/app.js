@@ -200,6 +200,24 @@ function setTurnWaiting(waiting) {
   }
 }
 
+// ── Lens switcher: an operator action (this page), recorded in the audit ledger ─────────────
+const lensSelect = document.getElementById("lensSelect");
+async function loadLenses() {
+  try {
+    const j = await (await fetch("/api/lens")).json();
+    lensSelect.replaceChildren(new Option("none", ""));
+    for (const l of j.lenses || []) lensSelect.appendChild(new Option(l.title + (l.policyRules ? " 🔒" : ""), l.id));
+    lensSelect.value = j.active || "";
+    lensSelect.title = (j.errors || []).map((e) => e.error).join("\n") || "";
+  } catch { /* server unreachable — health() reports it */ }
+}
+lensSelect.addEventListener("change", async () => {
+  const r = await fetch("/api/lens", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: lensSelect.value || null }) });
+  if (!r.ok) alert((await r.json()).error || "could not switch lens");
+  await loadLenses();
+});
+loadLenses();
+
 async function health() {
   try {
     const r = await fetch("/api/health");
@@ -476,9 +494,12 @@ function renderProcedure(p) {
   const meta = el("div", "meta");
   meta.appendChild(el("span", "tag operator", "procedure"));
   meta.appendChild(el("span", "key", p.name));
-  meta.appendChild(el("span", "muted", "v" + p.version + " · used " + p.uses + "×"));
+  meta.appendChild(el("span", "muted", "v" + p.version + " · used " + p.uses + "×" + (p.successes + p.failures > 0 ? " · " + p.successes + " worked / " + p.failures + " failed" : "")));
+  if (p.status === "deprecated") meta.appendChild(el("span", "tag tainted", "deprecated"));
+  if (p.lens) meta.appendChild(el("span", "tag", "lens: " + p.lens));
   meta.appendChild(provTag(p.provenance));
   card.appendChild(meta);
+  if (p.tags && p.tags.length) card.appendChild(el("div", "meta muted", "tags: " + p.tags.join(", ")));
   card.appendChild(el("div", "meta muted", "when: " + p.trigger));
   card.appendChild(el("div", "body", p.method));
   if (p.steps) card.appendChild(el("div", "meta muted", "steps: " + p.steps));

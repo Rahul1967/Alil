@@ -37,7 +37,7 @@ export function escalateForProvenance(verdict: Verdict, action: ActionContract):
     if (dangerous) {
       return { decision: "deny", reason: note(verdict.reason), decidedBy: "provenance" };
     }
-    return { decision: "ask", reason: note(verdict.reason), decidedBy: "provenance" };
+    return { decision: "ask", reason: note(verdict.reason), decidedBy: "provenance", ...(verdict.fresh ? { fresh: true } : {}) };
   }
   return verdict; // deny/defer unchanged
 }

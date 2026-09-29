@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS timeline (
   role         TEXT NOT NULL,
   text         TEXT,
   tool_calls   TEXT,
-  tool_results TEXT
+  tool_results TEXT,
+  lens         TEXT                        -- active lens id when the line was written (null = none)
 );
 
 -- Time-bounded slices (housekeeping, not identity).
@@ -29,7 +30,9 @@ CREATE TABLE IF NOT EXISTS episodes (
   started_at    TEXT NOT NULL,
   ended_at      TEXT,
   summary       TEXT,
-  salient_facts TEXT
+  salient_facts TEXT,
+  tags          TEXT NOT NULL DEFAULT '[]', -- keyword-derived tags: a rebuildable projection
+  lenses        TEXT NOT NULL DEFAULT '[]'  -- lens ids active during the episode
 );
 
 -- Durable pinned facts (always in context). The key column enables upsert (a changed
@@ -41,7 +44,9 @@ CREATE TABLE IF NOT EXISTS canonical (
   text       TEXT NOT NULL,
   provenance TEXT NOT NULL,
   source     TEXT,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  tags       TEXT NOT NULL DEFAULT '[]',   -- tagged facts render only while a matching lens is active
+  lens       TEXT                          -- lens stamp: where the fact was learned
 );
 CREATE UNIQUE INDEX IF NOT EXISTS canonical_key ON canonical(key) WHERE key IS NOT NULL;
 
@@ -61,7 +66,12 @@ CREATE TABLE IF NOT EXISTS procedure (
   version         INTEGER NOT NULL DEFAULT 1,
   provenance      TEXT NOT NULL,
   created_at      TEXT NOT NULL,
-  updated_at      TEXT NOT NULL
+  updated_at      TEXT NOT NULL,
+  tags            TEXT NOT NULL DEFAULT '[]', -- what the method is about (approved with the write)
+  lens            TEXT,                       -- lens stamp: where it was learned (harness-applied)
+  status          TEXT NOT NULL DEFAULT 'active', -- active | deprecated
+  successes       INTEGER NOT NULL DEFAULT 0,
+  failures        INTEGER NOT NULL DEFAULT 0
 );
 
 -- Prospective memory: future-directed intentions (remember to act later). A scheduler polls
@@ -85,7 +95,8 @@ CREATE TABLE IF NOT EXISTS intention (
   created_at   INTEGER NOT NULL,
   fired_at     INTEGER,
   attempts     INTEGER NOT NULL DEFAULT 0,
-  provenance   TEXT NOT NULL
+  provenance   TEXT NOT NULL,
+  lens         TEXT                         -- lens the intention was created under; fires in it
 );
 CREATE UNIQUE INDEX IF NOT EXISTS intention_dedup ON intention(dedup_key) WHERE dedup_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS intention_due ON intention(status, fire_at);

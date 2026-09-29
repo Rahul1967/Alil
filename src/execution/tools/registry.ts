@@ -18,6 +18,8 @@ import { memoryProcedureSearch } from "./memory-procedure-search.ts";
 import { memoryProcedureFetch } from "./memory-procedure-fetch.ts";
 import { memoryProcedureCreate } from "./memory-procedure-create.ts";
 import { memoryProcedureUpdate } from "./memory-procedure-update.ts";
+import { memoryProcedureOutcome } from "./memory-procedure-outcome.ts";
+import { lensCreate } from "./lens-create.ts";
 import { remindCreate } from "./remind-create.ts";
 import { remindList } from "./remind-list.ts";
 import { remindCancel } from "./remind-cancel.ts";
@@ -76,6 +78,7 @@ export const DEFAULT_TOOLS: AnyTool[] = [
   memoryProcedureFetch,
   memoryProcedureCreate,
   memoryProcedureUpdate,
+  memoryProcedureOutcome,
   remindCreate,
   remindList,
   remindCancel,
@@ -96,4 +99,5 @@ export const DEFAULT_TOOLS: AnyTool[] = [
   mcpInspect,
   mcpCall,
   mcpBatch,
+  lensCreate,
 ];

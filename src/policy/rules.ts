@@ -10,12 +10,20 @@ export interface RuleMatch {
   effect?: Effect;
   pathGlob?: string; // matched against args.path
   minRisk?: Risk;
+  /** arg name → glob, matched against that STRING arg (e.g. MCP `server` / `name`). A missing or
+   * non-string arg never matches. */
+  args?: Record<string, string>;
 }
 
 export interface PolicyRule {
   kind: "deny" | "ask" | "allow";
   match: RuleMatch;
   note: string;
+  /** Raise a matched action's risk to at least this level (never lowers). `critical` makes the
+   * action non-grantable and hard-denied when tainted. */
+  raiseRisk?: Risk;
+  /** On an `ask` rule: a standing grant can never cover the matched action — ask fresh each time. */
+  fresh?: boolean;
 }
 
 export interface PolicyConfig {
@@ -40,7 +48,44 @@ export function ruleApplies(rule: PolicyRule, action: ActionContract): boolean {
     const path = action.args["path"];
     if (typeof path !== "string" || !globMatch(m.pathGlob, path)) return false;
   }
+  if (m.args !== undefined) {
+    for (const [key, glob] of Object.entries(m.args)) {
+      const v = action.args[key];
+      if (typeof v !== "string" || !globMatch(glob, v)) return false;
+    }
+  }
   return true;
+}
+
+/** The action with its risk raised by every matching `raiseRisk` rule. Only ever raises. */
+export function applyRiskRaises(action: ActionContract, rules: PolicyRule[]): ActionContract {
+  let risk = action.risk;
+  for (const r of rules) {
+    if (r.raiseRisk !== undefined && RISK_RANK[r.raiseRisk] > RISK_RANK[risk] && ruleApplies(r, action)) risk = r.raiseRisk;
+  }
+  return risk === action.risk ? action : { ...action, risk };
+}
+
+/**
+ * Base policy plus a runtime-switchable overlay (e.g. the active lens's rules). TIGHTEN-ONLY by
+ * construction: only `deny` and `ask` overlay rules are kept, the base mode is never changed, and
+ * overlay rules are appended — under deny > ask > allow precedence an added deny/ask can only make
+ * a decision stricter. Callers validate overlays on load too; the filter here is defense in depth.
+ */
+export class LayeredRuleSource implements RuleSource {
+  readonly #base: RuleSource;
+  readonly #overlay: () => PolicyRule[];
+
+  constructor(base: RuleSource, overlay: () => PolicyRule[]) {
+    this.#base = base;
+    this.#overlay = overlay;
+  }
+
+  async load(): Promise<PolicyConfig> {
+    const base = await this.#base.load();
+    const extra = this.#overlay().filter((r) => (r.kind === "deny" || r.kind === "ask") && r.match && typeof r.match === "object");
+    return extra.length === 0 ? base : { mode: base.mode, rules: [...base.rules, ...extra] };
+  }
 }
 
 /** Loads policy from a YAML file. Fail-closed: a malformed/absent file throws. */
@@ -84,6 +129,25 @@ function validate(cfg: PolicyConfig | null): PolicyConfig {
     if (!r.match || typeof r.match !== "object") {
       throw new Error(`policy: rule "${r.note ?? ""}" missing match`);
     }
+    validateRuleExtras(r, "policy");
   }
   return cfg;
+}
+
+const RISKS: Risk[] = ["low", "medium", "high", "critical"];
+
+/** Shape checks for the optional rule fields (shared with the lens overlay loader). Throws. */
+export function validateRuleExtras(r: PolicyRule, where: string): void {
+  if (r.raiseRisk !== undefined && !RISKS.includes(r.raiseRisk)) {
+    throw new Error(`${where}: rule "${r.note ?? ""}" has invalid raiseRisk "${String(r.raiseRisk)}"`);
+  }
+  if (r.fresh !== undefined && typeof r.fresh !== "boolean") {
+    throw new Error(`${where}: rule "${r.note ?? ""}" fresh must be a boolean`);
+  }
+  const args = r.match.args;
+  if (args !== undefined) {
+    if (typeof args !== "object" || args === null || Array.isArray(args) || Object.values(args).some((v) => typeof v !== "string")) {
+      throw new Error(`${where}: rule "${r.note ?? ""}" match.args must map arg names to glob strings`);
+    }
+  }
 }

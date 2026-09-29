@@ -1,5 +1,6 @@
 import type { ToolImpl, ToolContext, ValidateResult, ToolRunResult } from "./types.ts";
 import type { McpBatchStep } from "../mcp/types.ts";
+import { strictestClassification } from "../mcp/types.ts";
 
 interface McpBatchArgs {
   steps: McpBatchStep[];
@@ -46,6 +47,21 @@ export const mcpBatch: ToolImpl<McpBatchArgs> = {
   effect: "execute",
   risk: "high",
   reversible: false,
+
+  // Relaxed only when EVERY step is operator-pinned; the batch takes the strictest step's class.
+  refine(args, ctx) {
+    const registry = ctx.mcp?.registry;
+    const steps = args["steps"];
+    if (!registry || !Array.isArray(steps) || steps.length === 0) return null;
+    const classes = [];
+    for (const s of steps) {
+      const o = (typeof s === "object" && s !== null ? s : {}) as Record<string, unknown>;
+      const pinned = typeof o["server"] === "string" && typeof o["name"] === "string" ? registry.pinned(o["server"], o["name"]) : null;
+      if (!pinned) return null;
+      classes.push(pinned);
+    }
+    return strictestClassification(classes);
+  },
 
   validate(args): ValidateResult<McpBatchArgs> {
     const steps = args["steps"];

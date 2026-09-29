@@ -2,6 +2,7 @@ import { Cron } from "croner";
 import type { ToolImpl, ToolContext, ValidateResult, ToolRunResult } from "./types.ts";
 import type { NewIntention, EventMatch, IntentionTrigger, IntentionKind } from "../../memory/types.ts";
 import { INTENTION_KINDS } from "../../memory/types.ts";
+import { activeLens } from "./lens-context.ts";
 
 interface RemindCreateArgs {
   title: string;
@@ -173,6 +174,8 @@ export const remindCreate: ToolImpl<RemindCreateArgs> = {
       // window (e.g. the user never chats on Oct 5), it lapses instead of lingering forever.
       ...(args.expiresAt ? { expiresAt: Date.parse(args.expiresAt) } : args.event?.before !== undefined ? { expiresAt: args.event.before } : {}),
       ...(args.dedupKey ? { dedupKey: args.dedupKey } : {}),
+      // Lens stamp (harness-applied): the intention fires back in the lens it was created under.
+      lens: activeLens(ctx)?.id ?? null,
     };
     const { intention, created } = store.create(n);
     if (!created) return { summary: `already scheduled (dedup): "${intention.title}"`, data: { id: intention.id, created: false } };

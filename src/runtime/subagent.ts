@@ -68,6 +68,12 @@ export interface SubagentRunnerDeps {
   world?: WorldPort;
   /** System prompt for subagents. Defaults to a concise scoped-worker prompt. */
   prompt?: PromptPort;
+  /**
+   * Extra prompt appended to the default subagent prompt, read per run — e.g. the active lens's
+   * stance. Subagents inherit a lens's FOCUS this way, never its authority (the tool grant is
+   * still a subset of the parent's, enforced by ScopedActionSink).
+   */
+  promptSuffix?: () => string | null;
   /** Max subagents running at once in runMany. Default 4. */
   maxConcurrency?: number;
   observer?: (label: string) => BrainObserver | undefined;
@@ -104,7 +110,12 @@ export class SubagentRunner {
       memory: { recall: async () => [] }, // subagents don't get the parent's recall push
       skills: { eligible: async () => [] },
       tools: new ScopedToolCatalog(this.#d.catalog, allowed),
-      prompt: this.#d.prompt ?? { system: async () => SUBAGENT_PROMPT },
+      prompt: this.#d.prompt ?? {
+        system: async () => {
+          const suffix = this.#d.promptSuffix?.();
+          return suffix ? `${SUBAGENT_PROMPT}\n\n${suffix}` : SUBAGENT_PROMPT;
+        },
+      },
       actions: new ScopedActionSink(this.#d.boundary, allowed),
       ...(this.#d.world ? { world: this.#d.world } : {}),
       ...(this.#d.observer?.(spec.label ?? spec.goal) ? { observer: this.#d.observer(spec.label ?? spec.goal)! } : {}),

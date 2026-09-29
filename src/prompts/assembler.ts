@@ -8,6 +8,11 @@ export interface AssemblerOptions {
   env?: EnvContext;
   /** Standing knowledge (canonical memory), read live each turn and rendered as sections. */
   knowledge?: KnowledgeSource;
+  /**
+   * The active lens's prompt layer (DESIGN §10b), read live each turn; null ⇒ no lens. Rendered
+   * after the persona — the safety-critical base prompt always comes first.
+   */
+  lens?: () => string | null;
 }
 
 /**
@@ -20,18 +25,22 @@ export class PromptAssembler implements PromptPort {
   readonly #base: string;
   readonly #env?: EnvContext;
   readonly #knowledge?: KnowledgeSource;
+  readonly #lens?: () => string | null;
 
   constructor(persona: PersonaSource = new StaticPersonaSource(), opts: AssemblerOptions = {}) {
     this.#persona = persona;
     this.#base = opts.base ?? BASE_SYSTEM_PROMPT;
     this.#env = opts.env;
     this.#knowledge = opts.knowledge;
+    if (opts.lens) this.#lens = opts.lens;
   }
 
   async system(): Promise<string> {
     let prompt = this.#base;
     const persona = await this.#persona.load();
     if (persona) prompt += `\n\n## Persona\n${persona}`;
+    const lens = this.#lens?.();
+    if (lens) prompt += `\n\n${lens}`;
     // Standing knowledge (canonical memory), live each turn.
     if (this.#knowledge) {
       for (const section of await this.#knowledge.sections()) {

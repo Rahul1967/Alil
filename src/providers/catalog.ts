@@ -2,8 +2,8 @@ import type { ModelSpec } from "./types.ts";
 
 /**
  * The model catalog. Plain data — edit this to add/remove models.
- * Pricing figures are placeholders pending confirmation against current provider pricing.
- * TODO(pricing): verify inputPerMTok/outputPerMTok against provider pricing pages.
+ * Pricing is Anthropic first-party list price per million tokens (2026-09). Bedrock bills
+ * separately; first-party rates stand in for it so the per-turn cost guard can actually trip.
  */
 export const CATALOG: readonly ModelSpec[] = [
   {
@@ -12,7 +12,7 @@ export const CATALOG: readonly ModelSpec[] = [
     displayName: "Claude Fable 5",
     contextWindow: 200_000,
     maxOutputTokens: 64_000,
-    pricing: { inputPerMTok: 0, outputPerMTok: 0 }, // TODO(pricing)
+    pricing: { inputPerMTok: 10, outputPerMTok: 50 },
     capabilities: { tools: true, streaming: true, vision: true },
   },
   {
@@ -21,7 +21,7 @@ export const CATALOG: readonly ModelSpec[] = [
     displayName: "Claude Opus 4.8",
     contextWindow: 200_000,
     maxOutputTokens: 32_000,
-    pricing: { inputPerMTok: 0, outputPerMTok: 0 }, // TODO(pricing)
+    pricing: { inputPerMTok: 5, outputPerMTok: 25 },
     capabilities: { tools: true, streaming: true, vision: true },
   },
   {
@@ -30,7 +30,7 @@ export const CATALOG: readonly ModelSpec[] = [
     displayName: "Claude Haiku 4.5",
     contextWindow: 200_000,
     maxOutputTokens: 32_000,
-    pricing: { inputPerMTok: 0, outputPerMTok: 0 }, // TODO(pricing)
+    pricing: { inputPerMTok: 1, outputPerMTok: 5 },
     capabilities: { tools: true, streaming: true, vision: false },
   },
 
@@ -42,7 +42,7 @@ export const CATALOG: readonly ModelSpec[] = [
     displayName: "Claude Sonnet 5 (Bedrock)",
     contextWindow: 200_000,
     maxOutputTokens: 8_192,
-    pricing: { inputPerMTok: 0, outputPerMTok: 0 }, // TODO(pricing)
+    pricing: { inputPerMTok: 2, outputPerMTok: 10 },
     capabilities: { tools: true, streaming: true, vision: true },
   },
 ];

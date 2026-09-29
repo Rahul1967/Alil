@@ -39,6 +39,14 @@ export const mcpCall: ToolImpl<McpCallArgs> = {
   risk: "high",
   reversible: false,
 
+  // Operator-pinned classification (config/mcp.json `tools`) is the ONLY way to relax the default.
+  refine(args, ctx) {
+    const server = args["server"];
+    const name = args["name"];
+    if (typeof server !== "string" || typeof name !== "string") return null;
+    return ctx.mcp?.registry?.pinned(server, name) ?? null;
+  },
+
   validate(args): ValidateResult<McpCallArgs> {
     const server = args["server"];
     const name = args["name"];

@@ -21,6 +21,8 @@ export interface TimelineLine {
   text?: string;
   toolCalls?: unknown;
   toolResults?: unknown;
+  /** Active lens id when the line was written (absent = no lens). */
+  lens?: string;
 }
 
 /** A line before the store assigns its seq. */
@@ -48,6 +50,10 @@ export interface Episode {
   endedAt?: string;
   summary?: string;
   salientFacts?: string[];
+  /** Keyword-derived tags (a rebuildable projection — see MemoryStore.retagEpisodes). */
+  tags?: string[];
+  /** Lens ids active during the episode. */
+  lenses?: string[];
 }
 
 // ─── AgentState: the single live cursor ───
@@ -66,12 +72,42 @@ export interface Embedder {
 
 export type ChunkKind = "turn" | "episode" | "canonical" | "procedure" | "intention";
 
+/**
+ * The active lens as a search input (DESIGN §10b). Built by the lens layer; memory never knows
+ * what a lens is about. `weight` is the lens's per-tier surface weight (0 = no boost). A lens adds
+ * a second candidate stream (same query, restricted to lens-relevant items, widened by keywords)
+ * and boosts lens-relevant items in the merged ranking. It never hides anything.
+ */
+export interface LensFocus {
+  id: string;
+  tags: string[];
+  keywords: string[];
+  weight: number;
+}
+
+/** Optional search controls shared by the episodic and procedural searches. */
+export interface MemorySearchOptions {
+  /** Explicit tags ⇒ HARD filter: only items carrying at least one of them. */
+  tags?: string[];
+  /** Active lens ⇒ extra candidate stream + boost. Absent/null ⇒ exactly the lens-free ranking. */
+  lens?: LensFocus | null;
+  /** Procedures only: include deprecated methods (default false). */
+  includeDeprecated?: boolean;
+}
+
+/** Derives tags from free text (the lens keyword matcher). Pure, so its output is rebuildable. */
+export type Tagger = (text: string) => string[];
+
 // ─── EpisodeHit: a semantic-search result over past conversations (memory.query) ───
 export interface EpisodeHit {
   episodeId: string;
   when: string | null; // episode ended_at (or started_at) — situates the memory in time
   text: string; // the episode summary
   provenance: Provenance; // rides along so a tainted episode surfaces as tainted
+  tags: string[];
+  lenses: string[];
+  /** True when the active lens ranked this hit up (lens-stamped or tag overlap). */
+  lensMatch?: boolean;
 }
 
 // ─── Canonical is typed: each kind renders as its own system-prompt section ───
@@ -87,6 +123,10 @@ export interface Fact {
   text: string; // human-readable, e.g. "The user's name is Rahul"
   provenance: Provenance;
   source?: string;
+  /** Tagged facts render in standing context only while a lens with an overlapping tag is active. */
+  tags?: string[];
+  /** Lens stamp: the lens active when the fact was written. */
+  lens?: string | null;
 }
 
 // ─── FactExtractor: pulls durable facts out of turns (heuristic or LLM). ───
@@ -111,7 +151,14 @@ export interface Procedure {
   provenance: Provenance;
   createdAt: string;
   updatedAt: string;
+  tags: string[]; // what it is about (approved with the write)
+  lens: string | null; // lens stamp: where it was learned (harness-applied)
+  status: ProcedureStatus;
+  successes: number; // recorded outcomes — distinct from `uses` (fetches)
+  failures: number;
 }
+
+export type ProcedureStatus = "active" | "deprecated";
 
 /** A procedure record before storage assigns id/stats. */
 export interface NewProcedure {
@@ -121,6 +168,8 @@ export interface NewProcedure {
   verbatimSteps: string;
   evidence: string;
   provenance: Provenance;
+  tags?: string[];
+  lens?: string | null;
 }
 
 /** Partial revision of an existing procedure (only provided fields change). */
@@ -129,6 +178,8 @@ export interface ProcedureUpdate {
   abstractMethod?: string;
   verbatimSteps?: string;
   evidence?: string;
+  tags?: string[];
+  status?: ProcedureStatus;
 }
 
 /** A search hit — abstraction inline, verbatim fetched separately. */
@@ -137,6 +188,13 @@ export interface ProcedureHit {
   trigger: string;
   abstractMethod: string;
   provenance: Provenance;
+  tags: string[];
+  lens: string | null;
+  status: ProcedureStatus;
+  successes: number;
+  failures: number;
+  /** True when the active lens ranked this hit up (lens-stamped or tag overlap). */
+  lensMatch?: boolean;
 }
 
 /** Outcome of createProcedure: created, or blocked by a near-duplicate (route to update). */
@@ -155,7 +213,7 @@ export interface MemoryStore {
   /** Whether a canonical fact with this key already exists (idempotent seeding). */
   factExists(key: string): Promise<boolean>;
   /** All canonical facts as {key, kind, text} (for the memory.read tool). */
-  canonicalList(): Promise<{ key: string | null; kind: CanonicalKind; text: string }[]>;
+  canonicalList(): Promise<{ key: string | null; kind: CanonicalKind; text: string; tags?: string[] }[]>;
   /** Delete a canonical fact (and its recall index) by key. Returns whether it existed. */
   forgetFact(key: string): Promise<boolean>;
   /** Canonical facts grouped by kind (for the typed standing-context sections). */
@@ -165,7 +223,10 @@ export interface MemoryStore {
   /** Semantic + lexical recall over the full history (on-demand tier). */
   recall(query: string, k: number): Promise<Fragment[]>;
   /** Semantic search restricted to past episodes (for the memory.query tool). */
-  searchEpisodes(query: string, k: number): Promise<EpisodeHit[]>;
+  searchEpisodes(query: string, k: number, opts?: MemorySearchOptions): Promise<EpisodeHit[]>;
+  /** Recompute every episode's keyword-derived tags (after a lens is created or its keywords
+   * change). Returns how many episodes changed. */
+  retagEpisodes(tagger: Tagger): Promise<number>;
   /** Index a closed episode's summary + turns for future recall. */
   index(episode: Episode, lines: TimelineLine[]): Promise<void>;
 
@@ -179,7 +240,9 @@ export interface MemoryStore {
 
   // ─── Procedural tier (§7a) ───
   /** Search proven methods for the current task (embeds `trigger`); abstraction returned inline. */
-  searchProcedures(query: string, k: number): Promise<ProcedureHit[]>;
+  searchProcedures(query: string, k: number, opts?: MemorySearchOptions): Promise<ProcedureHit[]>;
+  /** Record whether following a method worked. Returns whether it existed. */
+  recordProcedureOutcome(name: string, success: boolean): Promise<boolean>;
   /** Fetch one method in full (verbatim steps + evidence); bumps its use stats. Null if absent. */
   getProcedure(name: string): Promise<Procedure | null>;
   /** Record a proven method. Semantically dedupes on `trigger` before inserting. */
@@ -252,6 +315,7 @@ export interface Intention {
   firedAt: number | null; // last fire time
   attempts: number;
   provenance: Provenance;
+  lens: string | null; // lens it was created under — it fires in that lens
 }
 
 /** An intention before storage assigns id/status/stats. */
@@ -268,6 +332,7 @@ export interface NewIntention {
   expiresAt?: number | null;
   dedupKey?: string | null;
   provenance: Provenance;
+  lens?: string | null;
 }
 
 // ─── EpisodeSummarizer: distills a closed episode (Phase 5). ───

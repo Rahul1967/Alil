@@ -61,6 +61,7 @@ export interface Fragment {
   text: string;
   provenance: Provenance;
   source?: string; // e.g. "MEMORY.md#prefs"
+  tags?: string[]; // canonical facts: lens-scoped when non-empty
 }
 
 // ─── SkillRef: a skill eligible for injection this turn ───

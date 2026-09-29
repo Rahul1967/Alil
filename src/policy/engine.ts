@@ -35,7 +35,10 @@ export function evaluate(
   if (modeDecision === "deny") return deny("mode", `mode "${config.mode}" blocks ${action.effect}`);
 
   // Precedence: ask (rule or mode) beats allow; allow beats nothing.
-  if (askRule) return ask("ask-rule", askRule.note);
+  if (askRule) {
+    const fresh = config.rules.some((r) => r.kind === "ask" && r.fresh === true && ruleApplies(r, action));
+    return fresh ? { ...ask("ask-rule", askRule.note), fresh: true } : ask("ask-rule", askRule.note);
+  }
   if (modeDecision === "ask" && !allowRule) return ask("mode", `mode "${config.mode}" asks on ${action.effect}`);
   if (allowRule) return allow("allow-rule", allowRule.note);
   if (modeDecision === "allow") return allow("mode", `mode "${config.mode}" allows ${action.effect}`);

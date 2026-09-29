@@ -9,12 +9,13 @@
  *   or: npm run telegram -- <BOT_TOKEN> <USER_ID>
  */
 import { randomUUID } from "node:crypto";
-import { createAlil, debugEnabled } from "../src/app/index.ts";
+import { createAlil, debugEnabled, handleLensCommand } from "../src/app/index.ts";
 import type { ChannelBinding } from "../src/app/index.ts";
 import type { ApprovalPort, ApprovalRequest, ApprovalDecision } from "../src/policy/index.ts";
 import { TelegramClient, runTelegramLoop } from "../src/channels/telegram.ts";
 import type { TelegramMessage, TelegramCallbackQuery } from "../src/channels/telegram.ts";
 import type { Attachment } from "../src/ingestion/index.ts";
+import type { PlanNode } from "../src/runtime/index.ts";
 
 const CHANNEL = "telegram";
 
@@ -54,33 +55,43 @@ let approvalSeq = 0;
 const PROC = randomUUID().slice(0, 6); // per-process prefix so stale buttons can't match a live approval
 const APPROVAL_TIMEOUT_MS = 5 * 60_000;
 
+/** Ask the operator an Approve/Reject question with inline buttons; resolves when they tap (or on timeout ⇒ reject). */
+async function askOperator(text: string): Promise<ApprovalDecision> {
+  const tok = `${PROC}${approvalSeq++}`;
+  const replyMarkup = { inline_keyboard: [[{ text: "✅ Approve", callback_data: `a:${tok}` }, { text: "❌ Reject", callback_data: `r:${tok}` }]] };
+  let prompt: TelegramMessage;
+  try {
+    prompt = await client.sendMessage(allowedUserId, text, { replyMarkup });
+  } catch {
+    return { approved: false, reason: "couldn't reach Telegram to ask for approval" };
+  }
+  return await new Promise<ApprovalDecision>((resolve) => {
+    const timer = setTimeout(() => {
+      if (pendingApprovals.delete(tok)) {
+        void client.editMessageText(allowedUserId, prompt.message_id, `${text}\n\n⏳ timed out — rejected`);
+        resolve({ approved: false, reason: "approval timed out" });
+      }
+    }, APPROVAL_TIMEOUT_MS);
+    pendingApprovals.set(tok, (decision) => {
+      clearTimeout(timer);
+      void client.editMessageText(allowedUserId, prompt.message_id, `${text}\n\n${decision.approved ? "✅ approved" : "❌ rejected"}`);
+      resolve(decision);
+    });
+  });
+}
+
 const approvals: ApprovalPort = {
   async request(req: ApprovalRequest): Promise<ApprovalDecision> {
     const a = req.action;
-    const tok = `${PROC}${approvalSeq++}`;
-    const text = `⚠️ Approval needed\n\n${a.tool}  (${a.effect}/${a.risk})\nargs: ${JSON.stringify(a.args).slice(0, 300)}\n\n${req.reason}`;
-    const replyMarkup = { inline_keyboard: [[{ text: "✅ Approve", callback_data: `a:${tok}` }, { text: "❌ Reject", callback_data: `r:${tok}` }]] };
-    let prompt: TelegramMessage;
-    try {
-      prompt = await client.sendMessage(allowedUserId, text, { replyMarkup });
-    } catch {
-      return { approved: false, reason: "couldn't reach Telegram to ask for approval" };
-    }
-    return await new Promise<ApprovalDecision>((resolve) => {
-      const timer = setTimeout(() => {
-        if (pendingApprovals.delete(tok)) {
-          void client.editMessageText(allowedUserId, prompt.message_id, `${text}\n\n⏳ timed out — rejected`);
-          resolve({ approved: false, reason: "approval timed out" });
-        }
-      }, APPROVAL_TIMEOUT_MS);
-      pendingApprovals.set(tok, (decision) => {
-        clearTimeout(timer);
-        void client.editMessageText(allowedUserId, prompt.message_id, `${text}\n\n${decision.approved ? "✅ approved" : "❌ rejected"}`);
-        resolve(decision);
-      });
-    });
+    return askOperator(`⚠️ Approval needed\n\n${a.tool}  (${a.effect}/${a.risk})\nargs: ${JSON.stringify(a.args).slice(0, 300)}\n\n${req.reason}`);
   },
 };
+
+/** Plan-level HITL over Telegram: show the DAG (and every replan) and wait for a tap. */
+async function approvePlanViaTelegram(goal: string, nodes: PlanNode[]): Promise<boolean> {
+  const lines = nodes.map((n) => `• ${n.id}: ${n.description}${n.deps.length ? ` (after ${n.deps.join(", ")})` : ""}`).join("\n");
+  return (await askOperator(`🗺 Plan for: ${goal}\n\n${lines}\n\nRun this plan?`)).approved;
+}
 
 async function onCallback(cbq: TelegramCallbackQuery): Promise<void> {
   const [kind, tok] = (cbq.data ?? "").split(":");
@@ -132,13 +143,19 @@ async function onMessage(msg: TelegramMessage): Promise<void> {
   if (planMatch) {
     const dryRun = planMatch[1] === "-dry";
     try {
-      const result = await alil.runPlan(planMatch[2]!.trim(), { dryRun, approvePlan: async () => true });
+      const goal = planMatch[2]!.trim();
+      const result = await alil.runPlan(goal, { dryRun, ...(dryRun ? {} : { approvePlan: (nodes: PlanNode[]) => approvePlanViaTelegram(goal, nodes) }) });
       const lines = result.nodes.map((n) => `• ${n.id}: ${n.description}${n.summary ? ` — ${n.summary}` : ""}`).join("\n");
       const head = dryRun ? `plan (${result.nodes.length} steps, not executed):` : `plan ${result.status} (${result.replans} replan${result.replans === 1 ? "" : "s"}):`;
       await client.sendMessage(msg.chat.id, `${head}\n${lines}`);
     } catch (e) {
       await client.sendMessage(msg.chat.id, `plan error: ${(e as Error).message}`);
     }
+    return;
+  }
+  const lensReply = await handleLensCommand(alil, text);
+  if (lensReply !== null) {
+    await client.sendMessage(msg.chat.id, lensReply);
     return;
   }
   if (text.startsWith("/event ")) {

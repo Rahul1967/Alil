@@ -21,6 +21,7 @@ interface RawRow {
   text: string | null;
   tool_calls: string | null;
   tool_results: string | null;
+  lens: string | null;
 }
 
 function toLine(r: RawRow): TimelineLine {
@@ -35,6 +36,7 @@ function toLine(r: RawRow): TimelineLine {
   if (r.text !== null) line.text = r.text;
   if (r.tool_calls !== null) line.toolCalls = JSON.parse(r.tool_calls);
   if (r.tool_results !== null) line.toolResults = JSON.parse(r.tool_results);
+  if (r.lens) line.lens = r.lens;
   return line;
 }
 
@@ -47,8 +49,8 @@ export class SqliteTimeline implements Timeline {
 
   constructor(db: DB) {
     this.#ins = db.prepare(
-      `INSERT INTO timeline(at, channel, provenance, episode_id, role, text, tool_calls, tool_results)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO timeline(at, channel, provenance, episode_id, role, text, tool_calls, tool_results, lens)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     this.#recent = db.prepare(`SELECT * FROM timeline ORDER BY seq DESC LIMIT ?`);
     this.#since = db.prepare(`SELECT * FROM timeline WHERE seq > ? ORDER BY seq ASC`);
@@ -66,6 +68,7 @@ export class SqliteTimeline implements Timeline {
       line.text ?? null,
       line.toolCalls !== undefined ? JSON.stringify(line.toolCalls) : null,
       line.toolResults !== undefined ? JSON.stringify(line.toolResults) : null,
+      line.lens ?? null,
     );
     return Number(r.lastInsertRowid);
   }

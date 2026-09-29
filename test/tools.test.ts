@@ -55,6 +55,7 @@ test("brain advertises catalog tools to the model", async () => {
     "fs.list",
     "fs.read",
     "fs.write",
+    "lens.create",
     "mcp.batch",
     "mcp.call",
     "mcp.inspect",
@@ -62,6 +63,7 @@ test("brain advertises catalog tools to the model", async () => {
     "memory.forget",
     "memory.procedure.create",
     "memory.procedure.fetch",
+    "memory.procedure.outcome",
     "memory.procedure.search",
     "memory.procedure.update",
     "memory.query",
@@ -159,5 +161,5 @@ test("catalog reflects a custom rule source's world consistently", async () => {
   const src = new StaticRuleSource(cfg);
   assert.equal((await src.load()).mode, "default");
   const catalog = new RegistryToolCatalog();
-  assert.equal((await catalog.list()).length, 39);
+  assert.equal((await catalog.list()).length, 41);
 });

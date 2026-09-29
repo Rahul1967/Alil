@@ -12,6 +12,8 @@ export interface AmbientDeps {
   onWake: (wake: WakeRequest) => Promise<void>;
   /** Watch rules. Default: an urgent/asap/important/emergency keyword watch. */
   triggers?: TriggerRule[];
+  /** Extra watch rules re-read per event (lens-owned triggers). */
+  dynamicTriggers?: () => TriggerRule[];
   /** Wake rate limit. Default: 5 per 10 minutes. */
   limiter?: RateLimiter;
 }
@@ -28,19 +30,30 @@ export function createAmbientBus(deps: AmbientDeps): EventBus {
     ...(deps.scheduler ? { scheduler: deps.scheduler } : {}),
     ...(deps.audit ? { audit: deps.audit } : {}),
     onWake: deps.onWake,
-    triggers: deps.triggers ?? [keywordTrigger("urgent-watch", ["urgent", "asap", "important", "emergency"])],
+    triggers: (() => {
+      const base = deps.triggers ?? [keywordTrigger("urgent-watch", ["urgent", "asap", "important", "emergency"])];
+      const dynamic = deps.dynamicTriggers;
+      return dynamic ? () => [...base, ...dynamic()] : base;
+    })(),
     limiter: deps.limiter ?? new RateLimiter(5, 10 * 60_000),
   });
 }
 
-/** Normalize a loosely-typed inbound payload into an IncomingEvent (ingested provenance forced). */
+/**
+ * Normalize a loosely-typed inbound payload into an IncomingEvent. Provenance is FORCED to
+ * ingested: the payload comes from outside (an HTTP body, a chat command), so a caller-supplied
+ * `provenance: {origin: "operator"}` must never let an event shed its taint. Any taint sources the
+ * caller named are kept; the inject path itself is always one of them.
+ */
 export function toIncomingEvent(raw: Partial<IncomingEvent>): IncomingEvent {
+  const claimed = raw.provenance?.taintedBy?.filter((t): t is string => typeof t === "string") ?? [];
+  const taintedBy = [...new Set([...claimed, "manual-inject"])];
   return {
     channel: raw.channel ?? "manual",
     ...(raw.type ? { type: raw.type } : {}),
     ...(raw.from ? { from: raw.from } : {}),
     ...(raw.subject ? { subject: raw.subject } : {}),
     ...(raw.text ? { text: raw.text } : {}),
-    provenance: raw.provenance ?? { origin: "ingested", taintedBy: ["manual-inject"] },
+    provenance: { origin: "ingested", taintedBy },
   };
 }

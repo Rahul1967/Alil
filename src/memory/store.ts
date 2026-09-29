@@ -4,6 +4,11 @@
  * recall() is hybrid: semantic KNN (sqlite-vec) fused with lexical BM25 (FTS5) via
  * reciprocal-rank fusion, then hydrated from recall_chunk so every returned Fragment
  * carries its ORIGINAL provenance — this is how taint survives recall.
+ *
+ * Tier searches (episodes, procedures, context cues) rank ONLY their own chunk kind, and accept an
+ * optional lens focus (DESIGN §10b): the model's query runs unchanged (candidates A), a lens adds a
+ * second stream over lens-relevant items widened by the lens keywords (candidates B), and the merged
+ * list is re-ranked with a tag boost. With no lens, only stream A runs — the lens-free ranking.
  */
 import { randomUUID } from "node:crypto";
 import type { Database as DB, Statement } from "better-sqlite3";
@@ -11,10 +16,24 @@ import type { Fragment, Provenance } from "../core/types.ts";
 import type {
   Embedder, Episode, EpisodeHit, Fact, MemoryStore, TimelineLine, ChunkKind, CanonicalKind,
   Procedure, NewProcedure, ProcedureUpdate, ProcedureHit, ProcedureCreateResult, ContextHit,
+  LensFocus, MemorySearchOptions, ProcedureStatus, Tagger,
 } from "./types.ts";
 
 /** RRF constant — dampens the weight of any single ranker's top positions. */
 const RRF_K = 60;
+
+/** One "rank unit" in fused-score space: what a single top-ranked hit in one ranker is worth. */
+const RANK_UNIT = 1 / RRF_K;
+
+/**
+ * Cosine floor for the lens stream's vector side: a lens-relevant item only joins the candidates on
+ * vector similarity when it is at least this close to the query (FTS hits always qualify). Without
+ * a floor, every lens-tagged item would surface on every search of a small library.
+ */
+const LENS_STREAM_COSINE_FLOOR = 0.3;
+
+/** Max rowids per IN (...) batch (SQLite's default variable limit is far higher; stay modest). */
+const IN_BATCH = 500;
 
 /**
  * Cosine-similarity floor for two things to count as "the same procedure" on create. Vectors
@@ -35,7 +54,17 @@ function tokenize(text: string): string[] {
 function ftsQuery(query: string): string | null {
   const toks = tokenize(query);
   if (toks.length === 0) return null;
-  return toks.map((t) => `"${t}"`).join(" OR ");
+  return [...new Set(toks)].map((t) => `"${t}"`).join(" OR ");
+}
+
+function parseList(json: string | null | undefined): string[] {
+  if (!json) return [];
+  try {
+    const v = JSON.parse(json) as unknown;
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
 }
 
 interface ChunkRow {
@@ -54,12 +83,15 @@ interface EpisodeRow {
   ended_at: string | null;
   summary: string | null;
   salient_facts: string | null;
+  tags: string | null;
+  lenses: string | null;
 }
 
 interface CanonicalRow {
   text: string;
   provenance: string;
   source: string | null;
+  tags: string | null;
 }
 
 interface CanonicalKindRow {
@@ -67,6 +99,8 @@ interface CanonicalKindRow {
   text: string;
   provenance: string;
   source: string | null;
+  tags: string | null;
+  lens: string | null;
 }
 
 interface RankRow {
@@ -92,6 +126,32 @@ interface ProcedureRow {
   provenance: string;
   created_at: string;
   updated_at: string;
+  tags: string | null;
+  lens: string | null;
+  status: string | null;
+  successes: number | null;
+  failures: number | null;
+}
+
+/** What the tier search needs to know about one item, keyed by its chunk `ref`. */
+interface ItemMeta {
+  tags: string[];
+  lenses: string[];
+  /** Excluded from results entirely (e.g. a deprecated procedure). */
+  exclude: boolean;
+  /** Small additive prior in rank units (e.g. a procedure's outcome record). */
+  prior: number;
+}
+
+interface RankedRef {
+  ref: string;
+  rowid: number;
+  lensMatch: boolean;
+}
+
+function lensMatches(meta: ItemMeta, lens: LensFocus): boolean {
+  if (meta.lenses.includes(lens.id)) return true;
+  return meta.tags.some((t) => lens.tags.includes(t));
 }
 
 export class SqliteMemoryStore implements MemoryStore {
@@ -114,13 +174,20 @@ export class SqliteMemoryStore implements MemoryStore {
   #upsertEpisode: Statement;
   #recentEpisodes: Statement;
   #getEpisodeDate: Statement;
+  #episodeMeta: Statement;
+  #episodeLabels: Statement;
+  #allEpisodes: Statement;
+  #setEpisodeTags: Statement;
+  #chunksOfKind: Statement;
   #knn: Statement;
-  #knnDist: Statement;
   #fts: Statement;
+  #knnKind: Statement;
+  #ftsKind: Statement;
   #insProc: Statement;
   #getProcByName: Statement;
   #updProc: Statement;
   #touchProc: Statement;
+  #procOutcome: Statement;
   #listProc: Statement;
 
   constructor(db: DB, embedder: Embedder) {
@@ -133,53 +200,74 @@ export class SqliteMemoryStore implements MemoryStore {
     this.#insFts = db.prepare(`INSERT INTO recall_fts(rowid, text) VALUES (?, ?)`);
     this.#getChunk = db.prepare(`SELECT kind, ref, text, provenance, source FROM recall_chunk WHERE rowid = ?`);
     this.#insCanonical = db.prepare(
-      `INSERT INTO canonical(id, key, kind, text, provenance, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO canonical(id, key, kind, text, provenance, source, created_at, tags, lens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
-    this.#allCanonical = db.prepare(`SELECT text, provenance, source FROM canonical ORDER BY created_at ASC`);
-    this.#byKind = db.prepare(`SELECT kind, text, provenance, source FROM canonical ORDER BY kind ASC, created_at ASC`);
-    this.#listCanonical = db.prepare(`SELECT key, kind, text FROM canonical ORDER BY kind ASC, created_at ASC`);
+    this.#allCanonical = db.prepare(`SELECT text, provenance, source, tags FROM canonical ORDER BY created_at ASC`);
+    this.#byKind = db.prepare(`SELECT kind, text, provenance, source, tags, lens FROM canonical ORDER BY kind ASC, created_at ASC`);
+    this.#listCanonical = db.prepare(`SELECT key, kind, text, tags FROM canonical ORDER BY kind ASC, created_at ASC`);
     this.#getCanonByKey = db.prepare(`SELECT id FROM canonical WHERE key = ?`);
     this.#delCanonById = db.prepare(`DELETE FROM canonical WHERE id = ?`);
     this.#delVecByRef = db.prepare(`DELETE FROM recall_vec WHERE rowid IN (SELECT rowid FROM recall_chunk WHERE kind = ? AND ref = ?)`);
     this.#delFtsByRef = db.prepare(`DELETE FROM recall_fts WHERE rowid IN (SELECT rowid FROM recall_chunk WHERE kind = ? AND ref = ?)`);
     this.#delChunkByRef = db.prepare(`DELETE FROM recall_chunk WHERE kind = ? AND ref = ?`);
     this.#upsertEpisode = db.prepare(
-      `INSERT OR REPLACE INTO episodes(id, start_seq, end_seq, started_at, ended_at, summary, salient_facts)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR REPLACE INTO episodes(id, start_seq, end_seq, started_at, ended_at, summary, salient_facts, tags, lenses)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     this.#recentEpisodes = db.prepare(
       `SELECT * FROM episodes WHERE end_seq IS NOT NULL ORDER BY end_seq DESC LIMIT ?`,
     );
     this.#getEpisodeDate = db.prepare(`SELECT started_at, ended_at FROM episodes WHERE id = ?`);
+    this.#episodeMeta = db.prepare(`SELECT id, tags, lenses FROM episodes`);
+    this.#episodeLabels = db.prepare(`SELECT tags, lenses FROM episodes WHERE id = ?`);
+    this.#allEpisodes = db.prepare(`SELECT id, summary, salient_facts, tags FROM episodes WHERE summary IS NOT NULL`);
+    this.#setEpisodeTags = db.prepare(`UPDATE episodes SET tags = ? WHERE id = ?`);
+    this.#chunksOfKind = db.prepare(`SELECT rowid, ref FROM recall_chunk WHERE kind = ?`);
     this.#knn = db.prepare(
       `SELECT rowid FROM recall_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance`,
     );
-    this.#knnDist = db.prepare(
-      `SELECT rowid, distance FROM recall_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance`,
-    );
     this.#fts = db.prepare(`SELECT rowid FROM recall_fts WHERE recall_fts MATCH ? ORDER BY rank LIMIT ?`);
+    // Kind-restricted rankers: a search for one tier must rank only that tier's chunks, or a large
+    // tier (episodes) crowds a small one (procedures) out of the over-fetched window. The vector
+    // side is a linear scan over the tier (fine at single-operator scale; ANN is a later step).
+    this.#knnKind = db.prepare(
+      `SELECT v.rowid AS rowid, vec_distance_l2(v.embedding, ?) AS distance
+         FROM recall_vec v JOIN recall_chunk c ON c.rowid = v.rowid
+        WHERE c.kind = ? ORDER BY distance LIMIT ?`,
+    );
+    this.#ftsKind = db.prepare(
+      `SELECT recall_fts.rowid AS rowid FROM recall_fts JOIN recall_chunk c ON c.rowid = recall_fts.rowid
+        WHERE recall_fts MATCH ? AND c.kind = ? ORDER BY recall_fts.rank LIMIT ?`,
+    );
     this.#insProc = db.prepare(
       `INSERT INTO procedure(id, name, trigger, abstract_method, verbatim_steps, evidence,
-                             provenance, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                             provenance, created_at, updated_at, tags, lens)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     this.#getProcByName = db.prepare(`SELECT * FROM procedure WHERE name = ?`);
     this.#updProc = db.prepare(
-      `UPDATE procedure SET trigger = ?, abstract_method = ?, verbatim_steps = ?, evidence = ?,
+      `UPDATE procedure SET trigger = ?, abstract_method = ?, verbatim_steps = ?, evidence = ?, tags = ?, status = ?,
                             version = version + 1, updated_at = ? WHERE name = ?`,
     );
+    // A fetch is a use, not a success: score moves only on a recorded outcome.
     this.#touchProc = db.prepare(
-      `UPDATE procedure SET uses = uses + 1, score = score + 1, last_used_at = ? WHERE name = ?`,
+      `UPDATE procedure SET uses = uses + 1, last_used_at = ? WHERE name = ?`,
+    );
+    this.#procOutcome = db.prepare(
+      `UPDATE procedure SET successes = successes + ?, failures = failures + ?, score = score + ? WHERE name = ?`,
     );
     this.#listProc = db.prepare(`SELECT * FROM procedure ORDER BY updated_at DESC`);
   }
 
+  /** Index one chunk. `ftsText` (default `text`) lets lexical search see more than is embedded
+   * (e.g. a procedure's tags) without changing its vector. */
   async #indexChunk(
     kind: ChunkKind,
     ref: string,
     text: string,
     provenance: Provenance,
     source?: string,
+    ftsText?: string,
   ): Promise<void> {
     const [vec] = await this.#embedder.embed([text]);
     if (!vec) return;
@@ -189,19 +277,19 @@ export class SqliteMemoryStore implements MemoryStore {
       const r = this.#insVec.run(blob);
       const rowid = Number(r.lastInsertRowid);
       this.#insChunk.run(rowid, kind, ref, text, prov, source ?? null);
-      this.#insFts.run(rowid, text);
+      this.#insFts.run(rowid, ftsText ?? text);
     });
     write();
   }
 
   async canonical(): Promise<Fragment[]> {
     const rows = this.#allCanonical.all() as CanonicalRow[];
-    return rows.map((r) => this.#toFragment(r.text, r.provenance, r.source));
+    return rows.map((r) => this.#toFragment(r.text, r.provenance, r.source, r.tags));
   }
 
   async writeCanonical(fact: Fragment): Promise<void> {
     const id = randomUUID();
-    this.#insCanonical.run(id, null, "preference", fact.text, JSON.stringify(fact.provenance), fact.source ?? null, new Date().toISOString());
+    this.#insCanonical.run(id, null, "preference", fact.text, JSON.stringify(fact.provenance), fact.source ?? null, new Date().toISOString(), JSON.stringify(fact.tags ?? []), null);
     await this.#indexChunk("canonical", id, fact.text, fact.provenance, fact.source);
   }
 
@@ -217,7 +305,10 @@ export class SqliteMemoryStore implements MemoryStore {
     // Distinct source per fact so downstream dedup (which keys on source) never collapses
     // two different canonical facts into one.
     const source = `canonical:${fact.key}`;
-    this.#insCanonical.run(id, fact.key, fact.kind ?? "preference", fact.text, JSON.stringify(fact.provenance), source, new Date().toISOString());
+    this.#insCanonical.run(
+      id, fact.key, fact.kind ?? "preference", fact.text, JSON.stringify(fact.provenance), source, new Date().toISOString(),
+      JSON.stringify(fact.tags ?? []), fact.lens ?? null,
+    );
     await this.#indexChunk("canonical", id, fact.text, fact.provenance, source);
   }
 
@@ -225,9 +316,9 @@ export class SqliteMemoryStore implements MemoryStore {
     return this.#getCanonByKey.get(key) !== undefined;
   }
 
-  async canonicalList(): Promise<{ key: string | null; kind: CanonicalKind; text: string }[]> {
-    const rows = this.#listCanonical.all() as { key: string | null; kind: string; text: string }[];
-    return rows.map((r) => ({ key: r.key, kind: r.kind as CanonicalKind, text: r.text }));
+  async canonicalList(): Promise<{ key: string | null; kind: CanonicalKind; text: string; tags: string[] }[]> {
+    const rows = this.#listCanonical.all() as { key: string | null; kind: string; text: string; tags: string | null }[];
+    return rows.map((r) => ({ key: r.key, kind: r.kind as CanonicalKind, text: r.text, tags: parseList(r.tags) }));
   }
 
   async forgetFact(key: string): Promise<boolean> {
@@ -244,7 +335,7 @@ export class SqliteMemoryStore implements MemoryStore {
     for (const r of rows) {
       const kind = r.kind as CanonicalKind;
       const list = out.get(kind) ?? [];
-      list.push(this.#toFragment(r.text, r.provenance, r.source));
+      list.push(this.#toFragment(r.text, r.provenance, r.source, r.tags));
       out.set(kind, list);
     }
     return out;
@@ -277,13 +368,12 @@ export class SqliteMemoryStore implements MemoryStore {
    */
   async searchContextCues(query: string, k: number): Promise<ContextHit[]> {
     const match = ftsQuery(query);
-    if (!match) return [];
-    const rows = this.#fts.all(match, k * 8) as RankRow[];
+    if (!match || k <= 0) return [];
+    const rows = this.#ftsKind.all(match, "intention", k) as RankRow[];
     const out: ContextHit[] = [];
     for (const { rowid } of rows) {
-      if (out.length >= k) break;
       const c = this.#getChunk.get(rowid) as ChunkRow | undefined;
-      if (!c || c.kind !== "intention") continue;
+      if (!c) continue;
       out.push({ id: c.ref, cue: c.text, provenance: JSON.parse(c.provenance) as Provenance });
     }
     return out;
@@ -291,6 +381,100 @@ export class SqliteMemoryStore implements MemoryStore {
 
   removeContextCue(id: string): void {
     this.#deleteChunkByRef("intention", id);
+  }
+
+  /**
+   * Hybrid rank within ONE chunk kind: sqlite-vec distance + FTS5 BM25, fused by RRF. Returns
+   * rowid → fused score.
+   */
+  async #rankKind(kind: ChunkKind, query: string, n: number): Promise<Map<number, number>> {
+    const [qvec] = await this.#embedder.embed([query]);
+    const vecRows = qvec ? (this.#knnKind.all(toBlob(qvec), kind, n) as DistRow[]) : [];
+    const match = ftsQuery(query);
+    const ftsRows = match ? (this.#ftsKind.all(match, kind, n) as RankRow[]) : [];
+    const fused = new Map<number, number>();
+    vecRows.forEach((row, i) => fused.set(row.rowid, (fused.get(row.rowid) ?? 0) + 1 / (RRF_K + i)));
+    ftsRows.forEach((row, i) => fused.set(row.rowid, (fused.get(row.rowid) ?? 0) + 1 / (RRF_K + i)));
+    return fused;
+  }
+
+  /**
+   * The lens stream (candidates B): the same query, widened by the lens keywords, ranked only over
+   * the lens-relevant rowids. An item qualifies on a lexical hit, or on vector similarity above the
+   * floor — so an unrelated lens-tagged item does not ride along on every search.
+   */
+  async #rankWithin(rowids: number[], query: string, keywords: string[]): Promise<Map<number, number>> {
+    const fused = new Map<number, number>();
+    if (rowids.length === 0) return fused;
+    const [qvec] = await this.#embedder.embed([query]);
+    const match = ftsQuery([query, ...keywords].join(" "));
+    const vecRows: DistRow[] = [];
+    const ftsRows: RankRow[] = [];
+    for (let i = 0; i < rowids.length; i += IN_BATCH) {
+      const batch = rowids.slice(i, i + IN_BATCH);
+      const ph = batch.map(() => "?").join(",");
+      if (qvec) {
+        vecRows.push(...(this.#db
+          .prepare(`SELECT rowid, vec_distance_l2(embedding, ?) AS distance FROM recall_vec WHERE rowid IN (${ph})`)
+          .all(toBlob(qvec), ...batch) as DistRow[]));
+      }
+      if (match) {
+        ftsRows.push(...(this.#db
+          .prepare(`SELECT rowid FROM recall_fts WHERE recall_fts MATCH ? AND rowid IN (${ph}) ORDER BY rank`)
+          .all(match, ...batch) as RankRow[]));
+      }
+    }
+    const lexical = new Set(ftsRows.map((r) => r.rowid));
+    vecRows
+      .filter((r) => lexical.has(r.rowid) || 1 - (r.distance * r.distance) / 2 >= LENS_STREAM_COSINE_FLOOR)
+      .sort((a, b) => a.distance - b.distance)
+      .forEach((row, i) => fused.set(row.rowid, (fused.get(row.rowid) ?? 0) + 1 / (RRF_K + i)));
+    ftsRows.forEach((row, i) => fused.set(row.rowid, (fused.get(row.rowid) ?? 0) + 1 / (RRF_K + i)));
+    return fused;
+  }
+
+  /**
+   * Shared tier search: stream A (the unchanged query) ∪ stream B (lens), filtered by explicit tags
+   * and `exclude`, re-ranked by base relevance + lens boost + prior. With no lens, no tags and no
+   * priors, this is exactly stream A's order.
+   */
+  async #tierSearch(kind: ChunkKind, query: string, k: number, opts: MemorySearchOptions | undefined, meta: Map<string, ItemMeta> | null): Promise<RankedRef[]> {
+    const a = await this.#rankKind(kind, query, k * 4);
+    const lens = opts?.lens && opts.lens.weight > 0 ? opts.lens : null;
+    let b = new Map<number, number>();
+    const refOf = new Map<number, string>();
+    if (lens && meta) {
+      const relevant: number[] = [];
+      for (const row of this.#chunksOfKind.all(kind) as { rowid: number; ref: string }[]) {
+        const m = meta.get(row.ref);
+        if (m && !m.exclude && lensMatches(m, lens)) {
+          relevant.push(row.rowid);
+          refOf.set(row.rowid, row.ref);
+        }
+      }
+      b = await this.#rankWithin(relevant, query, lens.keywords);
+    }
+    const filterTags = opts?.tags && opts.tags.length > 0 ? opts.tags : null;
+    const scored: { ref: string; rowid: number; score: number; lensMatch: boolean }[] = [];
+    const seen = new Set<string>();
+    for (const rowid of new Set([...a.keys(), ...b.keys()])) {
+      let ref = refOf.get(rowid);
+      if (ref === undefined) {
+        const c = this.#getChunk.get(rowid) as ChunkRow | undefined;
+        if (!c) continue;
+        ref = c.ref;
+      }
+      if (seen.has(ref)) continue;
+      const m = meta?.get(ref);
+      if (m?.exclude) continue;
+      if (filterTags && !(m && m.tags.some((t) => filterTags.includes(t)))) continue;
+      const matched = !!(lens && m && lensMatches(m, lens));
+      const score = (a.get(rowid) ?? 0) + (b.get(rowid) ?? 0) + (matched ? lens!.weight * RANK_UNIT : 0) + (m?.prior ?? 0);
+      seen.add(ref);
+      scored.push({ ref, rowid, score, lensMatch: matched });
+    }
+    scored.sort((x, y) => y.score - x.score);
+    return scored.slice(0, k).map(({ ref, rowid, lensMatch }) => ({ ref, rowid, lensMatch }));
   }
 
   async index(episode: Episode, lines: TimelineLine[]): Promise<void> {
@@ -302,6 +486,8 @@ export class SqliteMemoryStore implements MemoryStore {
       episode.endedAt ?? null,
       episode.summary ?? null,
       episode.salientFacts ? JSON.stringify(episode.salientFacts) : null,
+      JSON.stringify(episode.tags ?? []),
+      JSON.stringify(episode.lenses ?? []),
     );
 
     const parts: string[] = [];
@@ -352,79 +538,104 @@ export class SqliteMemoryStore implements MemoryStore {
     const out: Fragment[] = [];
     for (const [rowid] of top) {
       const c = this.#getChunk.get(rowid) as ChunkRow | undefined;
-      if (c) out.push(this.#toFragment(c.text, c.provenance, c.source));
+      if (c) out.push(this.#toFragment(c.text, c.provenance, c.source, null));
     }
     return out;
   }
 
-  async searchEpisodes(query: string, k: number): Promise<EpisodeHit[]> {
+  #oneEpisodeMeta(id: string): ItemMeta | undefined {
+    const r = this.#episodeLabels.get(id) as { tags: string | null; lenses: string | null } | undefined;
+    return r ? { tags: parseList(r.tags), lenses: parseList(r.lenses), exclude: false, prior: 0 } : undefined;
+  }
+
+  #episodeMetaMap(): Map<string, ItemMeta> {
+    const out = new Map<string, ItemMeta>();
+    for (const r of this.#episodeMeta.all() as { id: string; tags: string | null; lenses: string | null }[]) {
+      out.set(r.id, { tags: parseList(r.tags), lenses: parseList(r.lenses), exclude: false, prior: 0 });
+    }
+    return out;
+  }
+
+  async searchEpisodes(query: string, k: number, opts?: MemorySearchOptions): Promise<EpisodeHit[]> {
     if (k <= 0) return [];
-    // Over-fetch from both rankers, fuse, then keep only episode chunks (canonical is already
-    // standing context) and enrich each hit with its episode date.
-    const over = k * 4;
-    const [qvec] = await this.#embedder.embed([query]);
-    const vecRows = qvec ? (this.#knn.all(toBlob(qvec), over) as RankRow[]) : [];
-    const match = ftsQuery(query);
-    const ftsRows = match ? (this.#fts.all(match, over) as RankRow[]) : [];
-
-    const fused = new Map<number, number>();
-    const fuse = (rows: RankRow[]) => {
-      rows.forEach((row, i) => fused.set(row.rowid, (fused.get(row.rowid) ?? 0) + 1 / (RRF_K + i)));
-    };
-    fuse(vecRows);
-    fuse(ftsRows);
-
-    const ranked = [...fused.entries()].sort((a, b) => b[1] - a[1]);
+    // Rank only episode chunks (canonical is already standing context), then enrich each hit
+    // with its episode date and labels.
+    const meta = opts?.lens || opts?.tags?.length ? this.#episodeMetaMap() : null;
+    const ranked = await this.#tierSearch("episode", query, k, opts, meta);
     const out: EpisodeHit[] = [];
-    for (const [rowid] of ranked) {
-      if (out.length >= k) break;
-      const c = this.#getChunk.get(rowid) as ChunkRow | undefined;
-      if (!c || c.kind !== "episode") continue;
+    for (const r of ranked) {
+      const c = this.#getChunk.get(r.rowid) as ChunkRow | undefined;
+      if (!c) continue;
       const date = this.#getEpisodeDate.get(c.ref) as { started_at: string; ended_at: string | null } | undefined;
+      const m = meta?.get(c.ref) ?? this.#oneEpisodeMeta(c.ref);
       out.push({
         episodeId: c.ref,
         when: date?.ended_at ?? date?.started_at ?? null,
         text: c.text,
         provenance: JSON.parse(c.provenance) as Provenance,
+        tags: m?.tags ?? [],
+        lenses: m?.lenses ?? [],
+        ...(r.lensMatch ? { lensMatch: true } : {}),
       });
     }
     return out;
   }
 
+  async retagEpisodes(tagger: Tagger): Promise<number> {
+    let changed = 0;
+    const rows = this.#allEpisodes.all() as { id: string; summary: string; salient_facts: string | null; tags: string | null }[];
+    const apply = this.#db.transaction(() => {
+      for (const r of rows) {
+        const text = [r.summary, ...parseList(r.salient_facts)].join("\n");
+        const next = JSON.stringify([...new Set(tagger(text))].sort());
+        if (next !== JSON.stringify([...parseList(r.tags)].sort())) {
+          this.#setEpisodeTags.run(next, r.id);
+          changed++;
+        }
+      }
+    });
+    apply();
+    return changed;
+  }
+
   // ─── Procedural tier (§7a) ───
 
-  async searchProcedures(query: string, k: number): Promise<ProcedureHit[]> {
+  #procedureMetaMap(): Map<string, ItemMeta> {
+    const out = new Map<string, ItemMeta>();
+    for (const r of this.#listProc.all() as ProcedureRow[]) {
+      const s = r.successes ?? 0;
+      const f = r.failures ?? 0;
+      // Outcome prior (Laplace-smoothed success rate, centered): ±0.5 rank unit at the extremes, 0
+      // for a method with no recorded outcomes — so untouched libraries rank exactly as before.
+      const prior = s + f > 0 ? ((s + 1) / (s + f + 2) - 0.5) * RANK_UNIT : 0;
+      out.set(r.name, { tags: parseList(r.tags), lenses: r.lens ? [r.lens] : [], exclude: r.status === "deprecated", prior });
+    }
+    return out;
+  }
+
+  async searchProcedures(query: string, k: number, opts?: MemorySearchOptions): Promise<ProcedureHit[]> {
     if (k <= 0) return [];
-    // Over-fetch from both rankers, fuse, keep only procedure chunks (whose indexed text is the
-    // trigger), then hydrate the full procedure and return its abstraction inline.
-    const over = k * 4;
-    const [qvec] = await this.#embedder.embed([query]);
-    const vecRows = qvec ? (this.#knn.all(toBlob(qvec), over) as RankRow[]) : [];
-    const match = ftsQuery(query);
-    const ftsRows = match ? (this.#fts.all(match, over) as RankRow[]) : [];
-
-    const fused = new Map<number, number>();
-    const fuse = (rows: RankRow[]) => {
-      rows.forEach((row, i) => fused.set(row.rowid, (fused.get(row.rowid) ?? 0) + 1 / (RRF_K + i)));
-    };
-    fuse(vecRows);
-    fuse(ftsRows);
-
-    const ranked = [...fused.entries()].sort((a, b) => b[1] - a[1]);
+    // Rank only procedure chunks (whose embedded text is the trigger), then hydrate the full
+    // procedure and return its abstraction inline. Deprecated methods are excluded unless asked for.
+    const meta = this.#procedureMetaMap();
+    if (opts?.includeDeprecated) for (const m of meta.values()) m.exclude = false;
+    const ranked = await this.#tierSearch("procedure", query, k, opts, meta);
     const out: ProcedureHit[] = [];
-    const seen = new Set<string>();
-    for (const [rowid] of ranked) {
-      if (out.length >= k) break;
-      const c = this.#getChunk.get(rowid) as ChunkRow | undefined;
-      if (!c || c.kind !== "procedure" || seen.has(c.ref)) continue;
-      const p = this.#getProcByName.get(c.ref) as ProcedureRow | undefined;
+    for (const r of ranked) {
+      const p = this.#getProcByName.get(r.ref) as ProcedureRow | undefined;
       if (!p) continue;
-      seen.add(c.ref);
+      const proc = toProcedure(p);
       out.push({
-        name: p.name,
-        trigger: p.trigger,
-        abstractMethod: p.abstract_method,
-        provenance: JSON.parse(p.provenance) as Provenance,
+        name: proc.name,
+        trigger: proc.trigger,
+        abstractMethod: proc.abstractMethod,
+        provenance: proc.provenance,
+        tags: proc.tags,
+        lens: proc.lens,
+        status: proc.status,
+        successes: proc.successes,
+        failures: proc.failures,
+        ...(r.lensMatch ? { lensMatch: true } : {}),
       });
     }
     return out;
@@ -437,6 +648,11 @@ export class SqliteMemoryStore implements MemoryStore {
     this.#touchProc.run(new Date().toISOString(), name);
     const after = this.#getProcByName.get(name) as ProcedureRow;
     return toProcedure(after);
+  }
+
+  async recordProcedureOutcome(name: string, success: boolean): Promise<boolean> {
+    const r = this.#procOutcome.run(success ? 1 : 0, success ? 0 : 1, success ? 1 : -1, name);
+    return r.changes > 0;
   }
 
   async createProcedure(p: NewProcedure): Promise<ProcedureCreateResult> {
@@ -452,12 +668,14 @@ export class SqliteMemoryStore implements MemoryStore {
 
     const id = randomUUID();
     const now = new Date().toISOString();
+    const tags = p.tags ?? [];
     this.#insProc.run(
       id, p.name, p.trigger, p.abstractMethod, p.verbatimSteps, p.evidence,
-      JSON.stringify(p.provenance), now, now,
+      JSON.stringify(p.provenance), now, now, JSON.stringify(tags), p.lens ?? null,
     );
-    // Index the TRIGGER (not the body) — search matches intent, per Voyager/Memp.
-    await this.#indexChunk("procedure", p.name, p.trigger, p.provenance, `procedure:${p.name}`);
+    // Embed the TRIGGER (not the body) — search matches intent, per Voyager/Memp. Tags ride in the
+    // lexical index only, so a tag query can hit a method whose trigger doesn't use the word.
+    await this.#indexChunk("procedure", p.name, p.trigger, p.provenance, `procedure:${p.name}`, procedureFtsText(p.trigger, tags));
     return { created: true, name: p.name };
   }
 
@@ -468,12 +686,16 @@ export class SqliteMemoryStore implements MemoryStore {
     const abstractMethod = patch.abstractMethod ?? existing.abstract_method;
     const verbatimSteps = patch.verbatimSteps ?? existing.verbatim_steps;
     const evidence = patch.evidence ?? existing.evidence;
-    this.#updProc.run(trigger, abstractMethod, verbatimSteps, evidence, new Date().toISOString(), name);
-    // Re-index only if the trigger (the embedded field) changed.
-    if (patch.trigger !== undefined && patch.trigger !== existing.trigger) {
+    const oldTags = parseList(existing.tags);
+    const tags = patch.tags ?? oldTags;
+    const status: ProcedureStatus = patch.status ?? (existing.status === "deprecated" ? "deprecated" : "active");
+    this.#updProc.run(trigger, abstractMethod, verbatimSteps, evidence, JSON.stringify(tags), status, new Date().toISOString(), name);
+    // Re-index only if an indexed field (the embedded trigger, or the lexically-indexed tags) changed.
+    const tagsChanged = JSON.stringify(tags) !== JSON.stringify(oldTags);
+    if ((patch.trigger !== undefined && patch.trigger !== existing.trigger) || tagsChanged) {
       this.#deleteChunkByRef("procedure", name);
       const prov = JSON.parse(existing.provenance) as Provenance;
-      await this.#indexChunk("procedure", name, trigger, prov, `procedure:${name}`);
+      await this.#indexChunk("procedure", name, trigger, prov, `procedure:${name}`, procedureFtsText(trigger, tags));
     }
     return true;
   }
@@ -486,22 +708,25 @@ export class SqliteMemoryStore implements MemoryStore {
   async #nearestProcedure(trigger: string): Promise<{ name: string; similarity: number } | null> {
     const [qvec] = await this.#embedder.embed([trigger]);
     if (!qvec) return null;
-    const rows = this.#knnDist.all(toBlob(qvec), 16) as DistRow[];
-    for (const row of rows) {
-      const c = this.#getChunk.get(row.rowid) as ChunkRow | undefined;
-      if (!c || c.kind !== "procedure") continue;
-      // L2 distance on unit vectors → cosine similarity.
-      const cosine = 1 - (row.distance * row.distance) / 2;
-      return { name: c.ref, similarity: cosine };
-    }
-    return null;
+    const [row] = this.#knnKind.all(toBlob(qvec), "procedure", 1) as DistRow[];
+    if (!row) return null;
+    const c = this.#getChunk.get(row.rowid) as ChunkRow | undefined;
+    if (!c) return null;
+    // L2 distance on unit vectors → cosine similarity.
+    return { name: c.ref, similarity: 1 - (row.distance * row.distance) / 2 };
   }
 
-  #toFragment(text: string, provenanceJson: string, source: string | null): Fragment {
+  #toFragment(text: string, provenanceJson: string, source: string | null, tagsJson: string | null): Fragment {
     const frag: Fragment = { text, provenance: JSON.parse(provenanceJson) as Provenance };
     if (source !== null) frag.source = source;
+    const tags = parseList(tagsJson);
+    if (tags.length > 0) frag.tags = tags;
     return frag;
   }
+}
+
+function procedureFtsText(trigger: string, tags: string[]): string {
+  return tags.length > 0 ? `${trigger}\n${tags.join(" ")}` : trigger;
 }
 
 function toProcedure(r: ProcedureRow): Procedure {
@@ -519,6 +744,11 @@ function toProcedure(r: ProcedureRow): Procedure {
     provenance: JSON.parse(r.provenance) as Provenance,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
+    tags: parseList(r.tags),
+    lens: r.lens,
+    status: r.status === "deprecated" ? "deprecated" : "active",
+    successes: r.successes ?? 0,
+    failures: r.failures ?? 0,
   };
 }
 
@@ -532,5 +762,9 @@ function toEpisode(r: EpisodeRow): Episode {
   if (r.ended_at !== null) ep.endedAt = r.ended_at;
   if (r.summary !== null) ep.summary = r.summary;
   if (r.salient_facts !== null) ep.salientFacts = JSON.parse(r.salient_facts) as string[];
+  const tags = parseList(r.tags);
+  if (tags.length > 0) ep.tags = tags;
+  const lenses = parseList(r.lenses);
+  if (lenses.length > 0) ep.lenses = lenses;
   return ep;
 }
