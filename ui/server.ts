@@ -166,6 +166,52 @@ const server = createServer(async (req, res) => {
     }
   }
 
+  // ── MCP (read-only view): server status, tool search, tool detail ──
+  if (req.method === "GET" && url.pathname === "/api/mcp/status") {
+    const reg = alil.mcp;
+    if (!reg) return json(200, { enabled: false, servers: [] });
+    return json(200, { enabled: true, servers: reg.status() });
+  }
+  // Enable/disable a configured server at runtime. Disabling makes it fully invisible to the model
+  // (dropped from search, refused by inspect/call) and closes its connection. This is a runtime
+  // toggle only — it does not rewrite config/mcp.json, so a restart reverts to the file's setting.
+  if (req.method === "POST" && url.pathname === "/api/mcp/toggle") {
+    const reg = alil.mcp;
+    if (!reg) return json(404, { error: "mcp off" });
+    const body = JSON.parse((await readBody(req)) || "{}") as { server?: string; enabled?: boolean };
+    const server = typeof body.server === "string" ? body.server : "";
+    const enabled = body.enabled === true;
+    if (!server) return json(400, { error: "server required" });
+    const ok = reg.setEnabled(server, enabled);
+    return ok ? json(200, { server, enabled }) : json(404, { error: `unknown server "${server}"` });
+  }
+  if (req.method === "GET" && url.pathname === "/api/mcp/search") {
+    const reg = alil.mcp;
+    if (!reg) return json(200, { enabled: false, hits: [] });
+    const q = url.searchParams.get("q") ?? "";
+    if (!q.trim()) return json(200, { enabled: true, hits: [] });
+    try {
+      const hits = await reg.search(q, 20);
+      return json(200, { enabled: true, hits });
+    } catch (e) {
+      return json(200, { enabled: true, hits: [], error: (e as Error).message });
+    }
+  }
+  if (req.method === "GET" && url.pathname === "/api/mcp/tool") {
+    const reg = alil.mcp;
+    if (!reg) return json(404, { error: "mcp off" });
+    const server = url.searchParams.get("server");
+    const name = url.searchParams.get("name");
+    if (!server || !name) return json(400, { error: "server and name required" });
+    try {
+      const def = await reg.inspect(server, name);
+      const cls = await reg.classify(server, name);
+      return json(200, { ...def, ...cls });
+    } catch (e) {
+      return json(404, { error: (e as Error).message });
+    }
+  }
+
   // ── Operator dossier (read-only view): list files, optionally filtered by type/tag/text ──
   if (req.method === "GET" && url.pathname === "/api/dossier") {
     const type = url.searchParams.get("type");

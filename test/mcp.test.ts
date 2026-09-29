@@ -257,3 +257,53 @@ test("mcp.batch is execute/high (boundary-gated) and validates step shape", () =
   assert.equal(mcpBatch.validate({ steps: [{ id: "x", server: "s", name: "t" }, { id: "x", server: "s", name: "t" }] }).ok, false); // dup id
   assert.equal(mcpBatch.validate({ steps: [{ id: "x", server: "s", name: "t" }] }).ok, true);
 });
+
+// ── enable/disable: a disabled server is fully invisible + inaccessible to the model ──
+
+/** Build a registry where a server can be pre-disabled via its config. */
+function registryWithConfig(configs: McpServerConfig[], toolsByServer: Record<string, McpToolDef[]>) {
+  const reg = new McpRegistry({
+    configs,
+    transportFactory: (cfg) => new MockTransport(cfg, toolsByServer[cfg.name] ?? [], async () => ({ isError: false, text: "ok" })),
+  });
+  return reg;
+}
+
+test("a disabled server is excluded from search (the model can't discover it)", async () => {
+  const reg = registryWithConfig(
+    [{ name: "on", transport: "stdio", command: "x" }, { name: "off", transport: "stdio", command: "x", enabled: false }],
+    { on: [tool("on", "alpha", "does alpha", true)], off: [tool("off", "alpha", "does alpha", true)] },
+  );
+  const hits = await reg.search("alpha");
+  assert.ok(hits.every((h) => h.server === "on"), "no hit from a disabled server");
+  assert.ok(hits.some((h) => h.server === "on"));
+});
+
+test("a disabled server refuses inspect and call even by exact name", async () => {
+  const reg = registryWithConfig(
+    [{ name: "off", transport: "stdio", command: "x", enabled: false }],
+    { off: [tool("off", "secret_tool", "d", true)] },
+  );
+  await assert.rejects(() => reg.inspect("off", "secret_tool"), /disabled/);
+  await assert.rejects(() => reg.call("off", "secret_tool", {}), /disabled/);
+});
+
+test("setEnabled toggles visibility at runtime (disable hides, enable restores)", async () => {
+  const reg = registryWithConfig(
+    [{ name: "s", transport: "stdio", command: "x" }],
+    { s: [tool("s", "thing", "does a thing", true)] },
+  );
+  // Enabled: discoverable + callable.
+  assert.equal((await reg.search("thing")).length, 1);
+  assert.equal((await reg.call("s", "thing", {})).isError, false);
+  // Disable: gone from search, refused by call.
+  assert.equal(reg.setEnabled("s", false), true);
+  assert.equal((await reg.search("thing")).length, 0);
+  await assert.rejects(() => reg.call("s", "thing", {}), /disabled/);
+  assert.equal(reg.status().find((x) => x.server === "s")!.enabled, false);
+  // Re-enable: back.
+  reg.setEnabled("s", true);
+  assert.equal((await reg.search("thing")).length, 1);
+  // Unknown server toggle returns false.
+  assert.equal(reg.setEnabled("nope", false), false);
+});

@@ -47,8 +47,48 @@ export class McpRegistry {
     return [...this.#configs.keys()];
   }
 
+  /**
+   * A read-only snapshot for a status view: each configured server with its transport, whether it's
+   * connected, whether its circuit is open, and how many tools are cached. Does NOT force a connect,
+   * so calling it is cheap and side-effect-free (safe for a UI poll).
+   */
+  status(): { server: string; transport: string; enabled: boolean; connected: boolean; circuitOpen: boolean; toolCount: number }[] {
+    return [...this.#configs.values()].map((cfg) => ({
+      server: cfg.name,
+      transport: cfg.transport,
+      enabled: this.#enabled(cfg.name),
+      connected: this.#transports.get(cfg.name)?.connected() ?? false,
+      circuitOpen: this.#circuits.get(cfg.name)?.openedAt != null,
+      toolCount: this.#toolCache.get(cfg.name)?.length ?? 0,
+    }));
+  }
+
+  /** Whether a server is currently enabled (default true). A disabled server is fully invisible to
+   * the model — excluded from search and refused by inspect/call — and is never connected. */
+  #enabled(server: string): boolean {
+    return this.#configs.get(server)?.enabled !== false;
+  }
+
+  /**
+   * Enable/disable a server at runtime. Disabling immediately hides it from search and blocks
+   * inspect/call, drops its cached schemas, and closes any open connection (so the subprocess/socket
+   * goes away). Enabling restores discovery on next use. Returns false if the server is unknown.
+   */
+  setEnabled(server: string, enabled: boolean): boolean {
+    const cfg = this.#configs.get(server);
+    if (!cfg) return false;
+    cfg.enabled = enabled;
+    if (!enabled) {
+      this.#toolCache.delete(server);
+      const t = this.#transports.get(server);
+      if (t) { void t.close().catch(() => {}); this.#transports.delete(server); }
+    }
+    return true;
+  }
+
   /** Lazily connect to a server and list+cache its tools. Safe to call repeatedly (memoized). */
   async ensureTools(server: string): Promise<McpToolDef[]> {
+    if (!this.#enabled(server)) throw new Error(`mcp: server "${server}" is disabled`);
     const cached = this.#toolCache.get(server);
     if (cached) return cached;
     const t = await this.#connect(server);
@@ -68,13 +108,14 @@ export class McpRegistry {
    * Returns name + one-liner only — cheap by design (the schema is fetched later via inspect).
    */
   async search(query: string, limit = 8): Promise<McpSearchHit[]> {
-    // Ensure every reachable server is listed at least once (skip ones whose circuit is open).
+    // Ensure every ENABLED, reachable server is listed at least once (skip disabled + open-circuit).
     for (const server of this.#configs.keys()) {
-      if (this.#circuitOpen(server)) continue;
+      if (!this.#enabled(server) || this.#circuitOpen(server)) continue;
       try { await this.ensureTools(server); } catch { /* a dead server shouldn't sink the search */ }
     }
+    // Only rank tools from currently-enabled servers (a server disabled after caching is excluded).
     const terms = tokenize(query);
-    const tools = this.#allCachedTools();
+    const tools = this.#allCachedTools().filter((t) => this.#enabled(t.server));
     const scored = tools.map((t) => ({ t, score: bm25Lite(terms, `${t.name} ${t.description}`) }));
     return scored
       .filter((s) => s.score > 0)
@@ -108,6 +149,7 @@ export class McpRegistry {
    * result the model can react to, and do NOT retry it (the args were wrong, not the transport).
    */
   async call(server: string, name: string, args: Record<string, unknown>, idempotencyKey?: string): Promise<McpCallResult> {
+    if (!this.#enabled(server)) throw new Error(`mcp: server "${server}" is disabled — not calling`);
     if (this.#circuitOpen(server)) {
       throw new Error(`mcp: server "${server}" circuit is open (recent repeated failures) — not calling; retry later`);
     }

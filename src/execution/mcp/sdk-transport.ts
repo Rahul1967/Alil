@@ -1,6 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { McpTransport, McpToolDef, McpCallResult, McpServerConfig } from "./types.ts";
 
 /**
@@ -33,7 +34,7 @@ export class SdkMcpTransport implements McpTransport {
     // Refresh hook: when the server's toolset changes, tell the registry to drop its cache.
     if (this.#onListChanged) {
       client.setNotificationHandler(
-        { method: "notifications/tools/list_changed" } as never,
+        ToolListChangedNotificationSchema,
         async () => { this.#onListChanged?.(); },
       );
     }

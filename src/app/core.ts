@@ -112,6 +112,7 @@ export class Alil {
   readonly #dossier: DossierStore;
   readonly #ingestion: IngestionStore;
   readonly #scheduler: Scheduler | null;
+  readonly #mcp: McpRegistry | null;
   readonly #actions: ActionSink;
   #prefsMigrationTried = false; // one-time-per-process guard for the canonical→dossier prefs move
 
@@ -131,6 +132,7 @@ export class Alil {
     this.#ingestion = built.ingestion;
     this.#scheduler = built.scheduler;
     this.#eventBus = built.eventBus;
+    this.#mcp = built.mcp;
   }
 
   /** The world-model, for channels that want to surface present-tense state. */
@@ -140,6 +142,10 @@ export class Alil {
   /** The operator dossier, for channels that surface a "who you are" view. */
   get dossier(): DossierStore {
     return this.#dossier;
+  }
+  /** The on-demand MCP registry (or null when no servers are configured), for a read-only MCP view. */
+  get mcp(): McpRegistry | null {
+    return this.#mcp;
   }
   /** The ingestion boundary: a channel adapter calls `alil.ingestion.receive(file)` to place an
    *  inbound attachment in the sandbox (tainted `ingested`) before running a turn with it. */
@@ -292,6 +298,7 @@ interface BuiltCore {
   ingestion: IngestionStore;
   scheduler: Scheduler | null;
   eventBus: EventBus;
+  mcp: McpRegistry | null;
 }
 
 /**
@@ -430,7 +437,7 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     },
   });
 
-  alil = new Alil(config, binding, { brain, actions: boundary, planService, ledger: audit, auditSink, logger, memory, episodes, world, dossier, ingestion, scheduler, eventBus });
+  alil = new Alil(config, binding, { brain, actions: boundary, planService, ledger: audit, auditSink, logger, memory, episodes, world, dossier, ingestion, scheduler, eventBus, mcp: mcpRegistry });
   return alil;
 }
 

@@ -57,6 +57,13 @@ export interface McpTransport {
 export interface McpServerConfig {
   name: string;
   transport: "stdio" | "http";
+  /**
+   * Whether this server is active. Default true. When false, it is fully invisible to the model:
+   * excluded from mcp.search, and mcp.inspect/mcp.call refuse it — so a disabled server can neither
+   * be discovered nor reached, even if the model already knows a tool name. It is also never
+   * connected. Toggle it back on to restore access (no restart needed if toggled via the registry).
+   */
+  enabled?: boolean;
   /** stdio: the command + args to spawn. */
   command?: string;
   args?: string[];

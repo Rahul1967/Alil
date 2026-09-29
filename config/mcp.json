@@ -1,4 +1,15 @@
 {
-  "_comment": "MCP servers Alil can reach via the on-demand mcp.* meta-tools. Tools are NEVER injected into context; the model discovers them with mcp.search → mcp.inspect → mcp.call. Empty `servers` (the default) means MCP is off. Each entry: { name, transport: 'stdio', command, args?, env?, timeoutMs?, minEffect? }. Example (disabled): a filesystem server.",
-  "servers": []
+  "_comment": "MCP servers Alil can reach via the on-demand mcp.* meta-tools. Tools are NEVER injected into context; the model discovers them with mcp.search → mcp.inspect → mcp.call. Empty `servers` (the default) means MCP is off. Each entry: { name, transport: 'stdio'|'http', command, args?, env?, url?, timeoutMs?, minEffect?, enabled? }. Streamable-HTTP servers use transport:'http' + url. `enabled` defaults true; set it false (or toggle it in the MCP UI tab) to make a server fully invisible to the model — dropped from search, refused by inspect/call.",
+  "servers": [
+    {
+      "name": "nse-bhavcopy",
+      "transport": "http",
+      "url": "https://mcp.nseindia.in/bhavcopy/cm/mcp"
+    },
+    {
+      "name": "cm-market",
+      "transport": "http",
+      "url": "https://mcp.nseindia.in/cmmkt/mcp"
+    }
+  ]
 }

@@ -362,8 +362,10 @@ const tabChat = document.getElementById("tabChat");
 const tabPlan = document.getElementById("tabPlan");
 const tabLater = document.getElementById("tabLater");
 const tabDossier = document.getElementById("tabDossier");
+const tabMcp = document.getElementById("tabMcp");
 const tabMemory = document.getElementById("tabMemory");
 const dossierView = document.getElementById("dossierView");
+const mcpView = document.getElementById("mcpView");
 const memContent = document.getElementById("memContent");
 let memView = "timeline";
 // Page sizes for the paginated views; other views return a plain array.
@@ -398,11 +400,13 @@ function setView(which) {
   planView.classList.toggle("show", which === "plan");
   laterView.classList.toggle("show", which === "later");
   dossierView.classList.toggle("show", which === "dossier");
+  mcpView.classList.toggle("show", which === "mcp");
   memoryView.classList.toggle("show", which === "memory");
   tabChat.classList.toggle("active", which === "chat");
   tabPlan.classList.toggle("active", which === "plan");
   tabLater.classList.toggle("active", which === "later");
   tabDossier.classList.toggle("active", which === "dossier");
+  tabMcp.classList.toggle("active", which === "mcp");
   tabMemory.classList.toggle("active", which === "memory");
   // Stop any running graph animation when leaving the dossier view (avoids a background RAF loop).
   if (which !== "dossier" && typeof graphSim !== "undefined" && graphSim && graphSim.raf) {
@@ -413,6 +417,7 @@ function setView(which) {
 tabChat.addEventListener("click", () => setView("chat"));
 tabPlan.addEventListener("click", () => setView("plan"));
 tabDossier.addEventListener("click", () => { setView("dossier"); loadDossier(); });
+tabMcp.addEventListener("click", () => { setView("mcp"); loadMcp(); });
 tabLater.addEventListener("click", () => { setView("later"); loadLater(); });
 tabMemory.addEventListener("click", () => { setView("memory"); loadStats(); loadMemory(memView); });
 
@@ -967,6 +972,115 @@ function runForceGraph(rawNodes, edges) {
     const f = await fetchDossierBody(best.id);
     bodyDiv.textContent = f ? (f.body || "(empty)") : "(could not load)";
   };
+}
+
+// ── MCP view (external tools, read-only) ─────────────────────────────────────
+const mcpServers = document.getElementById("mcpServers");
+const mcpResults = document.getElementById("mcpResults");
+const mcpSearch = document.getElementById("mcpSearch");
+let mcpSearchTimer = null;
+
+async function loadMcp() {
+  mcpServers.innerHTML = "";
+  mcpServers.appendChild(el("div", "empty-tab", "loading…"));
+  let data;
+  try {
+    data = await (await fetch("/api/mcp/status")).json();
+  } catch (e) {
+    mcpServers.innerHTML = ""; mcpServers.appendChild(el("div", "empty-tab", "error: " + e.message)); return;
+  }
+  mcpServers.innerHTML = "";
+  if (!data.enabled || !data.servers || data.servers.length === 0) {
+    mcpServers.appendChild(el("div", "empty-tab",
+      "No MCP servers configured. Add servers to config/mcp.json ({ \"servers\": [...] }) and restart. External tools are discovered on demand — never injected into context."));
+    return;
+  }
+  for (const s of data.servers) {
+    const row = el("div", "mcp-srv");
+    row.appendChild(el("span", "name", s.server));
+    row.appendChild(el("span", "", s.transport));
+    const grow = el("span", "grow"); row.appendChild(grow);
+    if (s.circuitOpen) row.appendChild(el("span", "badge open", "circuit open"));
+    if (s.enabled === false) {
+      row.appendChild(el("span", "badge down", "disabled"));
+    } else {
+      row.appendChild(el("span", "badge " + (s.connected ? "up" : "down"), s.connected ? "connected" : "idle"));
+      if (s.toolCount) row.appendChild(el("span", "badge", s.toolCount + " tools"));
+    }
+    // Enable/disable toggle — a disabled server is fully invisible to the model.
+    const toggle = el("button", "mcp-toggle", s.enabled === false ? "Enable" : "Disable");
+    toggle.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      toggle.disabled = true;
+      try {
+        await fetch("/api/mcp/toggle", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ server: s.server, enabled: s.enabled === false }),
+        });
+        await loadMcp();       // refresh status
+        if (s.enabled !== false) { mcpResults.innerHTML = ""; mcpSearch.value = ""; } // clear stale hits after a disable
+      } catch (err) { toggle.disabled = false; toggle.textContent = "error"; }
+    });
+    row.appendChild(toggle);
+    mcpServers.appendChild(row);
+  }
+}
+
+mcpSearch.addEventListener("input", () => {
+  clearTimeout(mcpSearchTimer);
+  mcpSearchTimer = setTimeout(runMcpSearch, 250);
+});
+
+async function runMcpSearch() {
+  const q = mcpSearch.value.trim();
+  mcpResults.innerHTML = "";
+  if (!q) return;
+  mcpResults.appendChild(el("div", "empty-tab", "searching…"));
+  let data;
+  try {
+    data = await (await fetch("/api/mcp/search?q=" + encodeURIComponent(q))).json();
+  } catch (e) {
+    mcpResults.innerHTML = ""; mcpResults.appendChild(el("div", "empty-tab", "error: " + e.message)); return;
+  }
+  mcpResults.innerHTML = "";
+  const hits = data.hits || [];
+  if (hits.length === 0) {
+    mcpResults.appendChild(el("div", "empty-tab", data.error ? ("error: " + data.error) : "No matching external tools."));
+    return;
+  }
+  for (const h of hits) mcpResults.appendChild(renderMcpTool(h));
+}
+
+function renderMcpTool(hit) {
+  const card = el("div", "dcard");
+  card.appendChild(el("div", "dtitle", hit.name));
+  const meta = el("div", "dmeta");
+  meta.appendChild(el("span", "dtype", hit.server));
+  meta.appendChild(el("span", "", hit.description || ""));
+  card.appendChild(meta);
+  const body = el("div", "dbody");
+  card.appendChild(body);
+  let loaded = false;
+  card.addEventListener("click", async () => {
+    const opening = !card.classList.contains("open");
+    card.classList.toggle("open");
+    if (opening && !loaded) {
+      loaded = true;
+      body.textContent = "loading schema…";
+      try {
+        const d = await (await fetch("/api/mcp/tool?server=" + encodeURIComponent(hit.server) + "&name=" + encodeURIComponent(hit.name))).json();
+        body.textContent = "";
+        if (d.error) { body.textContent = "error: " + d.error; return; }
+        body.appendChild(el("div", "ddesc", d.description || ""));
+        body.appendChild(el("div", "dmeta", "effect: " + d.effect + " · risk: " + d.risk + " · " + (d.reversible ? "reversible" : "irreversible")));
+        const pre = el("div", "", JSON.stringify(d.inputSchema, null, 2));
+        pre.style.whiteSpace = "pre-wrap"; pre.style.fontFamily = "'IBM Plex Mono', monospace"; pre.style.fontSize = "12px"; pre.style.marginTop = "8px";
+        body.appendChild(pre);
+      } catch (e) { body.textContent = "error: " + e.message; }
+    }
+  });
+  return card;
 }
 
 // ── Plan view ──────────────────────────────────────────────────────────────────
