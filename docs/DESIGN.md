@@ -651,6 +651,15 @@ hash-chained ledger; security-critical slices get an adversarial test *before* t
 - Additional channel bindings (Slack first — its inbound-file path is already sketched in §08c).
 - Prospective memory: an autonomous periodic review routine; a stronger embedder for true semantic
   context matching (today keyword-anchored); a stable canonical user timezone.
+- **Episodic semantic search — enhance for scale.** Recall is already hybrid (sqlite-vec KNN + FTS5
+  BM25, fused by RRF), but the default `HashingEmbedder` is crude bag-of-words feature hashing, so
+  semantic matches are weak and get weaker as episode volume grows. To scale: (a) default to a
+  higher-quality embedder (Titan today; ideally a strong local model so it stays no-API) with a
+  one-time re-embed migration since DIM is fixed at DB-create; (b) an ANN index / vector-store path
+  once linear KNN over many episodes gets slow; (c) tune RRF weighting and add recency/salience
+  priors so old, low-value episodes don't crowd recall; (d) consider chunk-level summaries +
+  hierarchical retrieval so long episodes surface their relevant span, not the whole transcript.
+  Files-as-truth is preserved — the index stays a rebuildable projection beside the episode files.
 
 **Explicit non-goals (still):** a public skill registry before signing + sandboxing exist; any
 `full`/unrestricted execution mode — Alil ships without one.

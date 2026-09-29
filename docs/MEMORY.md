@@ -128,6 +128,13 @@ the embedder that produced them; switching requires re-embedding (DIM is fixed a
 enriches each hit with its episode date. Semantic search spans **all closed episodes**, not
 just recent ones — a year-old episode competes on relevance; `k` bounds results, not scope.
 
+> **Scaling (planned — see DESIGN §12 Next).** The hybrid pipeline is sound, but the default
+> `HashingEmbedder` gives weak semantic matches that degrade as episodes accumulate. The scale path:
+> a stronger (ideally local, no-API) default embedder with a one-time re-embed migration; an ANN
+> index once linear KNN slows; RRF weighting + recency/salience priors so stale episodes don't crowd
+> recall; and chunk-level summaries + hierarchical retrieval so a long episode surfaces its relevant
+> span. The vector index stays a rebuildable projection beside the episode files (files-as-truth).
+
 ## 5 · Lifecycle: timeline → episodes → distillation
 
 - **Timeline** is the append-only source of truth; every turn from every channel appends one
