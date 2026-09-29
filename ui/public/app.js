@@ -241,7 +241,7 @@ function renderApproval(a) {
   card.dataset.id = a.id;
   const head = document.createElement("div");
   head.className = "approval-head";
-  head.textContent = `Alil wants to run ${a.tool} · ${a.effect} · ${a.risk} risk`;
+  head.textContent = a.tool === "plan" ? "Alil wants to run this plan" : `Alil wants to run ${a.tool} · ${a.effect} · ${a.risk} risk`;
   card.appendChild(head);
   if (a.reason) card.appendChild(Object.assign(document.createElement("div"), { className: "approval-reason", textContent: a.reason }));
   card.appendChild(Object.assign(document.createElement("div"), { className: "approval-args", textContent: a.args }));
@@ -272,8 +272,14 @@ function renderApproval(a) {
   btns.appendChild(approve);
   btns.appendChild(reject);
   card.appendChild(btns);
-  log.appendChild(card);
-  scrollDown();
+  // Render where the operator is looking: a plan run is watched from the Plan tab.
+  const planView = document.getElementById("planView");
+  if (planView && planView.classList.contains("show")) {
+    document.getElementById("planApprovals").appendChild(card);
+  } else {
+    log.appendChild(card);
+    scrollDown();
+  }
 }
 
 async function pollApprovals() {
@@ -1134,6 +1140,7 @@ async function runPlan(execute) {
   if (!goal) return;
   planPreview.disabled = planRun.disabled = true;
   planNodes.innerHTML = "";
+  document.getElementById("planApprovals").replaceChildren();
   planNodes.appendChild(el("div", "empty-tab", execute ? "running…" : "planning…"));
   const approvalPoll = execute ? setInterval(pollApprovals, 1000) : null;
   try {

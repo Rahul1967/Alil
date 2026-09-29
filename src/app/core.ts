@@ -67,8 +67,10 @@ export interface AlilConfig {
   worldMarkdownPath?: string;
   /** Directory the operator-dossier markdown files live under. Default workspace/DOSSIER. */
   dossierRoot?: string;
-  /** Directory the lens files live under (`<root>/<id>/LENS.md`). Default workspace/LENSES. */
+  /** Directory the lens files live under (`<root>/<id>/LENS.md`). Default <sandboxRoot>/LENSES. */
   lensRoot?: string;
+  /** Persona file. Default <sandboxRoot>/SOUL.md. */
+  personaPath?: string;
   /**
    * Path to an MCP server-config JSON file ({ servers: McpServerConfig[] }). When present and
    * non-empty, the mcp.* meta-tools connect lazily to those servers (on-demand — no per-turn tool
@@ -366,15 +368,19 @@ interface BuiltCore {
  */
 export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
   const registry = config.registry ?? new ProviderRegistry().register(new BedrockProvider());
-  const audit = new AuditLedger(config.auditPath ?? "workspace/logs/audit.jsonl");
+  // Every runtime-state path defaults under the sandbox root, so pointing ALIL_SANDBOX_ROOT (or
+  // config.sandboxRoot) elsewhere isolates a run completely — ledger, world-model, memory, persona.
+  // With the default root ("workspace") the paths are the historical ones. Policy and MCP config
+  // are code-adjacent config, not runtime state, and stay under config/.
+  const sandboxRoot = config.sandboxRoot ?? process.env.ALIL_SANDBOX_ROOT ?? "workspace";
+  const audit = new AuditLedger(config.auditPath ?? `${sandboxRoot}/logs/audit.jsonl`);
   // Debug: one logger, wired below as the observer + recall/world/audit taps, so every channel
   // gets the same background trace from `--debug`.
   const logger = config.debug ? new DebugLogger() : null;
   const auditSink = logger ? tapAudit(audit, logger) : audit;
-  const sandboxRoot = config.sandboxRoot ?? process.env.ALIL_SANDBOX_ROOT ?? "workspace";
   const world = new WorldStore({
-    path: config.worldPath ?? "workspace/.alil/world.json",
-    markdownPath: config.worldMarkdownPath ?? "workspace/WORLD.md",
+    path: config.worldPath ?? `${sandboxRoot}/.alil/world.json`,
+    markdownPath: config.worldMarkdownPath ?? `${sandboxRoot}/WORLD.md`,
   });
   // Lenses (DESIGN §10b): operator-owned files, one active lens per channel (persisted in the memory
   // kv table once memory opens — the service restores it lazily on first use).
@@ -411,7 +417,7 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
   const memCtx: { store?: MemoryStore } = {};
   const prospCtx: { store?: ProspectiveStore } = {};
   try {
-    memory = openMemory({ path: config.dbPath ?? process.env.ALIL_DB ?? "workspace/memory.db" });
+    memory = openMemory({ path: config.dbPath ?? process.env.ALIL_DB ?? `${sandboxRoot}/memory.db` });
     // seedMemoryInstructions is async; fire-and-forget is fine (idempotent, best-effort refresh).
     void seedMemoryInstructions(memory.store);
     memCtx.store = memory.store;
@@ -488,7 +494,7 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     memory: logger ? tapRecall(memoryPort, logger) : memoryPort,
     skills: { eligible: async () => [] },
     tools: new RegistryToolCatalog(DEFAULT_TOOLS),
-    prompt: new PromptAssembler(new FilePersonaSource(), {
+    prompt: new PromptAssembler(new FilePersonaSource(config.personaPath ?? `${sandboxRoot}/SOUL.md`), {
       env: { now: () => new Date() },
       ...(knowledge ? { knowledge } : {}),
       lens: () => { const l = lenses.active(); return l ? lensPromptLayer(l) : null; },

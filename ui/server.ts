@@ -17,6 +17,7 @@ import type { BrainObserver } from "../src/runtime/types.ts";
 import type { ApprovalPort, ApprovalRequest, ApprovalDecision } from "../src/policy/index.ts";
 import { createAlil, debugEnabled } from "../src/app/index.ts";
 import type { ChannelBinding } from "../src/app/index.ts";
+import type { PlanNode } from "../src/runtime/index.ts";
 import { buildDossierGraph } from "../src/dossier/index.ts";
 
 const PORT = Number(process.env.PORT ?? 8787);
@@ -34,23 +35,37 @@ interface PendingApproval {
   resolve: (d: ApprovalDecision) => void;
 }
 const pendingApprovals = new Map<string, PendingApproval>();
+
+/** Park a question for the page (polled via /api/approvals); resolves on an answer or timeout ⇒ reject. */
+function askInPage(q: Omit<PendingApproval, "resolve">): Promise<ApprovalDecision> {
+  return new Promise<ApprovalDecision>((resolve) => {
+    let settled = false;
+    const done = (d: ApprovalDecision) => {
+      if (settled) return;
+      settled = true;
+      pendingApprovals.delete(q.id);
+      clearTimeout(timer);
+      resolve(d);
+    };
+    const timer = setTimeout(() => done({ approved: false, reason: "no response in the browser (timed out)" }), APPROVAL_TIMEOUT_MS);
+    pendingApprovals.set(q.id, { ...q, resolve: done });
+  });
+}
+
 const approvals: ApprovalPort = {
   request(req: ApprovalRequest): Promise<ApprovalDecision> {
     const a = req.action;
-    return new Promise<ApprovalDecision>((resolve) => {
-      let settled = false;
-      const done = (d: ApprovalDecision) => {
-        if (settled) return;
-        settled = true;
-        pendingApprovals.delete(req.id);
-        clearTimeout(timer);
-        resolve(d);
-      };
-      const timer = setTimeout(() => done({ approved: false, reason: "no response in the browser (timed out)" }), APPROVAL_TIMEOUT_MS);
-      pendingApprovals.set(req.id, { id: req.id, tool: a.tool, effect: a.effect, risk: a.risk, argsPreview: JSON.stringify(a.args).slice(0, 300), reason: req.reason, resolve: done });
-    });
+    return askInPage({ id: req.id, tool: a.tool, effect: a.effect, risk: a.risk, argsPreview: JSON.stringify(a.args).slice(0, 300), reason: req.reason });
   },
 };
+
+/** Plan-level HITL in the page: the DAG (and every replan) is shown as an approval card. */
+let planApprovalSeq = 0;
+async function approvePlanInPage(goal: string, nodes: PlanNode[]): Promise<boolean> {
+  const steps = nodes.map((n) => `${n.id}. ${n.description}${n.deps.length ? ` (after ${n.deps.join(", ")})` : ""}`).join("\n");
+  const d = await askInPage({ id: `plan_${++planApprovalSeq}`, tool: "plan", effect: "plan", risk: "medium", argsPreview: steps, reason: `Run this plan for: ${goal}` });
+  return d.approved;
+}
 
 // Per-turn trace: the TurnQueue serializes turns, so a module-level buffer is safe to reuse.
 let activeTrace: string[] = [];
@@ -356,7 +371,8 @@ const server = createServer(async (req, res) => {
       const body = JSON.parse((await readBody(req)) || "{}") as { goal?: string; execute?: boolean };
       const goal = (body.goal ?? "").trim();
       if (!goal) return json(400, { error: "empty goal" });
-      const result = await alil.runPlan(goal, { dryRun: !body.execute, approvePlan: async () => true });
+      // Execute ⇒ the plan (and every replan) is approved in the page first; preview ⇒ no gate needed.
+      const result = await alil.runPlan(goal, body.execute ? { approvePlan: (nodes) => approvePlanInPage(goal, nodes) } : { dryRun: true });
       return json(200, { status: result.status, replans: result.replans, nodes: result.nodes.map((n) => ({ id: n.id, description: n.description, deps: n.deps, status: n.status, summary: n.summary })) });
     } catch (e) {
       return json(500, { error: (e as Error).message });

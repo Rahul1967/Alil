@@ -35,7 +35,9 @@ export const memoryWrite: ToolImpl<MemoryWriteArgs> = {
     additionalProperties: false,
   },
   effect: "write",
-  risk: "medium",
+  // High: canonical facts render into EVERY turn's system prompt, so a fact pinned under untrusted
+  // influence is a lasting injection. High ⇒ a tainted turn is hard-denied and no grant covers it.
+  risk: "high",
   reversible: false,
 
   validate(args): ValidateResult<MemoryWriteArgs> {

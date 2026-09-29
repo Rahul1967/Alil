@@ -801,18 +801,14 @@ hash-chained ledger; security-critical slices get an adversarial test *before* t
   classification, validate-before-approval; and fixes for tier-search crowding, fetch-as-success
   scoring, zero model pricing (the cost guard could never trip), event taint laundering via
   caller-supplied provenance, the UI listening on all interfaces, Telegram `/plan` auto-approval,
-  and unenforced tainted procedure writes.
+  and unenforced tainted procedure writes. Follow-ups: the browser plan now asks in-page for the
+  plan and every replan (and approval cards render in whichever view is showing); every
+  runtime-state path (ledger, world-model, memory DB, persona, lenses) defaults under the sandbox
+  root; `memory.write` is high risk, so a tainted turn can't pin a canonical fact.
 
 **Next.**
-- **Lens follow-ups (found while building §10b).**
-  - Browser `/api/plan` still passes `approvePlan: async () => true` (execute is an explicit click,
-    but replans are auto-approved); give it the in-page approval flow Telegram now has.
-  - The audit-ledger, world-model and policy paths default to `workspace/…` independently of
-    `ALIL_SANDBOX_ROOT`; derive them from the sandbox root so an isolated run is fully isolated.
-  - `memory.write` is medium risk, so a tainted turn can still *propose* a canonical fact (ask, not
-    deny) even though canonical is always in context; decide whether it should be high like
-    procedure writes.
-  - Composing several active lenses at once (deliberately out of scope: one lens per channel).
+- Composing several active lenses at once (deliberately out of scope for now: one lens per
+  channel keeps overlay precedence and prompt layering simple).
 - Optional local Tesseract `doc.ocr` for offline/air-gapped text extraction; terminal `!attach`.
 - **Pluggable web egress backends (research done 2026-09; verified).** Keep the hardened egress
   layer (resolve+validate+pin IP, redirect re-validation, credential screening, ingested-taint) as a
