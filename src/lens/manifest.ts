@@ -60,6 +60,11 @@ export function validateLens(raw: Record<string, unknown>, stance: string, expec
     fail(id, "`synonyms` must map strings to strings");
   }
   const synonyms = synonymsRaw as Record<string, string>;
+  for (const [from, to] of Object.entries(synonyms)) {
+    if (!isTagWord(from) || !isTagWord(to)) {
+      fail(id, `synonyms map an alternative tag word to a tag (e.g. { investment: investing }); "${from}: ${to}" is not a tag pair — put descriptions in the stance instead`);
+    }
+  }
 
   // Normalize tags with a registry that knows only this lens's synonyms (the shared registry is
   // built from all lenses afterwards).
@@ -110,6 +115,12 @@ export function validateLens(raw: Record<string, unknown>, stance: string, expec
   for (const [i, r] of (polRaw as unknown[]).entries()) policy.push(validateOverlayRule(id, i, r));
 
   return { id, title: title.trim(), description: description.trim(), tags, synonyms, keywords, surface, tools, triggers, model: model as string | null, policy, stance: stance.trim() };
+}
+
+/** A short tag-like word or phrase: ≤ 3 words, ≤ 32 chars, no list/description punctuation. */
+function isTagWord(v: string): boolean {
+  const t = v.trim();
+  return t.length > 0 && t.length <= 32 && !/[,;:/()—–.]/.test(t) && t.split(/\s+/).length <= 3;
 }
 
 /** One overlay rule. Only deny/ask survive — a lens may only TIGHTEN policy. */

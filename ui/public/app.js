@@ -341,7 +341,8 @@ async function submit(text) {
     } else {
       if (j.reply) addMessage("bot", j.reply, j.trace);
       else addMessage("bot", "(no answer)", j.trace);
-      if (j.stopReason && j.stopReason !== "complete") addNote("turn " + j.stopReason);
+      if (j.stopReason === "command") loadLenses(); // a /lens command — keep the header picker in sync
+      else if (j.stopReason && j.stopReason !== "complete") addNote("turn " + j.stopReason);
     }
   } catch (e) {
     typing.remove();

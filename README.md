@@ -50,7 +50,7 @@ npm install
 cp .env.example .env   # fill in your own credentials — never commit .env
 ```
 
-`.env` holds local secrets only (provider keys, sandbox root, optional Telegram config) and is git-ignored.
+`.env` holds local secrets only (provider keys, sandbox root, optional Telegram config) and is git-ignored. `ALIL_SANDBOX_ROOT` is the folder the file tools may touch; Alil's own data (memory, audit ledger, world-model, persona, lenses) lives in `ALIL_STATE_DIR` (default `workspace/`), independently.
 
 ## Running
 

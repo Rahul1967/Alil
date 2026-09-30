@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
 import type { BrainObserver } from "../src/runtime/types.ts";
 import type { ApprovalPort, ApprovalRequest, ApprovalDecision } from "../src/policy/index.ts";
-import { createAlil, debugEnabled } from "../src/app/index.ts";
+import { createAlil, debugEnabled, handleLensCommand } from "../src/app/index.ts";
 import type { ChannelBinding } from "../src/app/index.ts";
 import type { PlanNode } from "../src/runtime/index.ts";
 import { buildDossierGraph } from "../src/dossier/index.ts";
@@ -399,6 +399,10 @@ const server = createServer(async (req, res) => {
       const text = (body.message ?? "").trim();
       const attachments = body.attachments ?? [];
       if (!text && attachments.length === 0) return json(400, { error: "empty message" });
+      // Operator commands are handled here, never sent to the model (channel parity with the
+      // terminal and Telegram — the model can't switch lenses, and must not pretend to).
+      const lensReply = await handleLensCommand(alil, text);
+      if (lensReply !== null) return json(200, { reply: lensReply, trace: [], iterations: 0, stopReason: "command", lens: alil.lenses.activeId() });
       return json(200, await runTurn(text || "(the operator sent a file)", attachments));
     } catch (e) {
       return json(500, { error: (e as Error).message });

@@ -56,6 +56,8 @@ test("the loader rejects every way a lens could loosen policy", () => {
     ["id: a\ntags: [x]\nsomething: 1", /unknown key `something`/],
     ["id: a\ntags: []", /at least one tag/],
     ["id: Bad_Id\ntags: [x]", /`id` must match/],
+    ["id: a\ntags: [x]\nsynonyms:\n  portfolio: stocks, mutual funds, ETFs and other investments held", /not a tag pair/],
+    ["id: a\ntags: [x]\nsynonyms:\n  CFO: chief financial officer — overall money strategy", /not a tag pair/],
   ];
   for (const [fm, re] of bad) assert.throws(() => parseLensFile(lensFile(fm)), (e: unknown) => e instanceof LensError && re.test((e as Error).message), fm);
   assert.throws(() => parseLensFile(lensFile("id: a\ntags: [x]"), "b"), /must equal its folder name/);

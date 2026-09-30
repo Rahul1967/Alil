@@ -802,9 +802,15 @@ hash-chained ledger; security-critical slices get an adversarial test *before* t
   scoring, zero model pricing (the cost guard could never trip), event taint laundering via
   caller-supplied provenance, the UI listening on all interfaces, Telegram `/plan` auto-approval,
   and unenforced tainted procedure writes. Follow-ups: the browser plan now asks in-page for the
-  plan and every replan (and approval cards render in whichever view is showing); every
-  runtime-state path (ledger, world-model, memory DB, persona, lenses) defaults under the sandbox
-  root; `memory.write` is high risk, so a tainted turn can't pin a canonical fact.
+  plan and every replan (and approval cards render in whichever view is showing); runtime state
+  (ledger, world-model, memory DB, persona, lenses) lives under a STATE dir (`ALIL_STATE_DIR`,
+  default `workspace`) that is deliberately separate from the sandbox root — the tools' filesystem
+  jail, which an operator may widen to their home directory without moving Alil's memory;
+  `memory.write` is high risk, so a tainted turn can't pin a canonical fact; `/lens` is handled in
+  the browser chat like every other channel (it was reaching the model, which then claimed a switch
+  that never happened); generic file writes to `**/LENSES/**` and `**/SOUL.md` are critical in
+  `config/policy.yaml` (so `fs.write` can't bypass `lens.create`'s gate); lens `synonyms` must be
+  short tag pairs.
 
 **Next.**
 - Composing several active lenses at once (deliberately out of scope for now: one lens per

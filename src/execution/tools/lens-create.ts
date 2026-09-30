@@ -28,7 +28,7 @@ export const lensCreate: ToolImpl<LensCreateArgs> = {
       title: { type: "string" },
       description: { type: "string" },
       tags: { type: "array", items: { type: "string" }, minItems: 1 },
-      synonyms: { type: "object", additionalProperties: { type: "string" } },
+      synonyms: { type: "object", additionalProperties: { type: "string" }, description: "Alternative TAG words mapped to your tags, e.g. { investment: investing, loan: debt }. Short words only — explanations belong in the stance." },
       keywords: { type: "array", items: { type: "string" } },
       surface: { type: "object", description: "Boost weights 0–3 per tier: procedures, episodes, dossier, canonical." },
       tools: { type: "object", description: "{ emphasize: string[], mcpServers: string[] } — ranking only, never a grant." },

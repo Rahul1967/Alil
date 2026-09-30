@@ -21,6 +21,17 @@ rules:
     note: "never touch secret-named files"
 
   # ── ask (always require a human, regardless of mode) ──
+  # Files that reach the system prompt (lens stances, the persona) are lasting-injection targets:
+  # editing them with a generic file tool is critical — never grant-covered, hard-denied when
+  # tainted — matching lens.create's own gate.
+  - kind: ask
+    match: { effect: write, pathGlob: "**/LENSES/**" }
+    raiseRisk: critical
+    note: "lens files shape every turn's system prompt — fresh approval, never from tainted input"
+  - kind: ask
+    match: { effect: write, pathGlob: "**/SOUL.md" }
+    raiseRisk: critical
+    note: "the persona shapes every turn's system prompt — fresh approval, never from tainted input"
   - kind: ask
     match: { effect: write }
     note: "confirm before writing/persisting (files, memory, reminders, world state)"
