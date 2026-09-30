@@ -51,7 +51,17 @@ export interface BrainConfig {
   modelId: string;
   guards: GuardLimits;
   temperature?: number;
+  /** Retries for RETRYABLE provider errors (throttling, 5xx, network), exponential backoff with
+   * jitter. Default { maxRetries: 2, baseDelayMs: 500 }. Non-retryable errors fail at once. */
+  retry?: ProviderRetry;
 }
+
+export interface ProviderRetry {
+  maxRetries: number;
+  baseDelayMs: number;
+}
+
+export const DEFAULT_PROVIDER_RETRY: ProviderRetry = { maxRetries: 2, baseDelayMs: 500 };
 
 export interface GuardLimits {
   maxIterations: number; // default 10

@@ -208,6 +208,8 @@ Apply to *every* component. The three lenses:
 - [ ] **Retry only idempotent operations.** A side-effect without an idempotency key is
       never blindly retried.
 - [ ] **Exponential backoff + jitter** on transient failures; cap attempts; cap total time.
+      (Model calls: `ProviderError.retryable` ⇒ up to 2 retries, abortable backoff, inside the
+      turn's wall-clock guard — `src/runtime/loop.ts`.)
 - [ ] **Respect provider signals** (rate-limit reset, `Retry-After`); don't hammer.
 - [ ] **Circuit-break** repeated failures against a dependency; degrade gracefully.
 - [ ] **Never retry a denied action.** A policy `deny` is terminal; re-request approval
@@ -224,6 +226,8 @@ Apply to *every* component. The three lenses:
       re-surfaced; never dropped.
 - [ ] **Test the failure paths**, not just the happy path: injected timeouts, denied calls,
       malformed responses, mid-action crash + resume.
+- [ ] **Never lose operator input.** Persist the inbound message before doing work on it; record
+      a failed/interrupted outcome instead of dropping the exchange (`test/resilience.test.ts`).
 
 ---
 

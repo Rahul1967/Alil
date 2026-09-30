@@ -145,6 +145,20 @@ just recent ones — a year-old episode competes on relevance; `k` bounds result
   gated, audited **`memory.write`** (behavior-changing). The offline `ExtractiveSummarizer` is
   the default; an LLM summarizer drops in behind the `EpisodeSummarizer` port.
 
+**Durability & restarts.**
+- The operator's message is appended **when the turn starts**, before the model runs; the reply
+  (or a `[harness note]` saying the turn was interrupted — error, cancel, guard halt, crash) is
+  appended when it ends. Every user line gets exactly one answering line, so on startup a channel
+  whose last line is an unanswered user message was cut off mid-turn and is marked as such. A
+  crash can lose a reply, never the message.
+- The episode cursor (`agent_state`) is in the DB, so a restart continues the open episode or
+  closes it on the first turn after the gap. The gap runs from the **end** of the last turn, and
+  an episode's `ended_at` is when activity stopped, not when the next turn noticed.
+- Closing is lazy (it happens at the next turn after the gap — there is no timer). On the first
+  turn of a process, any closed episode left without a summary or index entry (a crash between
+  close and distill) is distilled then; indexing replaces an episode's chunk, so recovery is
+  idempotent.
+
 **Decision — the episode is the indexing unit, not the turn.** A single turn ("set pool max to
 20") lacks the context that makes it meaningful. Indexing the distilled episode avoids
 re-stitching turns at read time. Consequence: **taint is episode-granular** (if any line was

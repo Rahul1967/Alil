@@ -1,7 +1,7 @@
 import { Brain } from "../runtime/loop.ts";
 import type { BrainPorts } from "../runtime/loop.ts";
 import { DEFAULT_GUARDS } from "../runtime/types.ts";
-import type { BrainInput, BrainTurn, BrainObserver, GuardLimits, MemoryPort, ActionSink } from "../runtime/types.ts";
+import type { BrainInput, BrainTurn, BrainObserver, GuardLimits, MemoryPort, ActionSink, ProviderRetry } from "../runtime/types.ts";
 import type { Provenance, TranscriptLine, ActionContract, ToolResult, Fragment } from "../core/types.ts";
 import { ProviderRegistry, BedrockProvider } from "../providers/index.ts";
 import { PromptAssembler, FilePersonaSource } from "../prompts/index.ts";
@@ -74,6 +74,8 @@ export interface AlilConfig {
   stateDir?: string;
   /** Directory the lens files live under (`<root>/<id>/LENS.md`). Default <stateDir>/LENSES. */
   lensRoot?: string;
+  /** Retries for transient model errors. Default { maxRetries: 2, baseDelayMs: 500 }. */
+  providerRetry?: ProviderRetry;
   /** Persona file. Default <stateDir>/SOUL.md. */
   personaPath?: string;
   /**
@@ -154,6 +156,7 @@ export class Alil {
     this.#lenses = built.lenses;
     this.#registry = built.registry;
     this.#defaultModel = _config.modelId;
+    this.#recoverInterruptedTurn();
   }
 
   /** Lenses: the store (list/get/write) and the channel's active lens. Read-only for the model. */
@@ -283,20 +286,70 @@ export class Alil {
           : {}),
       };
       this.#logger?.turnStart(this.channel, opts.label ?? "turn", text, provenance);
+      const lensField = lens ? { lens: lens.id } : {};
+      // The operator's message is durable BEFORE the model runs (history was read above, so it isn't
+      // duplicated into this turn's context). A crash, error, or cancel can lose the reply — never
+      // the message. Every user line gets exactly one answering line (reply or harness note), which
+      // is what lets a restart detect a turn that was cut off (#recoverInterruptedTurn).
+      this.#memory?.timeline.append({ at, channel: this.channel, provenance, episodeId, role: "user", text, ...lensField });
       const signal = anySignal(queueSignal, opts.signal);
       const modelId = this.#modelFor(lens);
-      const turn = await this.#brain.run(input, { ...(signal ? { signal } : {}), ...(modelId !== this.#defaultModel ? { modelId } : {}) });
-      this.#logger?.turnEnd(turn);
-      if (turn.stopReason === "complete" && this.#memory) {
-        const lensField = lens ? { lens: lens.id } : {};
-        this.#memory.timeline.append({ at, channel: this.channel, provenance, episodeId, role: "user", text, ...lensField });
-        if (turn.assistantText !== undefined) {
-          this.#memory.timeline.append({ at, channel: this.channel, provenance: { origin: "model" }, episodeId, role: "assistant", text: turn.assistantText, ...lensField });
-        }
-        this.#audit.append("turn", { channel: this.channel, episodeId, iterations: turn.iterations, ...(opts.label ? { label: opts.label } : {}), ...lensField, ...(modelId !== this.#defaultModel ? { model: modelId } : {}) });
+      let turn: BrainTurn;
+      try {
+        turn = await this.#brain.run(input, { ...(signal ? { signal } : {}), ...(modelId !== this.#defaultModel ? { modelId } : {}) });
+      } catch (err) {
+        this.#recordReply(episodeId, lensField, undefined, `crashed: ${err instanceof Error ? err.message : String(err)}`);
+        this.#audit.append("turn", { channel: this.channel, episodeId, stopReason: "crash", ...(opts.label ? { label: opts.label } : {}), ...lensField });
+        throw err;
       }
+      this.#logger?.turnEnd(turn);
+      const interruption =
+        turn.stopReason === "complete" ? null
+        : turn.stopReason === "aborted" ? "cancelled"
+        : turn.stopReason === "guard_halt" ? `halted: ${turn.haltReason ?? "guard"}`
+        : turn.haltReason ?? turn.stopReason;
+      this.#recordReply(episodeId, lensField, turn.assistantText, interruption);
+      this.#audit.append("turn", {
+        channel: this.channel, episodeId, iterations: turn.iterations, stopReason: turn.stopReason,
+        ...(opts.label ? { label: opts.label } : {}), ...lensField, ...(modelId !== this.#defaultModel ? { model: modelId } : {}),
+      });
       return turn;
     }), opts.preempt ? { preempt: true } : {});
+  }
+
+  /**
+   * Record the answer to the user line just written: the reply, and — when the turn did not
+   * complete — a harness-authored note saying so, so the next turn knows no (full) reply was sent
+   * instead of contradicting the operator about a conversation it has no record of.
+   */
+  #recordReply(episodeId: string, lensField: { lens?: string }, reply: string | undefined, interruption: string | null): void {
+    if (this.#memory) {
+      const note = interruption !== null ? interruptedNote(interruption) : reply === undefined ? "[harness note] I finished without a text reply." : null;
+      const text = [reply, note].filter((t): t is string => !!t).join("\n\n");
+      this.#memory.timeline.append({
+        at: new Date().toISOString(), channel: this.channel,
+        provenance: note ? { origin: "system" } : { origin: "model" },
+        episodeId, role: "assistant", text, ...lensField,
+      });
+    }
+    this.#episodes?.endTurn(new Date().toISOString());
+  }
+
+  /**
+   * On startup: if this channel's last timeline line is an unanswered user message, the previous
+   * process died mid-turn. Record that, so the next turn sees the message AND that it went
+   * unanswered (the message itself was saved before the model ran).
+   */
+  #recoverInterruptedTurn(): void {
+    if (!this.#memory) return;
+    const last = this.#memory.timeline.workingSet(40).filter((l) => l.channel === this.channel).at(-1);
+    if (!last || last.role !== "user") return;
+    this.#memory.timeline.append({
+      at: new Date().toISOString(), channel: this.channel, provenance: { origin: "system" },
+      episodeId: last.episodeId, role: "assistant", text: interruptedNote("the process stopped before I replied"),
+      ...(last.lens ? { lens: last.lens } : {}),
+    });
+    this.#audit.append("turn.recovered", { channel: this.channel, episodeId: last.episodeId, userSeq: last.seq });
   }
 
   /** Decompose + execute (subagent-backed, parallel) a goal. Serialized on the shared queue. */
@@ -512,7 +565,7 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     context: { blocks: (input) => lensContextBlocks(memory, lenses, input) },
     ...(observer ? { observer } : {}),
   };
-  const brain = new Brain({ modelId: config.modelId, guards: config.guards ?? DEFAULT_GUARDS }, registry, ports);
+  const brain = new Brain({ modelId: config.modelId, guards: config.guards ?? DEFAULT_GUARDS, ...(config.providerRetry ? { retry: config.providerRetry } : {}) }, registry, ports);
 
   const planService = new PlanService({
     registry, modelId: config.modelId, catalog: new RegistryToolCatalog(DEFAULT_TOOLS),
@@ -590,6 +643,10 @@ async function matchContextFacts(mem: MemorySystem, query: string): Promise<Frag
     mem.prospective.markSurfaced(h.id, now);
   }
   return out;
+}
+
+function interruptedNote(reason: string): string {
+  return `[harness note] My reply to this message was interrupted (${reason}) — no complete reply was sent. Pick up from the operator's message above.`;
 }
 
 function isTaintedProv(p: Provenance): boolean {

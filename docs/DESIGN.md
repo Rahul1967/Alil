@@ -811,6 +811,13 @@ hash-chained ledger; security-critical slices get an adversarial test *before* t
   that never happened); generic file writes to `**/LENSES/**` and `**/SOUL.md` are critical in
   `config/policy.yaml` (so `fs.write` can't bypass `lens.create`'s gate); lens `synonyms` must be
   short tag pairs.
+- *Resilience (2026-09-30):* the operator's message is persisted before the model runs;
+  interrupted turns (error, cancel, guard halt, crash) are recorded as a `[harness note]` instead
+  of vanishing, and a restart marks a turn the previous process died in; transient model errors
+  retry with bounded, abortable backoff; the episode idle gap runs from the end of the last turn,
+  `ended_at` is the real last activity, and episodes a crash left undistilled are distilled on the
+  next start. Not covered: a pending approval still dies with its turn (it is recorded as
+  interrupted, not resumed — resuming would mean replaying a half-run turn).
 
 **Next.**
 - Composing several active lenses at once (deliberately out of scope for now: one lens per

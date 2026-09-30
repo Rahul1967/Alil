@@ -510,6 +510,8 @@ export class SqliteMemoryStore implements MemoryStore {
     const provenance: Provenance =
       taintedBy.length > 0 ? { origin: "system", taintedBy } : { origin: "system" };
 
+    // Idempotent: re-indexing an episode (e.g. crash recovery) replaces its chunk, never duplicates it.
+    this.#deleteChunkByRef("episode", episode.id);
     await this.#indexChunk("episode", episode.id, text, provenance, `episode:${episode.id}`);
   }
 

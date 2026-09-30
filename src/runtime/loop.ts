@@ -12,7 +12,7 @@ import type {
   ProfilePort,
   Clock,
 } from "./types.ts";
-import { systemClock } from "./types.ts";
+import { systemClock, DEFAULT_PROVIDER_RETRY } from "./types.ts";
 import { Guards } from "./guards.ts";
 import { initialMessages } from "./context-assembler.ts";
 import type { ProviderRegistry } from "../providers/registry.ts";
@@ -143,14 +143,32 @@ export class Brain {
       };
 
       let response;
-      try {
-        response = await provider.invoke(invocation, spec, signal);
-      } catch (err) {
-        // A caller abort surfaces here as a (non-retryable) provider error; report it as an
-        // aborted turn, not a provider failure.
-        if (signal?.aborted) return aborted();
-        // Terminal here: retry/backoff is a later section (BEST_PRACTICES §8). Fail closed.
-        const msg = err instanceof ProviderError ? err.message : String(err);
+      const retry = this.#config.retry ?? DEFAULT_PROVIDER_RETRY;
+      let attempt = 0;
+      let failure: string | null = null;
+      for (;;) {
+        try {
+          response = await provider.invoke(invocation, spec, signal);
+          break;
+        } catch (err) {
+          // A caller abort surfaces here as a (non-retryable) provider error; report it as an
+          // aborted turn, not a provider failure.
+          if (signal?.aborted) return aborted();
+          const msg = err instanceof ProviderError ? err.message : String(err);
+          // Transient failures (throttling, 5xx, network) get bounded exponential backoff with
+          // jitter (BEST_PRACTICES §8); anything else fails closed at once.
+          if (err instanceof ProviderError && err.retryable && attempt < retry.maxRetries) {
+            const delay = retry.baseDelayMs * 2 ** attempt + Math.floor(Math.random() * retry.baseDelayMs);
+            attempt++;
+            if (!(await sleepUnlessAborted(delay, signal))) return aborted();
+            continue;
+          }
+          failure = attempt > 0 ? `${msg} (after ${attempt + 1} attempts)` : msg;
+          break;
+        }
+      }
+      if (failure !== null || response === undefined) {
+        const msg = failure ?? "no response";
         observer?.onHalt?.({ reason: `provider error: ${msg}`, kind: "error" });
         return {
           ...(lastAssistantText !== undefined ? { assistantText: lastAssistantText } : {}),
@@ -230,6 +248,16 @@ export class Brain {
       messages.push({ role: "tool", toolResults });
     }
   }
+}
+
+/** Wait `ms`, resolving false early if the turn is cancelled meanwhile. */
+function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<boolean> {
+  if (signal?.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => { signal?.removeEventListener("abort", onAbort); resolve(true); }, ms);
+    const onAbort = () => { clearTimeout(timer); resolve(false); };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function signatureOf(call: ModelToolCall): string {

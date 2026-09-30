@@ -39,6 +39,8 @@ export class EpisodeStore {
   #insEpisode: Statement;
   #closeEpisode: Statement;
   #getEpisode: Statement;
+  #touch: Statement;
+  #unfinished: Statement;
 
   constructor(db: DB) {
     this.#getState = db.prepare(`SELECT active_episode_id, last_active_at FROM agent_state WHERE id = 1`);
@@ -47,6 +49,15 @@ export class EpisodeStore {
     this.#insEpisode = db.prepare(`INSERT INTO episodes(id, start_seq, end_seq, started_at) VALUES (?, ?, NULL, ?)`);
     this.#closeEpisode = db.prepare(`UPDATE episodes SET end_seq = ?, ended_at = ? WHERE id = ?`);
     this.#getEpisode = db.prepare(`SELECT * FROM episodes WHERE id = ?`);
+    this.#touch = db.prepare(`UPDATE agent_state SET last_active_at = ? WHERE id = 1 AND active_episode_id IS NOT NULL`);
+    // Closed but never distilled (a crash between close and summary), or summarized but never
+    // indexed. summary = '' marks an episode that had nothing to distill (not retried).
+    this.#unfinished = db.prepare(
+      `SELECT * FROM episodes e WHERE e.end_seq IS NOT NULL
+         AND (e.summary IS NULL
+              OR (e.summary <> '' AND NOT EXISTS (SELECT 1 FROM recall_chunk c WHERE c.kind = 'episode' AND c.ref = e.id)))
+       ORDER BY e.start_seq ASC`,
+    );
     this.#initState.run();
   }
 
@@ -72,7 +83,8 @@ export class EpisodeStore {
 
     let closed: Episode | null = null;
     if (activeId !== null) {
-      this.#closeEpisode.run(latestSeq, nowIso, activeId);
+      // Date the episode by when activity actually stopped, not when the next turn noticed.
+      this.#closeEpisode.run(latestSeq, lastActive ?? nowIso, activeId);
       const row = this.#getEpisode.get(activeId) as EpisodeRow | undefined;
       if (row) closed = toEpisode(row);
     }
@@ -81,6 +93,16 @@ export class EpisodeStore {
     this.#insEpisode.run(newId, latestSeq + 1, nowIso);
     this.#setState.run(newId, nowIso);
     return { activeId: newId, closed };
+  }
+
+  /** Mark activity now (end of a turn), so the idle gap runs from when the turn finished. */
+  touch(nowIso: string): void {
+    this.#touch.run(nowIso);
+  }
+
+  /** Closed episodes a crash left without a summary or without an index entry. */
+  unfinished(): Episode[] {
+    return (this.#unfinished.all() as EpisodeRow[]).map(toEpisode);
   }
 }
 
@@ -122,8 +144,15 @@ export class EpisodeManager {
     this.#tagger = deps.tagger;
   }
 
+  #recovered = false;
+
   /** Call at the start of a turn. Rolls the episode over if idle; returns the active id. */
   async beginTurn(nowIso: string): Promise<string> {
+    // First turn of this process: finish any episode a previous process closed but never distilled.
+    if (!this.#recovered) {
+      this.#recovered = true;
+      await this.recover().catch(() => 0);
+    }
     const latestSeq = this.#timeline.lastSeq();
     const { activeId, closed } = this.#episodes.tick(nowIso, this.#gapMs, latestSeq);
     if (closed && closed.endSeq !== null) {
@@ -132,9 +161,31 @@ export class EpisodeManager {
     return activeId;
   }
 
+  /** Call at the end of a turn: the idle gap is measured from here, not from the turn's start. */
+  endTurn(nowIso: string): void {
+    this.#episodes.touch(nowIso);
+  }
+
+  /**
+   * Distill every closed episode a crash left unsummarized or unindexed. Idempotent (indexing
+   * replaces an episode's chunk). Returns how many were recovered.
+   */
+  async recover(): Promise<number> {
+    let n = 0;
+    for (const ep of this.#episodes.unfinished()) {
+      await this.#finalize(ep);
+      n++;
+    }
+    return n;
+  }
+
   async #finalize(closed: Episode): Promise<void> {
     const lines = this.#timeline.range(closed.startSeq, closed.endSeq ?? closed.startSeq);
-    if (lines.length === 0) return;
+    if (lines.length === 0) {
+      // Nothing to distill — record that, so recovery doesn't retry it forever.
+      await this.#store.index({ ...closed, summary: "" }, []);
+      return;
+    }
     const { summary, salientFacts } = await this.#summarizer.summarize(lines);
     const lenses = [...new Set(lines.map((l) => l.lens).filter((l): l is string => !!l))];
     const tags = this.#tagger ? [...new Set(this.#tagger()([summary, ...salientFacts].join("\n")))].sort() : [];
