@@ -222,6 +222,7 @@ export class Brain {
         proposedActions.push(proposed);
         observer?.onToolCall?.({ tool: call.tool, args: call.args });
         const result = await this.#ports.actions.submit(proposed);
+        if (result.approvalWaitMs) guards.excludeWait(result.approvalWaitMs);
         results.push(result);
         roundResults.push(result);
         observer?.onToolResult?.({ tool: call.tool, outcome: result.outcome, summary: result.summary, ...(result.data !== undefined ? { data: result.data } : {}) });

@@ -1,6 +1,6 @@
 import { Brain } from "../runtime/loop.ts";
 import type { BrainPorts } from "../runtime/loop.ts";
-import { DEFAULT_GUARDS } from "../runtime/types.ts";
+import { guardsFromEnv } from "../runtime/types.ts";
 import type { BrainInput, BrainTurn, BrainObserver, GuardLimits, MemoryPort, ActionSink, ProviderRetry } from "../runtime/types.ts";
 import type { Provenance, TranscriptLine, ActionContract, ToolResult, Fragment } from "../core/types.ts";
 import { ProviderRegistry, BedrockProvider } from "../providers/index.ts";
@@ -308,7 +308,7 @@ export class Alil {
         : turn.stopReason === "aborted" ? "cancelled"
         : turn.stopReason === "guard_halt" ? `halted: ${turn.haltReason ?? "guard"}`
         : turn.haltReason ?? turn.stopReason;
-      this.#recordReply(episodeId, lensField, turn.assistantText, interruption);
+      this.#recordReply(episodeId, lensField, turn.assistantText, interruption, interruption !== null ? actionTrail(turn) : null);
       this.#audit.append("turn", {
         channel: this.channel, episodeId, iterations: turn.iterations, stopReason: turn.stopReason,
         ...(opts.label ? { label: opts.label } : {}), ...lensField, ...(modelId !== this.#defaultModel ? { model: modelId } : {}),
@@ -322,9 +322,11 @@ export class Alil {
    * complete — a harness-authored note saying so, so the next turn knows no (full) reply was sent
    * instead of contradicting the operator about a conversation it has no record of.
    */
-  #recordReply(episodeId: string, lensField: { lens?: string }, reply: string | undefined, interruption: string | null): void {
+  #recordReply(episodeId: string, lensField: { lens?: string }, reply: string | undefined, interruption: string | null, trail: string | null = null): void {
     if (this.#memory) {
-      const note = interruption !== null ? interruptedNote(interruption) : reply === undefined ? "[harness note] I finished without a text reply." : null;
+      const note = interruption !== null
+        ? interruptedNote(interruption) + (trail ? `\n\nWhat I had done before the interruption:\n${trail}` : "")
+        : reply === undefined ? "[harness note] I finished without a text reply." : null;
       const text = [reply, note].filter((t): t is string => !!t).join("\n\n");
       this.#memory.timeline.append({
         at: new Date().toISOString(), channel: this.channel,
@@ -565,7 +567,7 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     context: { blocks: (input) => lensContextBlocks(memory, lenses, input) },
     ...(observer ? { observer } : {}),
   };
-  const brain = new Brain({ modelId: config.modelId, guards: config.guards ?? DEFAULT_GUARDS, ...(config.providerRetry ? { retry: config.providerRetry } : {}) }, registry, ports);
+  const brain = new Brain({ modelId: config.modelId, guards: config.guards ?? guardsFromEnv(), ...(config.providerRetry ? { retry: config.providerRetry } : {}) }, registry, ports);
 
   const planService = new PlanService({
     registry, modelId: config.modelId, catalog: new RegistryToolCatalog(DEFAULT_TOOLS),
@@ -643,6 +645,31 @@ async function matchContextFacts(mem: MemorySystem, query: string): Promise<Frag
     mem.prospective.markSurfaced(h.id, now);
   }
   return out;
+}
+
+const TRAIL_MAX = 20;
+
+/**
+ * The work an interrupted turn did, one line per action: tool, compact args, outcome, and the
+ * first line of the harness-authored result summary (never raw tool output). Saved with the
+ * interruption note so a follow-up "continue" knows what already happened (files written,
+ * packages installed, what failed) instead of starting over or drifting to another topic.
+ */
+function actionTrail(turn: BrainTurn): string | null {
+  const rows = turn.proposedActions.map((p, i) => {
+    const r = turn.results[i];
+    const outcome = r ? `${r.outcome}${r.summary ? `: ${r.summary.split("\n")[0]!.slice(0, 140)}` : ""}` : "not run";
+    return `- ${p.action.tool} ${compactArgs(p.action.args)} → ${outcome}`;
+  });
+  if (rows.length === 0) return null;
+  const dropped = rows.length - TRAIL_MAX;
+  return [...(dropped > 0 ? [`- …${dropped} earlier action${dropped === 1 ? "" : "s"}`] : []), ...rows.slice(-TRAIL_MAX)].join("\n");
+}
+
+/** Args as compact JSON: long strings (file contents, scripts) become a length, so paths stay visible. */
+function compactArgs(args: Record<string, unknown>): string {
+  const json = JSON.stringify(args, (_k, v) => (typeof v === "string" && v.length > 80 ? `<${v.length} chars>` : v));
+  return json.length > 160 ? `${json.slice(0, 160)}…` : json;
 }
 
 function interruptedNote(reason: string): string {

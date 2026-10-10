@@ -48,6 +48,10 @@ export interface ToolResult {
    * grounded tool-result path, so images stay behind the same untrusted fence as ingested text.
    */
   resultImages?: ResultImage[];
+  /** Milliseconds the boundary spent waiting for the operator's approval decision. The loop
+   * excludes this from the turn's wall-clock budget — a human reading a prompt is not the agent
+   * running long. */
+  approvalWaitMs?: number;
 }
 
 /** A base64 image + IANA media type carried back from a vision read tool. */

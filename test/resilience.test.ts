@@ -203,3 +203,69 @@ test("a closed episode left unsummarized by a crash is summarized on the next st
   const chunks = m.db.prepare("SELECT COUNT(*) AS n FROM recall_chunk WHERE kind = 'episode' AND ref = ?").get(ep) as { n: number };
   assert.equal(chunks.n, 1, "no duplicate index entries");
 });
+
+test("an interrupted turn saves the work it did, so 'continue' knows what already happened", async () => {
+  const call = (id: string, tool: string, args: Record<string, unknown>): ModelResponse => ({ toolCalls: [{ id, tool, args }], stopReason: "tool_use", usage: { inputTokens: 1, outputTokens: 1 } });
+  const p = new ScriptedProvider(
+    call("a", "fs.list", { path: "." }),
+    call("b", "fs.write", { path: "analyze.py", content: "print(1)" }),
+    ok("resuming"),
+  );
+  const dir = mkdtempSync(join(tmpdir(), "alil-trail-"));
+  const registry = new ProviderRegistry().register(p).registerModel(mockSpec);
+  const alil = createAlil(
+    { modelId: "mock-model", registry, stateDir: dir, sandboxRoot: dir, dbPath: ":memory:", mcpConfigPath: join(dir, "none.json"), guards: { ...DEFAULT_GUARDS, maxIterations: 2 } },
+    { channel: "test", approvals: { async request() { return { approved: true }; } } },
+  );
+  const t = await alil.runTurn("analyze my export", { origin: "operator" });
+  assert.equal(t.stopReason, "guard_halt");
+  const note = lines(alil)[1]!;
+  assert.match(note, /interrupted \(halted: iteration cap \(2\)\)/);
+  assert.match(note, /What I had done before the interruption:/);
+  assert.match(note, /- fs\.list \{"path":"\."\} → ok/);
+  assert.match(note, /- fs\.write \{"path":"analyze\.py".*\} → ok: wrote 8 chars to analyze\.py/);
+  await alil.runTurn("continue", { origin: "operator" });
+  const history = p.received[2]!.messages.map((m) => m.content ?? "").join("\n");
+  assert.match(history, /fs\.write \{"path":"analyze\.py"/, "the next turn sees the work already done");
+});
+
+test("approval ids are unique across server restarts (an open browser tab never skips a request)", async () => {
+  const { PolicyBoundary, StaticRuleSource } = await import("../src/policy/index.ts");
+  const { ToolRegistry, Executor, Sandbox } = await import("../src/execution/index.ts");
+  const ids: string[] = [];
+  const mk = () => new PolicyBoundary({
+    rules: new StaticRuleSource({ mode: "default", rules: [] }), tools: new ToolRegistry(), hooks: [],
+    executor: new Executor({ sandbox: new Sandbox(tmpdir()) }),
+    approvals: { async request(r) { ids.push(r.id); return { approved: false }; } },
+  });
+  const act = { action: { id: "x", tool: "fs.write", args: { path: "a.md", content: "x" }, effect: "write" as const, risk: "medium" as const, reversible: false, classified: false, provenance: { origin: "model" as const } } };
+  await mk().submit(act); // "process 1"
+  await mk().submit(act); // "process 2" after a restart
+  assert.equal(ids.length, 2);
+  assert.notEqual(ids[0], ids[1], "the first approval of a new process must not reuse the old id");
+});
+
+test("time spent waiting for the operator's approval does not count against the turn timeout", async () => {
+  const call = (id: string): ModelResponse => ({ toolCalls: [{ id, tool: "fs.write", args: { path: `${id}.md`, content: "x" } }], stopReason: "tool_use", usage: { inputTokens: 1, outputTokens: 1 } });
+  const p = new ScriptedProvider(call("a"), call("b"), ok("done"));
+  const dir = mkdtempSync(join(tmpdir(), "alil-wait-"));
+  const registry = new ProviderRegistry().register(p).registerModel(mockSpec);
+  const alil = createAlil(
+    { modelId: "mock-model", registry, stateDir: dir, sandboxRoot: dir, dbPath: ":memory:", mcpConfigPath: join(dir, "none.json"), guards: { ...DEFAULT_GUARDS, maxWallClockMs: 150 } },
+    // The operator takes 120ms to approve each write: 240ms of waiting against a 150ms budget.
+    { channel: "test", approvals: { async request() { await new Promise((r) => setTimeout(r, 120)); return { approved: true }; } } },
+  );
+  const t = await alil.runTurn("write two files", { origin: "operator" });
+  assert.equal(t.stopReason, "complete", `halted: ${t.haltReason}`);
+  assert.equal(t.assistantText, "done");
+});
+
+test("default limits fit multi-step analysis, and can be raised from the environment", async () => {
+  const { DEFAULT_GUARDS: g, guardsFromEnv } = await import("../src/runtime/types.ts");
+  assert.ok(g.maxIterations >= 25 && g.maxWallClockMs >= 600_000);
+  const custom = guardsFromEnv({ ALIL_MAX_ITERATIONS: "40", ALIL_TURN_TIMEOUT_MS: "900000" });
+  assert.equal(custom.maxIterations, 40);
+  assert.equal(custom.maxWallClockMs, 900_000);
+  const bad = guardsFromEnv({ ALIL_MAX_ITERATIONS: "lots", ALIL_TURN_TIMEOUT_MS: "-5" });
+  assert.deepEqual(bad, g, "invalid values fall back to the defaults");
+});

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { ActionSink, ProposedAction } from "../runtime/types.ts";
 import type { ActionContract, ToolResult } from "../core/types.ts";
 import type { RuleSource } from "./rules.ts";
@@ -50,6 +51,9 @@ export interface BoundaryDeps {
 export class PolicyBoundary implements ActionSink {
   readonly #deps: BoundaryDeps;
   #seq = 0;
+  // Approval ids must be unique across restarts: a client that outlives the server (an open browser
+  // tab) remembers ids it has shown, and a recycled `apr_1` would be silently skipped.
+  readonly #nonce = randomUUID().slice(0, 8);
 
   constructor(deps: BoundaryDeps) {
     this.#deps = deps;
@@ -120,9 +124,11 @@ export class PolicyBoundary implements ActionSink {
     // Prompt the operator. The binding freezes the action for a post-approval drift check.
     const binding = captureBinding(action, this.#deps.workspaceRoot);
     let approvalDecision;
+    const waitStart = Date.now();
+    const waited = (r: ToolResult): ToolResult => ({ ...r, approvalWaitMs: Date.now() - waitStart });
     try {
       approvalDecision = await approvals.request({
-        id: `apr_${++this.#seq}`,
+        id: `apr_${this.#nonce}_${++this.#seq}`,
         action,
         binding,
         presentedRisk: action.risk,
@@ -131,12 +137,13 @@ export class PolicyBoundary implements ActionSink {
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       this.#record(action, decision, decidedBy, reason, "denied:approval-error", { error: detail });
-      return denied(action.id, `approval error (fail-closed): ${detail}`);
+      return waited(denied(action.id, `approval error (fail-closed): ${detail}`));
     }
+    const approvalWaitMs = Date.now() - waitStart;
 
     if (!approvalDecision.approved) {
       this.#record(action, decision, decidedBy, reason, "declined", { by: "operator" });
-      return denied(action.id, `declined by operator${approvalDecision.reason ? `: ${approvalDecision.reason}` : ""}`);
+      return { ...denied(action.id, `declined by operator${approvalDecision.reason ? `: ${approvalDecision.reason}` : ""}`), approvalWaitMs };
     }
 
     // Don't mint a standing grant for non-grantable actions (execute / high-risk) — it would
@@ -146,13 +153,13 @@ export class PolicyBoundary implements ActionSink {
     // TOCTOU: the action must not have drifted since approval.
     if (!verifyBinding(binding, action, this.#deps.workspaceRoot)) {
       this.#record(action, decision, decidedBy, reason, "denied:binding-mismatch");
-      return denied(action.id, "action changed after approval (binding mismatch)");
+      return { ...denied(action.id, "action changed after approval (binding mismatch)"), approvalWaitMs };
     }
 
     this.#record(action, decision, decidedBy, reason, "approved", {
       ...(approvalDecision.scope && grants && grantable ? { grantMinted: true } : {}),
     });
-    return this.#execute(action);
+    return { ...(await this.#execute(action)), approvalWaitMs };
   }
 
   /** Emit one audit record for a policy decision and how it resolved. Never logs raw secrets:

@@ -73,13 +73,34 @@ export interface GuardLimits {
 }
 
 export const DEFAULT_GUARDS: GuardLimits = {
-  maxIterations: 10,
-  maxWallClockMs: 120_000,
-  maxTokens: 500_000,
+  // Sized for real multi-step work (e.g. a data analysis: find file → inspect → script → fix →
+  // run → summarize, ~20–30s per model step). Time waiting on approvals is not counted. The cost
+  // ceiling stays the backstop.
+  maxIterations: 25,
+  maxWallClockMs: 600_000,
+  maxTokens: 2_000_000,
   maxCostUsd: 5,
   stallWindow: 3,
   maxConsecutiveFailures: 3,
 };
+
+/**
+ * DEFAULT_GUARDS with operator overrides from the environment: ALIL_MAX_ITERATIONS,
+ * ALIL_TURN_TIMEOUT_MS, ALIL_MAX_TOKENS, ALIL_MAX_COST_USD. Invalid values are ignored.
+ */
+export function guardsFromEnv(env: Record<string, string | undefined> = process.env): GuardLimits {
+  const num = (v: string | undefined): number | null => {
+    const n = v === undefined ? NaN : Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  return {
+    ...DEFAULT_GUARDS,
+    ...(num(env["ALIL_MAX_ITERATIONS"]) !== null ? { maxIterations: Math.floor(num(env["ALIL_MAX_ITERATIONS"])!) } : {}),
+    ...(num(env["ALIL_TURN_TIMEOUT_MS"]) !== null ? { maxWallClockMs: num(env["ALIL_TURN_TIMEOUT_MS"])! } : {}),
+    ...(num(env["ALIL_MAX_TOKENS"]) !== null ? { maxTokens: num(env["ALIL_MAX_TOKENS"])! } : {}),
+    ...(num(env["ALIL_MAX_COST_USD"]) !== null ? { maxCostUsd: num(env["ALIL_MAX_COST_USD"])! } : {}),
+  };
+}
 
 // ─── Injected ports (owned by other sections; stubbed this section) ───
 export interface ActionSink {

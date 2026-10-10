@@ -234,6 +234,43 @@ async function health() {
 // Approve/Reject buttons inline. Answered by POST /api/approval.
 const shownApprovals = new Set();
 
+/** Args as readable text: one `key: value` per line, multi-line strings (a dossier body, a script)
+ *  shown as real lines instead of escaped `\n`. Falls back to the raw text when it isn't JSON. */
+function formatApprovalArgs(raw) {
+  let v;
+  try { v = JSON.parse(raw); } catch { return raw; }
+  if (!v || typeof v !== "object" || Array.isArray(v)) return JSON.stringify(v, null, 2);
+  return Object.entries(v).map(([k, val]) => {
+    if (typeof val === "string") return val.includes("\n") ? `${k}:\n${val}` : `${k}: ${val}`;
+    return `${k}: ${JSON.stringify(val, null, 2)}`;
+  }).join("\n");
+}
+
+const APPROVAL_COLLAPSE_LINES = 8;
+const APPROVAL_COLLAPSE_CHARS = 600;
+
+/** The args box; long payloads start collapsed with a Show all / Collapse toggle. */
+function approvalArgs(raw) {
+  const wrap = document.createElement("div");
+  wrap.className = "approval-args-wrap";
+  const text = formatApprovalArgs(String(raw ?? ""));
+  const box = Object.assign(document.createElement("div"), { className: "approval-args", textContent: text });
+  wrap.appendChild(box);
+  const lines = text.split("\n").length;
+  if (lines <= APPROVAL_COLLAPSE_LINES && text.length <= APPROVAL_COLLAPSE_CHARS) return wrap;
+  wrap.classList.add("collapsed");
+  const toggle = Object.assign(document.createElement("button"), { type: "button", className: "approval-toggle" });
+  const label = () => {
+    const collapsed = wrap.classList.contains("collapsed");
+    toggle.textContent = collapsed ? `Show all (${lines} lines, ${text.length.toLocaleString()} chars) ▾` : "Collapse ▴";
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+  };
+  toggle.addEventListener("click", () => { wrap.classList.toggle("collapsed"); label(); });
+  label();
+  wrap.appendChild(toggle);
+  return wrap;
+}
+
 function renderApproval(a) {
   if (empty) empty.remove();
   const card = document.createElement("div");
@@ -244,7 +281,7 @@ function renderApproval(a) {
   head.textContent = a.tool === "plan" ? "Alil wants to run this plan" : `Alil wants to run ${a.tool} · ${a.effect} · ${a.risk} risk`;
   card.appendChild(head);
   if (a.reason) card.appendChild(Object.assign(document.createElement("div"), { className: "approval-reason", textContent: a.reason }));
-  card.appendChild(Object.assign(document.createElement("div"), { className: "approval-args", textContent: a.args }));
+  card.appendChild(approvalArgs(a.args));
   const btns = document.createElement("div");
   btns.className = "approval-btns";
   const approve = Object.assign(document.createElement("button"), { className: "approve", textContent: "Approve & run" });
@@ -287,7 +324,14 @@ async function pollApprovals() {
     const { items } = await (await fetch("/api/approvals")).json();
     const pending = new Set((items || []).map((a) => a.id));
     for (const a of items || []) {
-      if (shownApprovals.has(a.id)) continue;
+      // Render any pending approval that has no live card on screen. Deciding from the DOM (not
+      // just a remembered-id set) means a pending request can never be skipped as "already shown".
+      const live = [...document.querySelectorAll(".approval:not(.resolved)")].some((c) => c.dataset.id === a.id);
+      if (live) continue;
+      if (shownApprovals.has(a.id) && document.querySelector(`.approval.resolved[data-id="${CSS.escape(a.id)}"]`)) {
+        // Answered here but still pending server-side (answer in flight) — don't duplicate it.
+        continue;
+      }
       shownApprovals.add(a.id);
       renderApproval(a);
     }
