@@ -101,5 +101,6 @@ test("shipped config: crawl4ai is loopback-only, token from env, guarded, and ex
   assert.equal(c.guardUrls, true);
   assert.equal(c.headers?.["Authorization"], "Bearer ${CRAWL4AI_API_TOKEN}", "no literal secret in config");
   assert.equal(c.tools?.["execute_js"], undefined, "running page JS is never pre-cleared (stays execute/high)");
+  for (const name of ["screenshot", "pdf"]) assert.equal(c.tools?.[name], undefined, `${name} returns a base64 blob as text; keep it execute/high`);
   for (const name of ["md", "html", "crawl"]) assert.equal(c.tools?.[name]?.effect, "network", `${name} is gated like web.fetch`);
 });

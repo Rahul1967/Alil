@@ -446,9 +446,10 @@ provider prompt-caching isn't invalidated. Design properties:
   web.fetch's SSRF guard. With `guardUrls: true`, `registry.call` (so `mcp.batch` too) refuses the
   call unless every URL argument is http(s), carries no credentials, and resolves only to public
   addresses; other schemes (`file:`, `raw:`, `gopher:`…) anywhere in the args are refused.
-  Residual gap: redirects and sub-resources the crawler follows itself. Its fetch tools are pinned
-  `network`/low, so each call asks like web.fetch; `execute_js` is left unpinned (execute/high,
-  hard-denied when tainted). Output is `ingested` like every MCP result.
+  Residual gap: redirects and sub-resources the crawler follows itself. Its fetch tools (`md`, `html`, `crawl`)
+  are pinned `network`/low, so each call asks like web.fetch; `execute_js`, `screenshot` and `pdf`
+  are left unpinned (execute/high, hard-denied when tainted): the last two return an ~80k-char base64
+  blob as text. Inline hook code is refused by the server itself since 0.9.0. Output is `ingested` like every MCP result.
 - **Idempotency + freshness.** A **write** call carries a deterministic idempotency key
   (sha256 of server+name+args) so a retry/resume can't duplicate a side effect on a server that
   honors it; reads don't. A server's `notifications/tools/list_changed` invalidates the cached

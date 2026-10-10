@@ -36,16 +36,6 @@
           "risk": "low",
           "reversible": true
         },
-        "screenshot": {
-          "effect": "network",
-          "risk": "low",
-          "reversible": true
-        },
-        "pdf": {
-          "effect": "network",
-          "risk": "low",
-          "reversible": true
-        },
         "ask": {
           "effect": "read",
           "risk": "low",

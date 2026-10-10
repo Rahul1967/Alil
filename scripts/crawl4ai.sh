@@ -5,7 +5,8 @@
 #  - published on 127.0.0.1 only (never the LAN)
 #  - bearer token required (CRAWL4AI_API_TOKEN, generated into .env on first run)
 #  - hooks disabled (user Python hooks were an unauthenticated RCE before 0.8.0, CVE-2026-26216)
-#  - pinned image, no-new-privileges, memory/CPU/pid limits
+#  - pinned image, runs as the image's non-root appuser, memory/CPU/pid limits
+#    (no-new-privileges is omitted: under snap Docker's AppArmor profile it blocks every exec)
 # Alil additionally vets every URL argument before a call (mcp.json "guardUrls": true).
 # Not covered: redirects or page sub-resources the crawler loads itself.
 set -euo pipefail
@@ -29,7 +30,6 @@ case "${1:-start}" in
       docker run -d --name "$NAME" \
         -p "127.0.0.1:${PORT}:11235" \
         --shm-size=1g --memory=3g --cpus=2 --pids-limit=512 \
-        --security-opt no-new-privileges \
         --restart unless-stopped \
         -e CRAWL4AI_API_TOKEN="$TOKEN" \
         -e CRAWL4AI_HOOKS_ENABLED=false \
