@@ -4,6 +4,7 @@ import type {
 } from "./types.ts";
 import { DEFAULT_MCP_RELIABILITY, classifyMcpTool, parsePinned } from "./types.ts";
 import { createHash } from "node:crypto";
+import { guardUrlArgs, type HostCheck } from "./url-guard.ts";
 import type { Effect, Risk } from "../../core/types.ts";
 
 /** Factory that builds a transport for a server config — the SDK adapter in prod, a mock in tests.
@@ -30,17 +31,21 @@ export class McpRegistry {
   readonly #makeTransport: TransportFactory;
   readonly #rel: McpReliability;
   readonly #now: () => number;
+  readonly #hostCheck: HostCheck | undefined;
 
   constructor(opts: {
     configs: McpServerConfig[];
     transportFactory: TransportFactory;
     reliability?: Partial<McpReliability>;
     now?: () => number;
+    /** Public-address check for `guardUrls` servers (default: web.fetch's DNS-resolving guard). */
+    hostCheck?: HostCheck;
   }) {
     for (const c of opts.configs) this.#configs.set(c.name, c);
     this.#makeTransport = opts.transportFactory;
     this.#rel = { ...DEFAULT_MCP_RELIABILITY, ...(opts.reliability ?? {}) };
     this.#now = opts.now ?? (() => Date.now());
+    this.#hostCheck = opts.hostCheck;
   }
 
   /** Configured server names (whether or not connected yet). */
@@ -172,6 +177,8 @@ export class McpRegistry {
     }
     const cfg = this.#configs.get(server);
     if (!cfg) throw new Error(`mcp: unknown server "${server}"`);
+    // A crawler server fetches for us outside web.fetch's guard: vet every URL before it sees one.
+    if (cfg.guardUrls) await guardUrlArgs(args, this.#hostCheck);
     const def = await this.inspect(server, name);
     const retryable = def.readOnlyHint === true; // only reads are safe to auto-retry
     const timeoutMs = cfg.timeoutMs ?? this.#rel.defaultTimeoutMs;

@@ -1,6 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { McpTransport, McpToolDef, McpCallResult, McpServerConfig } from "./types.ts";
 
@@ -45,9 +46,12 @@ export class SdkMcpTransport implements McpTransport {
   }
 
   #buildTransport() {
-    if (this.#config.transport === "http") {
-      if (!this.#config.url) throw new Error(`mcp: http server "${this.server}" has no url`);
-      return new StreamableHTTPClientTransport(new URL(this.#config.url));
+    if (this.#config.transport === "http" || this.#config.transport === "sse") {
+      if (!this.#config.url) throw new Error(`mcp: ${this.#config.transport} server "${this.server}" has no url`);
+      const url = new URL(this.#config.url);
+      const headers = expandHeaders(this.server, this.#config.headers);
+      const opts = headers ? { requestInit: { headers } } : undefined;
+      return this.#config.transport === "sse" ? new SSEClientTransport(url, opts) : new StreamableHTTPClientTransport(url, opts);
     }
     if (!this.#config.command) throw new Error(`mcp: stdio server "${this.server}" has no command`);
     return new StdioClientTransport({
@@ -111,7 +115,24 @@ export class SdkMcpTransport implements McpTransport {
 }
 
 /**
- * Factory the app wires into McpRegistry. Supports stdio + Streamable HTTP. The registry passes an
+ * Resolve `${VAR}` in configured headers from the environment, so credentials live in .env, not in
+ * mcp.json. A missing variable throws: sending an empty bearer token would only fail later, less clearly.
+ */
+export function expandHeaders(server: string, headers: Record<string, string> | undefined, env: NodeJS.ProcessEnv = process.env): Record<string, string> | undefined {
+  if (!headers) return undefined;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers)) {
+    out[k] = v.replace(/\$\{([A-Z0-9_]+)\}/g, (_m, name: string) => {
+      const val = env[name];
+      if (!val) throw new Error(`mcp: server "${server}" header ${k} needs \${${name}}, which is not set`);
+      return val;
+    });
+  }
+  return out;
+}
+
+/**
+ * Factory the app wires into McpRegistry. Supports stdio, Streamable HTTP and legacy SSE. The registry passes an
  * `onListChanged` callback so a server's tools/list_changed notification invalidates the cache.
  */
 export function sdkTransportFactory(config: McpServerConfig, onListChanged?: () => void): McpTransport {

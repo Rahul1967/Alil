@@ -51,9 +51,32 @@ export function isPrivateIp(ip: string): boolean {
       const dotted = `${(a >> 8) & 255}.${a & 255}.${(b >> 8) & 255}.${b & 255}`;
       return isPrivateIpv4(dotted);
     }
+    // Transition prefixes that carry an IPv4 inside the IPv6 address: NAT64 (64:ff9b::/96 and the
+    // local-use 64:ff9b:1::/48) and 6to4 (2002::/16). Where those routes exist they reach the
+    // embedded IPv4, so 64:ff9b::a9fe:a9fe is the metadata endpoint. Judge them by that IPv4.
+    const groups = expandIpv6(h);
+    if (groups) {
+      const v4 = (hi: number, lo: number) => `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+      if (groups[0] === 0x64 && groups[1] === 0xff9b) return groups[2] === 1 || isPrivateIpv4(v4(groups[6]!, groups[7]!));
+      if (groups[0] === 0x2002) return isPrivateIpv4(v4(groups[1]!, groups[2]!));
+    }
     return false; // a global unicast IPv6 we don't specifically block
   }
   return false; // not an IP literal — hostname classification handled by isPrivateHost
+}
+
+/** The eight 16-bit groups of an IPv6 address (`::` expanded), or null when it doesn't parse. */
+function expandIpv6(ip: string): number[] | null {
+  const halves = ip.split("::");
+  if (halves.length > 2) return null;
+  const part = (s: string) => (s === "" ? [] : s.split(":"));
+  const head = part(halves[0]!);
+  const tail = halves.length === 2 ? part(halves[1]!) : [];
+  const fill = 8 - head.length - tail.length;
+  if (halves.length === 1 ? head.length !== 8 : fill < 1) return null;
+  const all = [...head, ...Array(halves.length === 2 ? fill : 0).fill("0"), ...tail];
+  if (!all.every((g) => /^[0-9a-f]{1,4}$/.test(g))) return null;
+  return all.map((g) => parseInt(g, 16));
 }
 
 function isPrivateIpv4(ip: string): boolean {

@@ -12,6 +12,7 @@
     "telegram": "node --experimental-strip-types --dns-result-order=ipv4first --env-file=.env scripts/telegram.ts",
     "db:setup": "node --experimental-strip-types scripts/db-setup.ts",
     "db:reset": "node --experimental-strip-types scripts/db-setup.ts --reset",
+    "crawl4ai": "bash scripts/crawl4ai.sh",
     "memory:demo": "node --experimental-strip-types scripts/memory-demo.ts"
   },
   "devDependencies": {
