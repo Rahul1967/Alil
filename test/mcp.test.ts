@@ -85,6 +85,21 @@ test("search ranks by intent and returns names+descriptions only (no schema)", a
   assert.ok(!("inputSchema" in hits[0]!), "search hits must not carry schemas");
 });
 
+test("search drops off-domain matches (IDF + relevance floor), keeps in-domain ones", async () => {
+  // Two stock-market tools whose only overlap with a travel query is the generic word "search".
+  const { reg } = registryWith([
+    tool("nse", "cm_get_equity_stocks", "Get latest live data for NSE capital market equity stocks: symbol, LTP, open, high, low, volume. Use symbolFilter for prefix search.", true),
+    tool("nse", "search_symbols", "Search for NSE stock symbols by company name or partial symbol; returns matching symbols with latest close price.", true),
+  ]);
+  // Off-domain queries must return NOTHING — a lone "search" overlap is below the floor.
+  assert.deepEqual(await reg.search("flights booking search"), []);
+  assert.deepEqual(await reg.search("hotel booking"), []);
+  assert.deepEqual(await reg.search("travel itinerary planning"), []);
+  // In-domain queries clear the floor and match.
+  assert.ok((await reg.search("live stock price")).length >= 1, "a real stock query should match");
+  assert.ok((await reg.search("equity symbol lookup")).length >= 1, "a real symbol query should match");
+});
+
 test("inspect returns the full schema + effect classification for one tool", async () => {
   const { reg } = registryWith([tool("db", "query", "Run a read query", true)]);
   const def = await reg.inspect("db", "query");
@@ -193,12 +208,12 @@ test("a WRITE call carries a stable idempotency key; a read does not", async () 
 });
 
 test("a tools/list_changed notification invalidates the cached schemas", async () => {
-  const { reg, transports } = registryWith([tool("s", "old_tool", "d", true)]);
-  await reg.ensureTools("s"); // caches [old_tool]
-  assert.deepEqual((await reg.search("tool")).map((h) => h.name), ["old_tool"]);
+  const { reg, transports } = registryWith([tool("s", "convert_currency", "Convert an amount between two fiat currencies using live exchange rates", true)]);
+  await reg.ensureTools("s"); // caches [convert_currency]
+  assert.deepEqual((await reg.search("convert currency exchange rate")).map((h) => h.name), ["convert_currency"]);
   // Server signals its toolset changed → registry drops the cache; next use re-lists.
   transports.get("s")!.onListChanged?.();
-  const hits = await reg.search("tool"); // re-lists (mock returns the same set, but a re-list happened)
+  const hits = await reg.search("convert currency exchange rate"); // re-lists (mock returns the same set, but a re-list happened)
   assert.ok(hits.length >= 1);
 });
 
@@ -272,9 +287,9 @@ function registryWithConfig(configs: McpServerConfig[], toolsByServer: Record<st
 test("a disabled server is excluded from search (the model can't discover it)", async () => {
   const reg = registryWithConfig(
     [{ name: "on", transport: "stdio", command: "x" }, { name: "off", transport: "stdio", command: "x", enabled: false }],
-    { on: [tool("on", "alpha", "does alpha", true)], off: [tool("off", "alpha", "does alpha", true)] },
+    { on: [tool("on", "translate_text", "Translate text between human languages", true)], off: [tool("off", "translate_text", "Translate text between human languages", true)] },
   );
-  const hits = await reg.search("alpha");
+  const hits = await reg.search("translate text language");
   assert.ok(hits.every((h) => h.server === "on"), "no hit from a disabled server");
   assert.ok(hits.some((h) => h.server === "on"));
 });
@@ -291,19 +306,19 @@ test("a disabled server refuses inspect and call even by exact name", async () =
 test("setEnabled toggles visibility at runtime (disable hides, enable restores)", async () => {
   const reg = registryWithConfig(
     [{ name: "s", transport: "stdio", command: "x" }],
-    { s: [tool("s", "thing", "does a thing", true)] },
+    { s: [tool("s", "geocode_address", "Geocode a postal address into latitude and longitude coordinates", true)] },
   );
   // Enabled: discoverable + callable.
-  assert.equal((await reg.search("thing")).length, 1);
-  assert.equal((await reg.call("s", "thing", {})).isError, false);
+  assert.equal((await reg.search("geocode address coordinates")).length, 1);
+  assert.equal((await reg.call("s", "geocode_address", {})).isError, false);
   // Disable: gone from search, refused by call.
   assert.equal(reg.setEnabled("s", false), true);
-  assert.equal((await reg.search("thing")).length, 0);
-  await assert.rejects(() => reg.call("s", "thing", {}), /disabled/);
+  assert.equal((await reg.search("geocode address coordinates")).length, 0);
+  await assert.rejects(() => reg.call("s", "geocode_address", {}), /disabled/);
   assert.equal(reg.status().find((x) => x.server === "s")!.enabled, false);
   // Re-enable: back.
   reg.setEnabled("s", true);
-  assert.equal((await reg.search("thing")).length, 1);
+  assert.equal((await reg.search("geocode address coordinates")).length, 1);
   // Unknown server toggle returns false.
   assert.equal(reg.setEnabled("nope", false), false);
 });

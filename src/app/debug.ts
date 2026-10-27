@@ -18,6 +18,26 @@ function pretty(data: unknown): string {
   if (typeof data === "string") return clip(data.replace(/\n/g, "⏎"), 300);
   try { return clip(JSON.stringify(data), 400); } catch { return String(data); }
 }
+
+/**
+ * Trace-friendly data preview. For MCP discovery results (mcp.search / mcp.inspect), a raw JSON dump
+ * is dominated by long tool descriptions/disclaimers and reads as noise; render a compact
+ * `server/name` list instead so the operator can see WHICH tools matched at a glance. Everything
+ * else falls back to the clipped-JSON pretty().
+ */
+function previewData(tool: string, data: unknown): string {
+  if ((tool === "mcp.search") && Array.isArray(data)) {
+    if (data.length === 0) return "(no tools)";
+    return (data as { server?: string; name?: string }[])
+      .map((h) => `${h.server ?? "?"}/${h.name ?? "?"}`)
+      .join(", ");
+  }
+  if (tool === "mcp.inspect" && data && typeof data === "object") {
+    const d = data as { server?: string; name?: string; effect?: string; risk?: string };
+    return `${d.server ?? "?"}/${d.name ?? "?"} (${d.effect ?? "?"}/${d.risk ?? "?"})`;
+  }
+  return pretty(data);
+}
 function tag(p: Provenance): string {
   const tainted = p.origin === "ingested" || (p.taintedBy?.length ?? 0) > 0;
   return tainted ? amber(p.origin + "⚠") : p.origin;
@@ -77,7 +97,7 @@ export class DebugLogger implements BrainObserver {
   onToolResult(e: { tool: string; outcome: string; summary: string; data?: unknown }): void {
     if (!this.#open) return;
     const mark = e.outcome === "ok" ? green("✓") : e.outcome === "denied" ? red("⛔") : red("✗");
-    this.#line("   " + mark + " " + cyan(e.tool) + "  " + e.summary + (e.data !== undefined ? dim("  ⇢ " + pretty(e.data)) : ""));
+    this.#line("   " + mark + " " + cyan(e.tool) + "  " + e.summary + (e.data !== undefined ? dim("  ⇢ " + previewData(e.tool, e.data)) : ""));
   }
 
   onHalt(e: { reason: string; kind: string }): void {
