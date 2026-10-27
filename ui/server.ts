@@ -103,7 +103,7 @@ interface ChatReply { reply: string; trace: string[]; iterations: number; stopRe
 async function runTurn(text: string, attachments?: import("../src/ingestion/index.ts").Attachment[]): Promise<ChatReply> {
   activeTrace = [];
   const turn = await alil.runTurn(text, { origin: "operator", channel: CHANNEL }, attachments && attachments.length > 0 ? { attachments } : {});
-  return { reply: turn.assistantText ?? "", trace: [...activeTrace], iterations: turn.iterations, stopReason: turn.stopReason };
+  return { reply: turn.assistantText ?? `(I finished ${turn.iterations} steps without writing a reply. Ask me "what did you find?")`, trace: [...activeTrace], iterations: turn.iterations, stopReason: turn.stopReason };
 }
 
 // ── HTTP ──────────────────────────────────────────────────────────────────────

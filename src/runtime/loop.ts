@@ -96,6 +96,7 @@ export class Brain {
     const proposedActions: ProposedAction[] = [];
     const results: ToolResult[] = [];
     let lastAssistantText: string | undefined;
+    let nudged = false;
 
     // Turn-local taint: once a tool has ingested untrusted content this turn (web.fetch,
     // doc.read, an ambient event), every subsequent action the model proposes is treated as
@@ -181,8 +182,25 @@ export class Brain {
       }
 
       guards.recordUsage(response.usage, spec);
-      if (response.text !== undefined) lastAssistantText = response.text;
       guards.recordToolSignatures(response.toolCalls.map(signatureOf));
+
+      // The model ended the turn with nothing to say (seen after a large tool result). Ask once
+      // for the actual reply; otherwise the operator gets "(no reply)", or mid-turn narration
+      // passed off as the answer. Converse rejects an empty assistant message, so a placeholder
+      // stands in for it.
+      const silent = response.toolCalls.length === 0 && !response.text?.trim();
+      if (silent && !nudged) {
+        nudged = true;
+        observer?.onModelTurn?.({ iteration: guards.iterations, toolCalls: 0 });
+        messages.push({ role: "assistant", content: "(no reply)" });
+        messages.push({ role: "user", content: EMPTY_REPLY_NUDGE });
+        continue;
+      }
+      if (silent) {
+        lastAssistantText = undefined;
+      } else if (response.text !== undefined) {
+        lastAssistantText = response.text;
+      }
 
       observer?.onModelTurn?.({
         iteration: guards.iterations,
@@ -250,6 +268,10 @@ export class Brain {
     }
   }
 }
+
+const EMPTY_REPLY_NUDGE =
+  "[harness] You ended your turn with no reply. The operator is waiting: answer them now with what " +
+  "you found. If you could not finish, say what blocked you and what you need.";
 
 /** Wait `ms`, resolving false early if the turn is cancelled meanwhile. */
 function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<boolean> {

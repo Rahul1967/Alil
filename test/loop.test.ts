@@ -253,3 +253,41 @@ test("guard halt sets stopReason guard_halt", async () => {
   assert.equal(turn.stopReason, "guard_halt");
   assert.match(turn.haltReason ?? "", /iteration cap/);
 });
+
+// A model can end a turn with no text and no tool call (seen after a large tool result). The
+// operator would get "(no reply)", or worse, mid-turn narration ("Let me fetch…") passed off as
+// the answer. The loop asks once for the actual reply.
+test("an empty final response is nudged once for the actual reply", async () => {
+  const mock = new MockProvider().script(
+    { text: "Let me read the file first.", ...toolResponse("t1", "fs.read", { path: "a.csv" }) },
+    { toolCalls: [], stopReason: "end", usage: { inputTokens: 10, outputTokens: 0 } },
+    endResponse("Income ₹50,000; spend ₹31,200."),
+  );
+  const reg = new ProviderRegistry().register(mock).registerModel(mockSpec);
+  const p = ports(async (a) => ({ actionId: a.action.id, outcome: "ok", summary: "read", data: "rows" }));
+
+  const turn = await new Brain(config(), reg, p.ports).run(operatorInput("analyze"));
+
+  assert.equal(turn.stopReason, "complete");
+  assert.equal(turn.assistantText, "Income ₹50,000; spend ₹31,200.");
+  const last = mock.received.at(-1)!.messages;
+  assert.equal(last.at(-1)!.role, "user", "the nudge is a user turn");
+  assert.match(last.at(-1)!.content ?? "", /no reply/i);
+  assert.ok(last.at(-2)!.role === "assistant" && last.at(-2)!.content, "no empty assistant message is sent (Converse rejects it)");
+});
+
+test("a second empty response ends the turn without passing narration off as the reply", async () => {
+  const mock = new MockProvider().script(
+    { text: "Let me read the file first.", ...toolResponse("t1", "fs.read", { path: "a.csv" }) },
+    { text: "  ", toolCalls: [], stopReason: "end", usage: { inputTokens: 10, outputTokens: 0 } },
+    { toolCalls: [], stopReason: "end", usage: { inputTokens: 10, outputTokens: 0 } },
+  );
+  const reg = new ProviderRegistry().register(mock).registerModel(mockSpec);
+  const p = ports(async (a) => ({ actionId: a.action.id, outcome: "ok", summary: "read", data: "rows" }));
+
+  const turn = await new Brain(config(), reg, p.ports).run(operatorInput("analyze"));
+
+  assert.equal(turn.stopReason, "complete");
+  assert.equal(turn.assistantText, undefined);
+  assert.equal(mock.received.length, 3, "nudged exactly once");
+});
