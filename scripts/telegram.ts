@@ -200,7 +200,7 @@ async function onMessage(msg: TelegramMessage): Promise<void> {
     label: "inbound",
     ...(attachments.length > 0 ? { attachments } : {}),
   });
-  await client.sendMessage(msg.chat.id, turn.assistantText ?? "(no reply)");
+  await client.sendMessage(msg.chat.id, turn.assistantText ?? `(I finished ${turn.iterations} steps without writing a reply. Ask me "what did you find?")`);
 }
 
 const controller = new AbortController();

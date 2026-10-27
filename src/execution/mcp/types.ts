@@ -53,10 +53,11 @@ export interface McpTransport {
   connected(): boolean;
 }
 
-/** Configuration for one MCP server. stdio spawns a local process; http connects to a URL. */
+/** Configuration for one MCP server. stdio spawns a local process; http (streamable HTTP) and sse
+ * (the legacy HTTP+SSE transport, e.g. Crawl4AI's /mcp/sse) connect to a URL. */
 export interface McpServerConfig {
   name: string;
-  transport: "stdio" | "http";
+  transport: "stdio" | "http" | "sse";
   /**
    * Whether this server is active. Default true. When false, it is fully invisible to the model:
    * excluded from mcp.search, and mcp.inspect/mcp.call refuse it — so a disabled server can neither
@@ -68,8 +69,21 @@ export interface McpServerConfig {
   command?: string;
   args?: string[];
   env?: Record<string, string>;
-  /** http: the server URL. */
+  /** http/sse: the server URL. */
   url?: string;
+  /**
+   * http/sse: request headers (e.g. `Authorization`). `${VAR}` is replaced from the environment at
+   * connect time, so a secret stays in .env and never in mcp.json. An unset variable fails the
+   * connect rather than sending an empty credential.
+   */
+  headers?: Record<string, string>;
+  /**
+   * The server fetches URLs on Alil's behalf (a crawler). Its own egress sits outside Alil's SSRF
+   * guard, so before every call each URL-bearing arg (`url`, `urls`, or any string that looks like
+   * a URL) must be http(s) and resolve only to public addresses — the same check web.fetch makes.
+   * Redirects the server follows itself are NOT covered; run such a server network-isolated.
+   */
+  guardUrls?: boolean;
   /** Per-call timeout (ms). Defaults: stdio 30m-ish is too long for an assistant; we use 30s. */
   timeoutMs?: number;
   /** Effect ceiling: even if a tool claims read-only, never classify below this. Optional hardening. */

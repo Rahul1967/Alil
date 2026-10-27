@@ -52,18 +52,26 @@ function askInPage(q: Omit<PendingApproval, "resolve">): Promise<ApprovalDecisio
   });
 }
 
+/** The operator approves exactly what runs, so the card gets the whole payload (the page collapses long ones). */
+const APPROVAL_ARGS_MAX = 50_000;
+function fullArgs(args: unknown): string {
+  const s = JSON.stringify(args);
+  return s.length > APPROVAL_ARGS_MAX ? s.slice(0, APPROVAL_ARGS_MAX) + ` …[${s.length - APPROVAL_ARGS_MAX} more chars]` : s;
+}
+
 const approvals: ApprovalPort = {
   request(req: ApprovalRequest): Promise<ApprovalDecision> {
     const a = req.action;
-    return askInPage({ id: req.id, tool: a.tool, effect: a.effect, risk: a.risk, argsPreview: JSON.stringify(a.args).slice(0, 300), reason: req.reason });
+    return askInPage({ id: req.id, tool: a.tool, effect: a.effect, risk: a.risk, argsPreview: fullArgs(a.args), reason: req.reason });
   },
 };
 
 /** Plan-level HITL in the page: the DAG (and every replan) is shown as an approval card. */
 let planApprovalSeq = 0;
+const PROC_NONCE = Math.random().toString(36).slice(2, 10); // unique across restarts (see boundary)
 async function approvePlanInPage(goal: string, nodes: PlanNode[]): Promise<boolean> {
   const steps = nodes.map((n) => `${n.id}. ${n.description}${n.deps.length ? ` (after ${n.deps.join(", ")})` : ""}`).join("\n");
-  const d = await askInPage({ id: `plan_${++planApprovalSeq}`, tool: "plan", effect: "plan", risk: "medium", argsPreview: steps, reason: `Run this plan for: ${goal}` });
+  const d = await askInPage({ id: `plan_${PROC_NONCE}_${++planApprovalSeq}`, tool: "plan", effect: "plan", risk: "medium", argsPreview: steps, reason: `Run this plan for: ${goal}` });
   return d.approved;
 }
 
@@ -95,7 +103,7 @@ interface ChatReply { reply: string; trace: string[]; iterations: number; stopRe
 async function runTurn(text: string, attachments?: import("../src/ingestion/index.ts").Attachment[]): Promise<ChatReply> {
   activeTrace = [];
   const turn = await alil.runTurn(text, { origin: "operator", channel: CHANNEL }, attachments && attachments.length > 0 ? { attachments } : {});
-  return { reply: turn.assistantText ?? "", trace: [...activeTrace], iterations: turn.iterations, stopReason: turn.stopReason };
+  return { reply: turn.assistantText ?? `(I finished ${turn.iterations} steps without writing a reply. Ask me "what did you find?")`, trace: [...activeTrace], iterations: turn.iterations, stopReason: turn.stopReason };
 }
 
 // ── HTTP ──────────────────────────────────────────────────────────────────────

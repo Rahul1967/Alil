@@ -17,7 +17,7 @@ export interface GuardCheck {
 export class Guards {
   readonly #limits: GuardLimits;
   readonly #clock: Clock;
-  readonly #startedAt: number;
+  #startedAt: number;
 
   #iterations = 0;
   #tokens = 0;
@@ -65,6 +65,11 @@ export class Guards {
       };
     }
     return { halt: false };
+  }
+
+  /** Exclude time spent waiting on the operator (an approval prompt) from the wall-clock budget. */
+  excludeWait(ms: number): void {
+    if (ms > 0) this.#startedAt += ms;
   }
 
   /** Record usage after a model call so token/cost guards can trip next iteration. */

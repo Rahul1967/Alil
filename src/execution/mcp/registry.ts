@@ -4,6 +4,7 @@ import type {
 } from "./types.ts";
 import { DEFAULT_MCP_RELIABILITY, classifyMcpTool, parsePinned } from "./types.ts";
 import { createHash } from "node:crypto";
+import { guardUrlArgs, type HostCheck } from "./url-guard.ts";
 import type { Effect, Risk } from "../../core/types.ts";
 
 /** Factory that builds a transport for a server config — the SDK adapter in prod, a mock in tests.
@@ -30,17 +31,21 @@ export class McpRegistry {
   readonly #makeTransport: TransportFactory;
   readonly #rel: McpReliability;
   readonly #now: () => number;
+  readonly #hostCheck: HostCheck | undefined;
 
   constructor(opts: {
     configs: McpServerConfig[];
     transportFactory: TransportFactory;
     reliability?: Partial<McpReliability>;
     now?: () => number;
+    /** Public-address check for `guardUrls` servers (default: web.fetch's DNS-resolving guard). */
+    hostCheck?: HostCheck;
   }) {
     for (const c of opts.configs) this.#configs.set(c.name, c);
     this.#makeTransport = opts.transportFactory;
     this.#rel = { ...DEFAULT_MCP_RELIABILITY, ...(opts.reliability ?? {}) };
     this.#now = opts.now ?? (() => Date.now());
+    this.#hostCheck = opts.hostCheck;
   }
 
   /** Configured server names (whether or not connected yet). */
@@ -117,15 +122,25 @@ export class McpRegistry {
     // Only rank tools from currently-enabled servers (a server disabled after caching is excluded).
     const terms = tokenize(query);
     const tools = this.#allCachedTools().filter((t) => this.#enabled(t.server));
+    // IDF over the candidate corpus: a term in MANY tool descriptions (generic verbs like "search",
+    // "get", "data") is weak/discriminative-less; a rare term is strong. Without this, a lone "search"
+    // overlap surfaces unrelated tools (e.g. a travel query matching NSE's `search_symbols`).
+    const idf = computeIdf(tools.map((t) => `${t.name} ${t.description}`));
     // A lens's servers rank first among matches (a boost on real matches — it never adds a
     // non-matching tool, and a disabled server stays invisible).
     const boost = new Set(opts.boostServers ?? []);
     const scored = tools.map((t) => {
-      const base = bm25Lite(terms, `${t.name} ${t.description}`);
+      const base = bm25Idf(terms, `${t.name} ${t.description}`, idf);
       return { t, score: base > 0 && boost.has(t.server) ? base * 1.5 : base };
     });
+    // Relevance floor: a match must clear a minimum IDF-weighted score, so a match on ONLY generic
+    // terms (e.g. "search"/"get"/"data") is dropped — an off-domain query ("book a flight") against
+    // domain tools (NSE stocks) returns nothing rather than a misleading near-miss. Real in-domain
+    // queries clear it comfortably (empirically ~2.5–5 vs <1.3 for generic-only overlaps). Deep
+    // semantic "is this query in this tool's domain?" is the embedding path (see DESIGN §12 Next).
+    const MIN_SCORE = 1.5;
     return scored
-      .filter((s) => s.score > 0)
+      .filter((s) => s.score >= MIN_SCORE)
       .sort((a, b) => b.score - a.score)
       .slice(0, limit)
       .map((s) => ({ server: s.t.server, name: s.t.name, description: s.t.description, score: Math.round(s.score * 1000) / 1000 }));
@@ -172,6 +187,8 @@ export class McpRegistry {
     }
     const cfg = this.#configs.get(server);
     if (!cfg) throw new Error(`mcp: unknown server "${server}"`);
+    // A crawler server fetches for us outside web.fetch's guard: vet every URL before it sees one.
+    if (cfg.guardUrls) await guardUrlArgs(args, this.#hostCheck);
     const def = await this.inspect(server, name);
     const retryable = def.readOnlyHint === true; // only reads are safe to auto-retry
     const timeoutMs = cfg.timeoutMs ?? this.#rel.defaultTimeoutMs;
@@ -282,11 +299,29 @@ function tokenize(s: string): string[] {
 }
 
 /**
- * A tiny BM25-flavored score: term frequency with saturation, favoring rarer/longer matches, over a
- * single short document (tool name+description). Deterministic and dependency-free — good enough to
- * rank a few dozen tool descriptions; a full FTS index is a later optimization if server counts grow.
+ * Inverse document frequency across the tool corpus: idf(term) = ln(1 + N/df). A term appearing in
+ * many tool descriptions (generic verbs — "search", "get", "data", "returns") gets a low weight; a
+ * rare, discriminative term gets a high one. This is what stops a generic query word from surfacing
+ * an unrelated tool. Recomputed per search over the current candidate set (cheap at this scale).
  */
-function bm25Lite(terms: string[], doc: string): number {
+function computeIdf(docs: string[]): Map<string, number> {
+  const n = docs.length || 1;
+  const df = new Map<string, number>();
+  for (const doc of docs) {
+    for (const term of new Set(tokenize(doc))) df.set(term, (df.get(term) ?? 0) + 1);
+  }
+  const idf = new Map<string, number>();
+  for (const [term, d] of df) idf.set(term, Math.log(1 + n / d));
+  return idf;
+}
+
+/**
+ * BM25-flavored score with IDF: saturating term frequency weighted by each term's IDF, so a match
+ * on a rare/discriminative term dominates and a match on a generic term barely registers. A term the
+ * corpus has never seen (not in `idf`) contributes nothing. Replaces the earlier IDF-less scorer
+ * that let a lone "search" overlap pull in unrelated tools.
+ */
+function bm25Idf(terms: string[], doc: string, idf: Map<string, number>): number {
   const docTokens = tokenize(doc);
   if (docTokens.length === 0 || terms.length === 0) return 0;
   const tf = new Map<string, number>();
@@ -296,8 +331,8 @@ function bm25Lite(terms: string[], doc: string): number {
   for (const term of new Set(terms)) {
     const f = tf.get(term) ?? 0;
     if (f === 0) continue;
-    // Saturating TF + a mild length-normalization; longer matching terms weigh a little more.
-    score += ((f * (k1 + 1)) / (f + k1)) * (1 + term.length / 20);
+    const weight = idf.get(term) ?? 0; // unknown term ⇒ no contribution
+    score += weight * ((f * (k1 + 1)) / (f + k1)) * (1 + term.length / 20);
   }
   return score;
 }

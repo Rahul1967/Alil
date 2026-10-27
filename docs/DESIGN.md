@@ -437,9 +437,19 @@ provider prompt-caching isn't invalidated. Design properties:
   normal response surfaced as a recoverable observation, not a transport error.
 - **Conservative classification.** A tool is `read`/low only if it declares `readOnlyHint`;
   everything else is a `write` (destructive → high). Server `minEffect` can only raise caution.
-- **Transport-isolated.** The MCP SDK lives behind one `McpTransport` adapter (stdio **and
-  Streamable HTTP**), so the registry/tools are SDK-free and unit-testable with a mock. Config:
-  `config/mcp.json` (empty ⇒ MCP off).
+- **Transport-isolated.** The MCP SDK lives behind one `McpTransport` adapter (stdio,
+  **Streamable HTTP** and legacy **HTTP+SSE**), so the registry/tools are SDK-free and unit-testable
+  with a mock. Config: `config/mcp.json` (empty ⇒ MCP off). `headers` take `${ENV_VAR}` so tokens
+  stay in `.env`; a missing variable fails the connect.
+- **Crawler servers (`guardUrls`).** A server that fetches URLs for Alil (Crawl4AI, started by
+  `npm run crawl4ai` on 127.0.0.1 with a bearer token and hooks off) has its own egress outside
+  web.fetch's SSRF guard. With `guardUrls: true`, `registry.call` (so `mcp.batch` too) refuses the
+  call unless every URL argument is http(s), carries no credentials, and resolves only to public
+  addresses; other schemes (`file:`, `raw:`, `gopher:`…) anywhere in the args are refused.
+  Residual gap: redirects and sub-resources the crawler follows itself. Its fetch tools (`md`, `html`, `crawl`)
+  are pinned `network`/low, so each call asks like web.fetch; `execute_js`, `screenshot` and `pdf`
+  are left unpinned (execute/high, hard-denied when tainted): the last two return an ~80k-char base64
+  blob as text. Inline hook code is refused by the server itself since 0.9.0. Output is `ingested` like every MCP result.
 - **Idempotency + freshness.** A **write** call carries a deterministic idempotency key
   (sha256 of server+name+args) so a retry/resume can't duplicate a side effect on a server that
   honors it; reads don't. A server's `notifications/tools/list_changed` invalidates the cached

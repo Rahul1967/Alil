@@ -1,5 +1,5 @@
 {
-  "_comment": "MCP servers Alil can reach via the on-demand mcp.* meta-tools. Tools are NEVER injected into context; the model discovers them with mcp.search → mcp.inspect → mcp.call. Empty `servers` (the default) means MCP is off. Each entry: { name, transport: 'stdio'|'http', command, args?, env?, url?, timeoutMs?, minEffect?, enabled?, tools? }. Streamable-HTTP servers use transport:'http' + url. `enabled` defaults true; set it false (or toggle it in the MCP UI tab) to make a server fully invisible to the model — dropped from search, refused by inspect/call. `tools` pins a classification per tool name, e.g. { \"get_quote\": { \"effect\": \"read\", \"risk\": \"low\" } } lets that tool run without approval, { \"place_order\": { \"effect\": \"spend\", \"risk\": \"critical\" } } makes it always ask fresh. Unpinned tools stay execute/high; a server's own readOnlyHint never lowers that.",
+  "_comment": "MCP servers Alil can reach via the on-demand mcp.* meta-tools. Tools are NEVER injected into context; the model discovers them with mcp.search → mcp.inspect → mcp.call. Empty `servers` (the default) means MCP is off. Each entry: { name, transport: 'stdio'|'http'|'sse', command, args?, env?, url?, headers?, guardUrls?, timeoutMs?, minEffect?, enabled?, tools? }. Streamable-HTTP servers use transport:'http' + url; legacy HTTP+SSE servers use transport:'sse'. `headers` values may reference ${ENV_VAR} (resolved from .env at connect time, so secrets never live here). `guardUrls: true` is for servers that fetch URLs for Alil (crawlers): every URL argument must be http(s) and resolve to a public address before the call, the same SSRF check web.fetch makes. `enabled` defaults true; set it false (or toggle it in the MCP UI tab) to make a server fully invisible to the model — dropped from search, refused by inspect/call. `tools` pins a classification per tool name, e.g. { \"get_quote\": { \"effect\": \"read\", \"risk\": \"low\" } } lets that tool run without approval, { \"place_order\": { \"effect\": \"spend\", \"risk\": \"critical\" } } makes it always ask fresh. Unpinned tools stay execute/high; a server's own readOnlyHint never lowers that.",
   "servers": [
     {
       "name": "nse-bhavcopy",
@@ -10,6 +10,38 @@
       "name": "cm-market",
       "transport": "http",
       "url": "https://mcp.nseindia.in/cmmkt/mcp"
+    },
+    {
+      "name": "crawl4ai",
+      "transport": "sse",
+      "url": "http://127.0.0.1:11235/mcp/sse",
+      "headers": {
+        "Authorization": "Bearer ${CRAWL4AI_API_TOKEN}"
+      },
+      "guardUrls": true,
+      "timeoutMs": 120000,
+      "tools": {
+        "md": {
+          "effect": "network",
+          "risk": "low",
+          "reversible": true
+        },
+        "html": {
+          "effect": "network",
+          "risk": "low",
+          "reversible": true
+        },
+        "crawl": {
+          "effect": "network",
+          "risk": "low",
+          "reversible": true
+        },
+        "ask": {
+          "effect": "read",
+          "risk": "low",
+          "reversible": true
+        }
+      }
     }
   ]
 }
