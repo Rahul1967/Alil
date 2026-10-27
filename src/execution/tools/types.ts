@@ -112,6 +112,12 @@ export interface ToolImpl<T = Record<string, unknown>> {
    * read here (stat/re-read); never mutate.
    */
   verify?(args: T, ctx: ToolContext): Promise<string>;
+  /**
+   * Optional note for the operator's approval card, computed read-only from host state (e.g. "this
+   * overwrites a defining fact — supersede instead?"). Shown beside the policy reason; never a
+   * policy input. Return null when there's nothing to add.
+   */
+  advise?(args: T, ctx: ToolContext): string | null;
 }
 
 /**

@@ -31,7 +31,7 @@ const modelId = process.env.BEDROCK_MODEL_ID ?? "global.anthropic.claude-sonnet-
 // ── Browser HITL: an approval parks here until the user taps Approve/Reject in the page ─────────
 const APPROVAL_TIMEOUT_MS = 5 * 60_000;
 interface PendingApproval {
-  id: string; tool: string; effect: string; risk: string; argsPreview: string; reason: string;
+  id: string; tool: string; effect: string; risk: string; argsPreview: string; reason: string; advice?: string;
   resolve: (d: ApprovalDecision) => void;
 }
 const pendingApprovals = new Map<string, PendingApproval>();
@@ -62,7 +62,7 @@ function fullArgs(args: unknown): string {
 const approvals: ApprovalPort = {
   request(req: ApprovalRequest): Promise<ApprovalDecision> {
     const a = req.action;
-    return askInPage({ id: req.id, tool: a.tool, effect: a.effect, risk: a.risk, argsPreview: fullArgs(a.args), reason: req.reason });
+    return askInPage({ id: req.id, tool: a.tool, effect: a.effect, risk: a.risk, argsPreview: fullArgs(a.args), reason: req.reason, ...(req.advice ? { advice: req.advice } : {}) });
   },
 };
 
@@ -349,7 +349,7 @@ const server = createServer(async (req, res) => {
 
   // ── HITL ────────────────────────────────────────────────────────────────────
   if (req.method === "GET" && url.pathname === "/api/approvals") {
-    return json(200, { items: [...pendingApprovals.values()].map((p) => ({ id: p.id, tool: p.tool, effect: p.effect, risk: p.risk, args: p.argsPreview, reason: p.reason })) });
+    return json(200, { items: [...pendingApprovals.values()].map((p) => ({ id: p.id, tool: p.tool, effect: p.effect, risk: p.risk, args: p.argsPreview, reason: p.reason, ...(p.advice ? { advice: p.advice } : {}) })) });
   }
   if (req.method === "POST" && url.pathname === "/api/approval") {
     try {

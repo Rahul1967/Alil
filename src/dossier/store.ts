@@ -135,6 +135,7 @@ export class DossierStore {
   create(input: DossierCreate, provenance: Provenance): DossierFile {
     const slug = input.slug ? slugify(input.slug) : isSingleton(input.type) ? input.type : slugify(input.title);
     if (this.get(slug)) throw new Error(`dossier: a file with slug "${slug}" already exists (use update)`);
+    if (input.status !== undefined) assertStatus(input.status);
     const today = this.#today();
     const fm: DossierFrontmatter = {
       type: input.type,
@@ -164,10 +165,17 @@ export class DossierStore {
     return this.#parseFile(join(this.#root, rel))!;
   }
 
-  /** Patch an existing file's body and/or frontmatter. `updated` is always refreshed. */
+  /**
+   * Patch an existing file's body and/or frontmatter. `updated` is always refreshed. Nothing is
+   * lost by an overwrite: a changed body, defining field, or status first saves the previous file
+   * under `.history/<slug>/`, and every material change (status, fields old → new, a rewritten
+   * body) is a dated `event` in the trajectory. A running value (balance, outstanding) changing
+   * alone is recorded in the event, not snapshotted.
+   */
   update(slug: string, patch: DossierPatch, provenance: Provenance): DossierFile {
     const f = this.get(slug);
     if (!f) throw new Error(this.#notFoundMessage(slug));
+    if (patch.frontmatter && "status" in patch.frontmatter) assertStatus(patch.frontmatter["status"]);
     const fm: DossierFrontmatter = {
       ...f.frontmatter,
       ...(patch.frontmatter ?? {}),
@@ -178,18 +186,83 @@ export class DossierStore {
       updated: this.#today(),
     };
     const body = patch.body !== undefined ? ensureSkeleton(fm.type, patch.body) : f.body;
-    // Trajectory layer: a status change (e.g. active → superseded) is a material transition worth
-    // recording; ordinary field/body edits are not, keeping the timeline selective. Bundle the
-    // subject write and any transition (event + timeline) into ONE atomic commit so they can never
-    // diverge. `event` files never trigger this — no cascade.
+    const writes: PlannedWrite[] = [{ rel: f.relPath, data: serialize(fm, body) }];
+    // Event files are the trajectory itself: never snapshotted or re-evented (no cascade).
+    if (f.frontmatter.type === "event") {
+      this.#commit(writes);
+      return this.#parseFile(f.path)!;
+    }
+
     const statusBefore = f.frontmatter.status;
     const statusAfter = fm.status;
-    const writes: PlannedWrite[] = [{ rel: f.relPath, data: serialize(fm, body) }];
-    if (f.frontmatter.type !== "event" && statusAfter !== statusBefore) {
-      writes.push(...this.#transitionWrites(fm, `status: ${statusBefore} → ${statusAfter}`, provenance));
+    const changes = fieldChanges(f.frontmatter, fm);
+    const rewritten = body.trimEnd() !== f.body.trimEnd(); // serialization adds a trailing newline
+    const statusChanged = statusAfter !== statusBefore;
+    const when = this.#now().toISOString();
+
+    let saved: string | null = null;
+    if (rewritten || statusChanged || changes.some((c) => !c.running && c.from !== undefined)) {
+      saved = this.#versionRel(f.frontmatter.slug, when);
+      writes.push({ rel: saved, data: readFileSync(f.path, "utf8") });
+    }
+
+    // One event per update, naming everything material that changed. A status change is recorded
+    // for every type; field/body changes only for substantive facts (not identity/preferences/index).
+    const parts: string[] = [];
+    if (statusChanged) parts.push(`status: ${statusBefore} → ${statusAfter}`);
+    const worthy = isTransitionWorthy(f.frontmatter.type);
+    if (worthy) {
+      for (const c of changes) {
+        parts.push(c.from === undefined ? `${c.key} set` : c.running ? `${c.key} ${short(c.from)} → ${short(c.to)}` : `${c.key} changed`);
+      }
+      if (rewritten) parts.push("body rewritten");
+    }
+    if (parts.length > 0) {
+      const details = [
+        ...(worthy ? changes.map((c) => `- ${c.key}: ${c.from === undefined ? "(new)" : quoted(c.from)} → ${quoted(c.to)}`) : []),
+        ...(saved ? [`- previous version saved: \`${saved}\``] : []),
+      ].join("\n");
+      writes.push(...this.#transitionWrites(fm, parts.join("; "), provenance, when, [], details));
     }
     this.#commit(writes);
     return this.#parseFile(f.path)!;
+  }
+
+  /**
+   * Saved previous versions of a file, newest first: each is the complete file as it was before an
+   * overwrite. Kept under `.history/` (a dot-dir, so never listed or queried as a live fact).
+   */
+  versions(slug: string): { at: string; relPath: string; content: string }[] {
+    const dir = join(this.#root, HISTORY_DIR, slugify(slug));
+    if (!existsSync(dir)) return [];
+    return readdirSync(dir).filter((n) => n.endsWith(".md")).sort().reverse().map((n) => ({
+      at: n.replace(/\.md$/, ""),
+      relPath: `${HISTORY_DIR}/${slugify(slug)}/${n}`,
+      content: readFileSync(join(dir, n), "utf8"),
+    }));
+  }
+
+  /**
+   * A note for the operator's approval card when an update changes a DEFINING fact in place (a
+   * purpose, lender, rate: an existing value other than a running balance/outstanding). Such a
+   * change is usually a new fact that deserves supersede + create, so the old one stays as history.
+   * Null when nothing defining changes (running values, new fields, metadata) or the file is absent.
+   */
+  adviseUpdate(slug: string, patch: DossierPatch): string | null {
+    const f = this.get(slug);
+    if (!f || !patch.frontmatter || f.frontmatter.type === "event") return null;
+    const after = { ...f.frontmatter, ...patch.frontmatter } as DossierFrontmatter;
+    const defining = fieldChanges(f.frontmatter, after).filter((c) => !c.running && c.from !== undefined);
+    if (defining.length === 0) return null;
+    const list = defining.map((c) => `${c.key}: ${quoted(c.from)} → ${quoted(c.to)}`).join("; ");
+    return `This changes ${list} in place. If the fact itself changed (not a correction), dossier.supersede "${f.frontmatter.slug}" and create the current one instead, so the old fact stays on record as it was. The previous version is saved either way.`;
+  }
+
+  #versionRel(slug: string, whenIso: string): string {
+    const stamp = whenIso.replace(/[:.]/g, "-");
+    let rel = `${HISTORY_DIR}/${slug}/${stamp}.md`;
+    for (let n = 2; existsSync(join(this.#root, rel)); n++) rel = `${HISTORY_DIR}/${slug}/${stamp}-${n}.md`;
+    return rel;
   }
 
   /** Mark a file superseded (status flip + a dated note appended). The fact is kept, not deleted. */
@@ -257,7 +330,7 @@ export class DossierStore {
    * "subject written, event lost"). Kept selective: only called for material transitions, and
    * never for `event`/`index`/self-singletons, so the timeline can't cascade or self-reference.
    */
-  #transitionWrites(subject: DossierFrontmatter, what: string, provenance: Provenance, whenIso?: string, extraEvents: DossierFile[] = []): PlannedWrite[] {
+  #transitionWrites(subject: DossierFrontmatter, what: string, provenance: Provenance, whenIso?: string, extraEvents: DossierFile[] = [], details = ""): PlannedWrite[] {
     const when = whenIso ?? this.#now().toISOString();
     const day = when.slice(0, 10);
     const domain = primaryDomain(subject);
@@ -283,7 +356,7 @@ export class DossierStore {
       domain,
       subject: subject.slug,
     };
-    const eventBody = `## What changed\n${what} — ${subject.title} (${subject.type}).\n`;
+    const eventBody = `## What changed\n${what} — ${subject.title} (${subject.type}).\n${details ? `\n${details}\n` : ""}`;
     const eventRel = this.#relPathFor("event", slug);
     const eventFile: DossierFile = {
       path: join(this.#root, eventRel),
@@ -521,7 +594,12 @@ export class DossierStore {
       const fm: DossierFrontmatter = {
         ...frontmatter,
         tags: Array.isArray(frontmatter.tags) ? frontmatter.tags.map(String) : [],
-        status: (frontmatter.status as DossierStatus) ?? "active",
+        // A status outside the lifecycle (hand-written "legacy", "low-activity") reads as active, its
+        // wording kept as `state`, so active-only lookups don't silently drop the file; the next
+        // write persists this form.
+        ...(frontmatter.status !== undefined && !isDossierStatus(frontmatter.status)
+          ? { status: "active", state: frontmatter.state ?? String(frontmatter.status) }
+          : { status: (frontmatter.status as DossierStatus) ?? "active" }),
         created: String(frontmatter.created ?? ""),
         updated: String(frontmatter.updated ?? frontmatter.created ?? ""),
       } as DossierFrontmatter;
@@ -705,4 +783,49 @@ function walkMarkdown(dir: string): string[] {
     else if (entry.endsWith(".md")) out.push(abs);
   }
   return out;
+}
+
+const HISTORY_DIR = ".history";
+const STATUSES: readonly DossierStatus[] = ["active", "superseded", "archived"];
+
+export function isDossierStatus(s: unknown): s is DossierStatus {
+  return typeof s === "string" && (STATUSES as readonly string[]).includes(s);
+}
+
+function assertStatus(s: unknown): void {
+  if (!isDossierStatus(s)) {
+    throw new Error(`dossier: status must be one of ${STATUSES.join(" | ")} (got ${JSON.stringify(s)}); put a descriptive state like "legacy" in a field such as \`state\` or a tag`);
+  }
+}
+
+/** Frontmatter keys that are bookkeeping, not facts: never listed as a change. */
+const META_KEYS = new Set(["type", "slug", "title", "tags", "description", "confidence", "provenance", "created", "updated", "status"]);
+/** "As of" dates qualify a running value; they change with it and aren't a change of their own. */
+const CONTEXT_ONLY = /(as_?of|_at|date_?checked)$/i;
+/** Values expected to move over time (a balance, what's outstanding): updating them in place is normal. */
+const RUNNING = /(balance|outstanding|remaining|current|paid|last_|spent|available)/i;
+
+interface FieldChange { key: string; from: unknown; to: unknown; running: boolean }
+
+/** Fact fields whose value differs between two frontmatter rows (added fields have `from` undefined). */
+function fieldChanges(before: DossierFrontmatter, after: DossierFrontmatter): FieldChange[] {
+  const out: FieldChange[] = [];
+  for (const key of Object.keys(after)) {
+    if (META_KEYS.has(key) || CONTEXT_ONLY.test(key)) continue;
+    const from = before[key];
+    const to = after[key];
+    if (JSON.stringify(from) === JSON.stringify(to)) continue;
+    out.push({ key, from, to, running: RUNNING.test(key) });
+  }
+  return out;
+}
+
+function short(v: unknown): string {
+  const s = typeof v === "string" ? v : JSON.stringify(v);
+  return s.length > 40 ? `${s.slice(0, 40)}…` : s;
+}
+
+function quoted(v: unknown): string {
+  const s = typeof v === "string" ? JSON.stringify(v) : JSON.stringify(v) ?? "(none)";
+  return s.length > 120 ? `${s.slice(0, 120)}…` : s;
 }

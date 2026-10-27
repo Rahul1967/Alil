@@ -306,13 +306,15 @@ test("supersede records a status transition into the timeline", async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-test("an ordinary field/body edit does NOT create an event (selective)", async () => {
+test("metadata-only edits add no event; a fact or body change does (selective)", async () => {
   const root = await tmpRoot();
   const store = new DossierStore({ root, now: () => new Date("2026-09-05T00:00:00Z") });
   store.create({ type: "person", title: "Meghna", tags: ["family"] }, OP);
   const before = store.timeline().length; // just the "began tracking" event
+  store.update("meghna", { frontmatter: { description: "cousin", confidence: "high", tags: ["family", "friends"] } }, { origin: "model" });
+  assert.equal(store.timeline().length, before, "tags/description/confidence are bookkeeping, not a transition");
   store.update("meghna", { body: "## Facts\n- lives in Pune" }, { origin: "model" });
-  assert.equal(store.timeline().length, before, "a non-status edit must not add a transition");
+  assert.equal(store.timeline().length, before + 1, "a rewritten body is a dated change");
   await rm(root, { recursive: true, force: true });
 });
 

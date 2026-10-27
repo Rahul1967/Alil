@@ -281,6 +281,7 @@ function renderApproval(a) {
   head.textContent = a.tool === "plan" ? "Alil wants to run this plan" : `Alil wants to run ${a.tool} · ${a.effect} · ${a.risk} risk`;
   card.appendChild(head);
   if (a.reason) card.appendChild(Object.assign(document.createElement("div"), { className: "approval-reason", textContent: a.reason }));
+  if (a.advice) card.appendChild(Object.assign(document.createElement("div"), { className: "approval-advice", textContent: `💡 ${a.advice}` }));
   card.appendChild(approvalArgs(a.args));
   const btns = document.createElement("div");
   btns.className = "approval-btns";
