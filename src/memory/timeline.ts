@@ -9,6 +9,7 @@ import type {
   TimelineLine,
   NewTimelineLine,
   TimelineRole,
+  TimelineAttachment,
 } from "./types.ts";
 
 interface RawRow {
@@ -22,6 +23,7 @@ interface RawRow {
   tool_calls: string | null;
   tool_results: string | null;
   lens: string | null;
+  attachments: string | null;
 }
 
 function toLine(r: RawRow): TimelineLine {
@@ -37,6 +39,7 @@ function toLine(r: RawRow): TimelineLine {
   if (r.tool_calls !== null) line.toolCalls = JSON.parse(r.tool_calls);
   if (r.tool_results !== null) line.toolResults = JSON.parse(r.tool_results);
   if (r.lens) line.lens = r.lens;
+  if (r.attachments) line.attachments = JSON.parse(r.attachments) as TimelineAttachment[];
   return line;
 }
 
@@ -46,16 +49,20 @@ export class SqliteTimeline implements Timeline {
   #since: Statement;
   #range: Statement;
   #max: Statement;
+  #attachments: Statement;
 
   constructor(db: DB) {
     this.#ins = db.prepare(
-      `INSERT INTO timeline(at, channel, provenance, episode_id, role, text, tool_calls, tool_results, lens)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO timeline(at, channel, provenance, episode_id, role, text, tool_calls, tool_results, lens, attachments)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     this.#recent = db.prepare(`SELECT * FROM timeline ORDER BY seq DESC LIMIT ?`);
     this.#since = db.prepare(`SELECT * FROM timeline WHERE seq > ? ORDER BY seq ASC`);
     this.#range = db.prepare(`SELECT * FROM timeline WHERE seq >= ? AND seq <= ? ORDER BY seq ASC`);
     this.#max = db.prepare(`SELECT COALESCE(MAX(seq), 0) AS m FROM timeline`);
+    this.#attachments = db.prepare(
+      `SELECT attachments FROM timeline WHERE episode_id = ? AND attachments IS NOT NULL ORDER BY seq ASC`,
+    );
   }
 
   append(line: NewTimelineLine): number {
@@ -69,6 +76,7 @@ export class SqliteTimeline implements Timeline {
       line.toolCalls !== undefined ? JSON.stringify(line.toolCalls) : null,
       line.toolResults !== undefined ? JSON.stringify(line.toolResults) : null,
       line.lens ?? null,
+      line.attachments && line.attachments.length > 0 ? JSON.stringify(line.attachments) : null,
     );
     return Number(r.lastInsertRowid);
   }
@@ -88,5 +96,10 @@ export class SqliteTimeline implements Timeline {
 
   lastSeq(): number {
     return (this.#max.get() as { m: number }).m;
+  }
+
+  attachmentsIn(episodeId: string): TimelineAttachment[] {
+    return (this.#attachments.all(episodeId) as { attachments: string }[])
+      .flatMap((r) => JSON.parse(r.attachments) as TimelineAttachment[]);
   }
 }

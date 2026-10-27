@@ -2,6 +2,7 @@ import { stat } from "node:fs/promises";
 import { relative } from "node:path";
 import type { ToolImpl, ToolContext, ValidateResult, ToolRunResult } from "./types.ts";
 import { walkFiles } from "./walk.ts";
+import type { WalkState } from "./walk.ts";
 import { globToRegExp } from "../../policy/glob.ts";
 
 interface FsGlobArgs {
@@ -20,7 +21,8 @@ export const fsGlob: ToolImpl<FsGlobArgs> = {
   name: "fs.glob",
   description:
     "Find files by name pattern (e.g. '**/*.ts', 'src/*.md') under a directory. Returns " +
-    "matching paths, newest-modified first, capped at 100. Skips VCS/dependency directories.",
+    "matching paths, newest-modified first, capped at 100. Skips VCS/dependency directories and " +
+    "hidden directories (pass one as `path` to search inside it).",
   parameters: {
     type: "object",
     properties: {
@@ -52,7 +54,8 @@ export const fsGlob: ToolImpl<FsGlobArgs> = {
     const re = globToRegExp(args.pattern);
 
     const hits: Hit[] = [];
-    for await (const file of walkFiles(base)) {
+    const walk: WalkState = { limited: false };
+    for await (const file of walkFiles(base, undefined, walk)) {
       const rel = relative(root, file);
       if (!re.test(rel)) continue;
       try {
@@ -69,6 +72,13 @@ export const fsGlob: ToolImpl<FsGlobArgs> = {
       ? `matched ${MAX_HITS} of ${hits.length} files for '${args.pattern}' (truncated):`
       : `matched ${shown.length} file${shown.length === 1 ? "" : "s"} for '${args.pattern}':`;
     const body = shown.length === 0 ? "  (no matches)" : shown.map((h) => `  ${h.path}`).join("\n");
-    return { summary: `${head}\n${body}`, data: { pattern: args.pattern, truncated, files: shown.map((h) => h.path) } };
+    // A walk that hit its file budget saw only part of the tree: say so, or a miss reads as "absent".
+    const cut = walk.limited
+      ? `\n  (search incomplete: stopped after 5000 files — a file may exist but not be listed; narrow it with \`path\`, e.g. path: "attachments")`
+      : "";
+    return {
+      summary: `${head}\n${body}${cut}`,
+      data: { pattern: args.pattern, truncated, incomplete: walk.limited, files: shown.map((h) => h.path) },
+    };
   },
 };

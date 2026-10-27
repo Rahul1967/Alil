@@ -46,6 +46,7 @@ function migrate(db: DB): void {
   // Lenses (DESIGN §10b): tags + lens stamps across tiers, procedure status + outcome stats.
   addColumn(db, "intention", "lens", "TEXT");
   addColumn(db, "timeline", "lens", "TEXT");
+  addColumn(db, "timeline", "attachments", "TEXT");
   addColumn(db, "episodes", "tags", "TEXT NOT NULL DEFAULT '[]'");
   addColumn(db, "episodes", "lenses", "TEXT NOT NULL DEFAULT '[]'");
   addColumn(db, "canonical", "tags", "TEXT NOT NULL DEFAULT '[]'");

@@ -137,6 +137,40 @@ test("fs.glob matches by pattern and respects segment boundaries", async () => {
   }
 });
 
+// A home-directory jail holds tens of thousands of files under dot-dirs (.npm, .nvm, .cache...).
+// The walk must reach a shallow file before its budget runs out, and must never report a cut-off
+// search as "no matches".
+test("fs.glob finds a shallow file past a huge hidden tree, and says when a search was cut short", async () => {
+  const { ctx, dir } = await ctxWith();
+  try {
+    await mkdir(join(dir, ".npm", "cache"), { recursive: true });
+    await mkdir(join(dir, "zzz", "deep"), { recursive: true });
+    await mkdir(join(dir, "attachments", "2026-10-24"), { recursive: true });
+    for (let i = 0; i < 300; i++) await writeFile(join(dir, ".npm", "cache", `f${i}.json`), "", "utf8");
+    for (let i = 0; i < 300; i++) await writeFile(join(dir, "zzz", "deep", `g${i}.txt`), "", "utf8");
+    await writeFile(join(dir, "attachments", "2026-10-24", "export.csv"), "", "utf8");
+
+    const found = await run(fsGlob, { pattern: "**/export.csv" }, ctx);
+    assert.deepEqual((found.data as { files: string[] }).files, ["attachments/2026-10-24/export.csv"]);
+
+    // An explicit hidden path is still searchable.
+    const hidden = await run(fsGlob, { pattern: "**/f1.json", path: ".npm" }, ctx);
+    assert.deepEqual((hidden.data as { files: string[] }).files, [".npm/cache/f1.json"]);
+
+    // Over budget: a miss is reported as incomplete, never as a clean "no matches".
+    const { walkFiles } = await import("../src/execution/tools/walk.ts");
+    const state = { limited: false };
+    let n = 0;
+    for await (const _ of walkFiles(dir, 50, state)) n++;
+    assert.equal(n, 50);
+    assert.equal(state.limited, true);
+    const miss = await run(fsGlob, { pattern: "**/nothing-here.xyz" }, ctx);
+    assert.doesNotMatch(miss.summary, /incomplete/, "a search that finished is not flagged");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 // ─── shell ───
 
 test("shell runs a command and returns stdout + exit code", async () => {

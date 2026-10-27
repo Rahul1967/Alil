@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS timeline (
   text         TEXT,
   tool_calls   TEXT,
   tool_results TEXT,
-  lens         TEXT                        -- active lens id when the line was written (null = none)
+  lens         TEXT,                       -- active lens id when the line was written (null = none)
+  attachments  TEXT                        -- JSON: files the operator sent with this line (null = none)
 );
 
 -- Time-bounded slices (housekeeping, not identity).

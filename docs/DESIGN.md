@@ -366,6 +366,13 @@ of the turn (path, kind, size, "open with doc.read / fs.read / vision.view") —
 context path. Extraction stays with the existing `doc.read` (PDF/DOCX/XLSX/CSV via an offline
 extractor), `fs.read` (text), and `vision.view` (images — see below).
 
+**Scoped to the episode.** The user line a file arrives with records its reference (timeline
+`attachments` column), so the block lists every file sent *in the open episode* — on any channel,
+across restarts — newest first, at most 10, earlier ones marked "sent earlier in this conversation".
+When the episode closes (30 min idle) the listing ends; the files stay on disk under `attachments/`.
+Only paths of the shape the store produces (`attachments/<day>/<sanitized name>`) are listed or
+remembered, so a channel can't smuggle an arbitrary path in as an "attachment".
+
 **Per-channel receiver** is the only new channel code: Telegram `getFile`→download by `file_id`
 (document/photo); browser `POST /api/upload`; a future Slack `files.info`→`url_private_download`
 with the bearer header. The boundary generalizes — everything downstream is channel-agnostic.

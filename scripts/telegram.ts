@@ -22,17 +22,6 @@ const CHANNEL = "telegram";
 // Files stay referenceable for a short window after they arrive, so "save the file I just sent"
 // works even when the file and the instruction are separate Telegram messages. Bounded by count
 // and age so stale files don't linger in context.
-const RECENT_ATTACHMENT_MS = 15 * 60 * 1000;
-const RECENT_ATTACHMENT_MAX = 5;
-let recentAttachments: { att: Attachment; at: number }[] = [];
-function rememberAttachment(att: Attachment): void {
-  recentAttachments.push({ att, at: Date.now() });
-}
-function liveAttachments(): Attachment[] {
-  const cutoff = Date.now() - RECENT_ATTACHMENT_MS;
-  recentAttachments = recentAttachments.filter((r) => r.at >= cutoff).slice(-RECENT_ATTACHMENT_MAX);
-  return recentAttachments.map((r) => r.att);
-}
 const modelId = process.env.BEDROCK_MODEL_ID ?? "global.anthropic.claude-sonnet-5";
 
 const token = process.env.TELEGRAM_BOT_TOKEN ?? process.argv[2];
@@ -169,7 +158,7 @@ async function onMessage(msg: TelegramMessage): Promise<void> {
   }
 
   // Inbound file: download authenticated bytes and cross the ingestion boundary (tainted
-  // `ingested`). The file is remembered so it stays referenceable for the next few turns.
+  // `ingested`). Core keeps it listed for the rest of the episode, on every channel.
   const file = msg.document ?? (msg.photo && msg.photo.length > 0 ? msg.photo[msg.photo.length - 1] : undefined);
   let justArrived: Attachment | undefined;
   if (file) {
@@ -181,15 +170,12 @@ async function onMessage(msg: TelegramMessage): Promise<void> {
         ...(msg.document?.mime_type ? { mime: msg.document.mime_type } : {}),
         ...(msg.caption ? { caption: msg.caption } : {}),
       });
-      rememberAttachment(justArrived);
     } catch (e) {
       await client.sendMessage(msg.chat.id, `· couldn't ingest that file: ${(e as Error).message}`);
     }
   }
 
-  // Include the just-arrived file plus any still-recent ones, so an instruction that follows a bare
-  // file drop ("save the file I just sent") can still see it.
-  const attachments = liveAttachments();
+  const attachments = justArrived ? [justArrived] : [];
 
   await client.sendChatAction(msg.chat.id);
   const turnText =
