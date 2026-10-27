@@ -23,6 +23,17 @@ export interface TimelineLine {
   toolResults?: unknown;
   /** Active lens id when the line was written (absent = no lens). */
   lens?: string;
+  /** Files the operator sent with this (user) line, as placed by the ingestion store. */
+  attachments?: TimelineAttachment[];
+}
+
+/** A file reference carried on a timeline line; the bytes live on disk under attachments/. */
+export interface TimelineAttachment {
+  path: string;
+  filename: string;
+  kind: string;
+  bytes: number;
+  caption?: string;
 }
 
 /** A line before the store assigns its seq. */
@@ -39,6 +50,8 @@ export interface Timeline {
   range(fromSeq: number, toSeq: number): TimelineLine[];
   /** Highest assigned seq, or 0 if the timeline is empty. */
   lastSeq(): number;
+  /** Files sent during an episode, oldest first (one entry per line that carried them). */
+  attachmentsIn(episodeId: string): TimelineAttachment[];
 }
 
 // ─── Episode: a time-bounded slice (housekeeping, not identity) ───

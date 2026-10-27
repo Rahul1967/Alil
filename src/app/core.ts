@@ -1,7 +1,7 @@
 import { Brain } from "../runtime/loop.ts";
 import type { BrainPorts } from "../runtime/loop.ts";
 import { guardsFromEnv } from "../runtime/types.ts";
-import type { BrainInput, BrainTurn, BrainObserver, GuardLimits, MemoryPort, ActionSink, ProviderRetry } from "../runtime/types.ts";
+import type { AttachmentRef, BrainInput, BrainTurn, BrainObserver, GuardLimits, MemoryPort, ActionSink, ProviderRetry } from "../runtime/types.ts";
 import type { Provenance, TranscriptLine, ActionContract, ToolResult, Fragment } from "../core/types.ts";
 import { ProviderRegistry, BedrockProvider } from "../providers/index.ts";
 import { PromptAssembler, FilePersonaSource } from "../prompts/index.ts";
@@ -277,13 +277,14 @@ export class Alil {
       const at = new Date().toISOString();
       const lens = this.#lenses.active();
       const episodeId = this.#episodes ? await this.#episodes.beginTurn(at) : "ep";
+      const sent = (opts.attachments ?? []).filter((a) => PLACED_ATTACHMENT.test(a.path))
+        .map((a): AttachmentRef => ({ path: a.path, filename: a.filename, kind: a.kind, bytes: a.bytes, ...(a.caption ? { caption: a.caption } : {}) }));
+      const attachments = episodeAttachments(sent, this.#memory?.timeline.attachmentsIn(episodeId) ?? []);
       const input: BrainInput = {
         sessionId: this.channel,
         message: { text, provenance },
         history: this.loadHistory(),
-        ...(opts.attachments && opts.attachments.length > 0
-          ? { attachments: opts.attachments.map((a) => ({ path: a.path, filename: a.filename, kind: a.kind, bytes: a.bytes, ...(a.caption ? { caption: a.caption } : {}) })) }
-          : {}),
+        ...(attachments.length > 0 ? { attachments } : {}),
       };
       this.#logger?.turnStart(this.channel, opts.label ?? "turn", text, provenance);
       const lensField = lens ? { lens: lens.id } : {};
@@ -291,7 +292,7 @@ export class Alil {
       // duplicated into this turn's context). A crash, error, or cancel can lose the reply — never
       // the message. Every user line gets exactly one answering line (reply or harness note), which
       // is what lets a restart detect a turn that was cut off (#recoverInterruptedTurn).
-      this.#memory?.timeline.append({ at, channel: this.channel, provenance, episodeId, role: "user", text, ...lensField });
+      this.#memory?.timeline.append({ at, channel: this.channel, provenance, episodeId, role: "user", text, ...lensField, ...(sent.length > 0 ? { attachments: sent } : {}) });
       const signal = anySignal(queueSignal, opts.signal);
       const modelId = this.#modelFor(lens);
       let turn: BrainTurn;
@@ -308,7 +309,7 @@ export class Alil {
         : turn.stopReason === "aborted" ? "cancelled"
         : turn.stopReason === "guard_halt" ? `halted: ${turn.haltReason ?? "guard"}`
         : turn.haltReason ?? turn.stopReason;
-      this.#recordReply(episodeId, lensField, turn.assistantText, interruption, interruption !== null ? actionTrail(turn) : null);
+      this.#recordReply(episodeId, lensField, turn.assistantText, interruption, actionTrail(turn));
       this.#audit.append("turn", {
         channel: this.channel, episodeId, iterations: turn.iterations, stopReason: turn.stopReason,
         ...(opts.label ? { label: opts.label } : {}), ...lensField, ...(modelId !== this.#defaultModel ? { model: modelId } : {}),
@@ -328,10 +329,13 @@ export class Alil {
         ? interruptedNote(interruption) + (trail ? `\n\nWhat I had done before the interruption:\n${trail}` : "")
         : reply === undefined ? "[harness note] I finished without a text reply." : null;
       const text = [reply, note].filter((t): t is string => !!t).join("\n\n");
+      // A finished turn's trail is kept beside the reply (not in it), for loadHistory to show the
+      // next few turns what was actually done; an interrupted turn already carries it in its note.
+      const kept = interruption === null && trail ? { toolCalls: { trail } } : {};
       this.#memory.timeline.append({
         at: new Date().toISOString(), channel: this.channel,
         provenance: note ? { origin: "system" } : { origin: "model" },
-        episodeId, role: "assistant", text, ...lensField,
+        episodeId, role: "assistant", text, ...lensField, ...kept,
       });
     }
     this.#episodes?.endTurn(new Date().toISOString());
@@ -384,9 +388,16 @@ export class Alil {
   /** Prior turns as brain history (shared shape across channels). */
   loadHistory(): TranscriptLine[] {
     if (!this.#memory) return [];
-    return this.#memory.timeline.workingSet(40).flatMap((l): TranscriptLine[] => {
+    const lines = this.#memory.timeline.workingSet(40);
+    // Only the most recent trails ride along: enough to remember what was just done, without
+    // every past turn's tool list crowding the context.
+    const withTrail = new Set(lines.filter((l) => l.role === "assistant" && trailOf(l) !== null).slice(-RECENT_TRAILS).map((l) => l.seq));
+    return lines.flatMap((l): TranscriptLine[] => {
       if (l.role === "user" && l.text !== undefined) return [{ t: "user", at: l.at, channel: l.channel, provenanceId: l.provenance.origin, text: l.text }];
-      if (l.role === "assistant" && l.text !== undefined) return [{ t: "model", at: l.at, text: l.text }];
+      if (l.role === "assistant" && l.text !== undefined) {
+        const trail = withTrail.has(l.seq) ? trailOf(l) : null;
+        return [{ t: "model", at: l.at, text: trail ? `${l.text}\n\n[harness record — actions taken in that turn]\n${trail}` : l.text }];
+      }
       return [];
     });
   }
@@ -757,4 +768,34 @@ function loadMcpRegistry(path: string): McpRegistry | null {
   } catch {
     return null; // malformed config or read error ⇒ MCP off, never a startup crash
   }
+}
+
+/** Path shape the ingestion store produces (`attachments/<day>/<sanitized name>`). Anything else a
+ * channel hands in (a forged or stale path) is neither listed nor remembered. */
+const PLACED_ATTACHMENT = /^attachments\/\d{4}-\d{2}-\d{2}\/[a-z0-9][a-z0-9-]*(\.[a-z0-9]+)?$/;
+/** At most this many files listed per turn; the newest win. */
+const MAX_LISTED_ATTACHMENTS = 10;
+
+/**
+ * The files referenceable this turn: those sent with this message, then the rest sent earlier in the
+ * open episode (newest first, each path once). Scoped to the episode on purpose: when it closes the
+ * listing ends, while the files themselves stay on disk under attachments/.
+ */
+function episodeAttachments(sent: AttachmentRef[], earlier: AttachmentRef[]): AttachmentRef[] {
+  const seen = new Set(sent.map((a) => a.path));
+  const prior: AttachmentRef[] = [];
+  for (const a of [...earlier].reverse()) {
+    if (seen.has(a.path) || !PLACED_ATTACHMENT.test(a.path)) continue;
+    seen.add(a.path);
+    prior.push({ ...a, earlier: true });
+  }
+  return [...sent, ...prior].slice(0, MAX_LISTED_ATTACHMENTS);
+}
+
+/** How many of the latest finished turns show their action trail in history. */
+const RECENT_TRAILS = 3;
+
+function trailOf(l: { toolCalls?: unknown }): string | null {
+  const t = (l.toolCalls as { trail?: unknown } | undefined)?.trail;
+  return typeof t === "string" && t.length > 0 ? t : null;
 }

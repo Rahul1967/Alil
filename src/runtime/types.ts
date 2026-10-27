@@ -24,6 +24,8 @@ export interface AttachmentRef {
   kind: string;
   bytes: number;
   caption?: string;
+  /** Sent earlier in the current episode, not with this message. */
+  earlier?: boolean;
 }
 
 /** A tool call the brain proposes — handed OUT to the policy boundary via ActionSink. */

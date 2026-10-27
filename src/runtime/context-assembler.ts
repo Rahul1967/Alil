@@ -35,7 +35,7 @@ export function initialMessages(params: {
     contextBlocks.push(`[current state]\n${worldState}`);
   }
   for (const block of extraBlocks ?? []) contextBlocks.push(block);
-  // Files the operator attached this turn. Listed, not inlined — the model opens what it needs
+  // Files the operator sent this episode (this message's first). Listed, not inlined — the model opens what it needs
   // with doc.read (pdf/docx/xlsx/csv) or fs.read (text), keeping large files off the hot path.
   if (input.attachments && input.attachments.length > 0) {
     const rows = input.attachments.map((a) => {
@@ -49,7 +49,8 @@ export function initialMessages(params: {
               ? "look at with vision.view"
               : "binary — not readable";
       const note = a.caption ? ` — "${a.caption}"` : "";
-      return `- ${a.path} (${a.kind}, ${size}) — ${how}${note}`;
+      const when = a.earlier ? " — sent earlier in this conversation" : "";
+      return `- ${a.path} (${a.kind}, ${size}) — ${how}${note}${when}`;
     });
     contextBlocks.push(`[attachments]\n${rows.join("\n")}`);
   }
