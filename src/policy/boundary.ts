@@ -93,8 +93,12 @@ export class PolicyBoundary implements ActionSink {
     // Don't spend an approval on an action that can't run: arguments the tool would reject are an
     // error now, before the operator is asked (the executor still re-validates after approval).
     const tool = this.#deps.tools.get(action.tool);
+    let advice: string | null = null;
     if (tool) {
       const v = tool.validate(action.args);
+      if (v.ok && tool.advise) {
+        try { advice = tool.advise(v.value, this.#deps.executor.context); } catch { advice = null; } // advisory only
+      }
       if (!v.ok) {
         this.#record(action, decision, decidedBy, reason, "rejected:invalid-args", { error: v.error });
         return { actionId: action.id, outcome: "error", summary: `invalid args: ${v.error}` };
@@ -133,6 +137,7 @@ export class PolicyBoundary implements ActionSink {
         binding,
         presentedRisk: action.risk,
         reason,
+        ...(advice ? { advice } : {}),
       });
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);

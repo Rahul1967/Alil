@@ -1,5 +1,6 @@
 import type { ToolImpl, ToolContext, ValidateResult, ToolRunResult } from "./types.ts";
 import type { DossierPatch } from "../../dossier/types.ts";
+import { isDossierStatus } from "../../dossier/store.ts";
 
 interface DossierUpdateArgs {
   slug: string;
@@ -15,7 +16,7 @@ interface DossierUpdateArgs {
 export const dossierUpdate: ToolImpl<DossierUpdateArgs> = {
   name: "dossier.update",
   description:
-    "Edit an existing operator-dossier file by `slug`. Provide a new `body` (replaces the markdown content) and/or a `frontmatter` patch (shallow-merged; e.g. tags, description, confidence, status, type-specific fields). To retire a fact that changed, prefer dossier.supersede. Writing requires approval.",
+    "Edit an existing operator-dossier file by `slug`. Provide a new `body` (replaces the markdown content) and/or a `frontmatter` patch (shallow-merged; e.g. tags, description, confidence, status, type-specific fields). Use it for running values (balance, outstanding) and corrections; the previous version is kept and the change is dated in the timeline. To retire a fact that changed (new purpose, lender, closed account), prefer dossier.supersede + dossier.create. `status` is only active | superseded | archived. Writing requires approval.",
   parameters: {
     type: "object",
     properties: {
@@ -42,6 +43,8 @@ export const dossierUpdate: ToolImpl<DossierUpdateArgs> = {
       if (typeof args["frontmatter"] !== "object" || args["frontmatter"] === null || Array.isArray(args["frontmatter"]))
         return { ok: false, error: "`frontmatter` must be an object" };
       value.frontmatter = args["frontmatter"] as Record<string, unknown>;
+      if ("status" in value.frontmatter && !isDossierStatus(value.frontmatter["status"]))
+        return { ok: false, error: "`frontmatter.status` must be active | superseded | archived; put a descriptive state like \"legacy\" in a `state` field or a tag" };
     }
     if (value.body === undefined && value.frontmatter === undefined)
       return { ok: false, error: "dossier.update needs a `body` and/or `frontmatter` to change" };
@@ -57,6 +60,10 @@ export const dossierUpdate: ToolImpl<DossierUpdateArgs> = {
     };
     const f = store.update(args.slug, patch, { origin: "model" });
     return { summary: `updated dossier "${f.frontmatter.title}"`, data: { slug: f.frontmatter.slug, updated: f.frontmatter.updated } };
+  },
+
+  advise(args: DossierUpdateArgs, ctx: ToolContext): string | null {
+    return ctx.dossier?.store?.adviseUpdate(args.slug, args.frontmatter ? { frontmatter: args.frontmatter } : {}) ?? null;
   },
 
   async verify(args: DossierUpdateArgs, ctx: ToolContext): Promise<string> {

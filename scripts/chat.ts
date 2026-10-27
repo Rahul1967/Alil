@@ -26,7 +26,8 @@ const approvals: ApprovalPort = {
     console.log(
       `\n  ⚠ approval needed: ${a.tool} (${a.effect}/${a.risk})\n` +
         `    args: ${JSON.stringify(a.args).slice(0, 200)}\n` +
-        `    reason: ${req.reason}`,
+        `    reason: ${req.reason}` +
+        (req.advice ? `\n    💡 ${req.advice}` : ""),
     );
     let ans: string;
     try {

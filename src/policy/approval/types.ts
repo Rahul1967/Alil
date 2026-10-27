@@ -38,6 +38,8 @@ export interface ApprovalRequest {
   binding: ExecutionBinding;
   presentedRisk: Risk;
   reason: string;
+  /** The tool's own note for the operator (ToolImpl.advise), shown beside the reason. */
+  advice?: string;
 }
 
 export interface ApprovalDecision {

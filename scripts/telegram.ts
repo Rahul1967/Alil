@@ -72,7 +72,7 @@ async function askOperator(text: string): Promise<ApprovalDecision> {
 const approvals: ApprovalPort = {
   async request(req: ApprovalRequest): Promise<ApprovalDecision> {
     const a = req.action;
-    return askOperator(`⚠️ Approval needed\n\n${a.tool}  (${a.effect}/${a.risk})\nargs: ${JSON.stringify(a.args).slice(0, 300)}\n\n${req.reason}`);
+    return askOperator(`⚠️ Approval needed\n\n${a.tool}  (${a.effect}/${a.risk})\nargs: ${JSON.stringify(a.args).slice(0, 300)}\n\n${req.reason}${req.advice ? `\n\n💡 ${req.advice}` : ""}`);
   },
 };
 

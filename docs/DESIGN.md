@@ -507,13 +507,27 @@ Alil creates, updates, and supersedes through the boundary.
   modeling the operator *changing over time*. Following the event-sourcing pattern (ActiveGraph) and
   bi-temporal fact tracking (Zep/Graphiti), and kept **selective** (Chronos: only real state
   transitions, not a firehose): the store **auto-emits an `event` file** on a material transition —
-  a fact created ("began tracking"), or a status change including supersede — carrying `when` (a
+  a fact created ("began tracking"), a status change including supersede, a fact field changing
+  (old → new: `balance 71391 → 40445`, `purpose changed`), or a rewritten body — carrying `when` (a
   resolved ISO datetime), `domain` (the subject's primary tag), and `subject` (the slug). `event`
   files are the append-only log; **`timeline.md` is a pure projection regenerated from them** on
   every transition (grouped by domain, newest first), so it can never drift and is rebuildable at
   any time. Guards against a cascade: `event`/`index` and the operator-self singletons never emit
-  events. "What changed recently" is a cheap read via `dossier.timeline` (or the `event` files
-  directly).
+  events. Bookkeeping fields (tags, description, confidence) and as-of dates are not transitions.
+  "What changed recently" is a cheap read via `dossier.timeline` (or the `event` files directly).
+- **No overwrite loses history.** Before an update rewrites the body, changes a *defining* field, or
+  changes status, the complete previous file is saved under `.history/<slug>/<timestamp>.md` in the
+  same atomic commit (`DossierStore.versions(slug)`; a dot-dir, so never listed as a live fact). A
+  *running* value (balance, outstanding, remaining…) changing alone isn't snapshotted: its old value
+  is in the event.
+- **Status is a lifecycle, nothing else:** `active | superseded | archived`, enforced on create and
+  update. A descriptive state ("legacy", "low-activity") belongs in a `state` field or a tag; an
+  off-vocabulary status already on disk reads as `active` with its wording kept as `state` (persisted
+  on the next write), so active-only lookups never silently drop it.
+- **Supersede, suggested at approval.** When `dossier.update` would change a defining field in place,
+  the tool's `advise` hook puts a note on the operator's approval card (every channel): if the fact
+  itself changed rather than being corrected, supersede + create instead. Advisory only, never a
+  policy input.
 - **Migration.** Operator identity/preferences moved out of canonical memory into the dossier via a
   one-time, single-approval, idempotent migration; canonical memory stops storing operator-about-self
   facts thereafter.

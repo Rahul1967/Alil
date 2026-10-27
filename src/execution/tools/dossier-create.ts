@@ -1,4 +1,5 @@
 import type { ToolImpl, ToolContext, ValidateResult, ToolRunResult } from "./types.ts";
+import { isDossierStatus } from "../../dossier/store.ts";
 import type { DossierCreate, DossierType } from "../../dossier/types.ts";
 import { KNOWN_DOSSIER_TYPES } from "../../dossier/types.ts";
 
@@ -49,6 +50,8 @@ export const dossierCreate: ToolImpl<DossierCreate> = {
         (value as unknown as Record<string, unknown>)[key] = args[key];
       }
     }
+    if (value.status !== undefined && !isDossierStatus(value.status))
+      return { ok: false, error: "`status` must be active | superseded | archived; put a descriptive state like \"legacy\" in `fields.state` or a tag" };
     if (args["fields"] !== undefined) {
       if (typeof args["fields"] !== "object" || args["fields"] === null || Array.isArray(args["fields"]))
         return { ok: false, error: "`fields` must be an object" };
