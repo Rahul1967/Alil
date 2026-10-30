@@ -176,7 +176,7 @@ design element that answers it.
 | Subagent privilege inheritance | In the Claude SDK, subagents inherit `bypassPermissions` from the parent and it cannot be overridden | escalation | Subagents never inherit elevated modes; each gets an explicit, narrower tool grant; elevation requires a fresh human approval (§09) |
 | Headless bypass | Harnesses with no reachable approval UI either block forever or silently auto-approve | availability | Ask-fallback defaults to `deny` (fail closed); deferred approvals queue in the gateway and resume the run when an operator answers |
 | SSRF / sandbox escape (unattended) | Symlink-out of the workspace; `web.fetch` redirect to cloud metadata (`169.254.169.254`) | structural | `Sandbox.resolve` checks lexical containment **and** realpaths the nearest existing ancestor (symlink defense); `web.fetch` re-validates on redirect |
-| Audit tampering | Autonomy demands a trustworthy record of unattended action | integrity | Append-only, **hash-chained** ledger (`prevHash` per line); a verify pass detects truncation/rewrite |
+| Audit tampering | Autonomy demands a trustworthy record of unattended action | integrity | Append-only, **hash-chained** ledger (`prevHash` per line); a verify pass detects truncation/rewrite. Multi-writer safe: every append takes `<ledger>.lock` and chains onto the last line on disk. A history broken before that is never edited: `npm run audit -- seal "<why>"` appends a `ledger.seal` with a SHA-256 of all prior bytes, so the chain verifies from the seal and the sealed part stays frozen |
 
 ## 05 · Memory & long-term state
 

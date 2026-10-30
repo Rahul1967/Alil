@@ -13,6 +13,7 @@
     "db:setup": "node --experimental-strip-types scripts/db-setup.ts",
     "db:reset": "node --experimental-strip-types scripts/db-setup.ts --reset",
     "crawl4ai": "bash scripts/crawl4ai.sh",
+    "audit": "node --experimental-strip-types --no-warnings --env-file-if-exists=.env scripts/audit.ts",
     "memory:demo": "node --experimental-strip-types scripts/memory-demo.ts"
   },
   "devDependencies": {
