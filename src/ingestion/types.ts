@@ -24,6 +24,8 @@ export interface Attachment {
   mime: string; // resolved content-type
   kind: AttachmentKind;
   bytes: number; // size on disk
+  /** SHA-256 of the bytes as received — lets the policy check the file is still what was sent. */
+  sha256?: string;
   ingestedAt: string; // YYYY-MM-DD
   source: string;
   caption?: string;

@@ -1,4 +1,5 @@
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, extname, basename } from "node:path";
 
 import { Sandbox } from "../execution/sandbox.ts";
@@ -99,6 +100,7 @@ export class IngestionStore implements IngestionPort {
       mime: MIME_BY_EXT[ext] ?? file.mime ?? "application/octet-stream",
       kind: classify(ext, file.bytes),
       bytes: file.bytes.byteLength,
+      sha256: createHash("sha256").update(file.bytes).digest("hex"),
       ingestedAt: day,
       source: file.source,
       ...(file.caption ? { caption: file.caption } : {}),

@@ -44,6 +44,8 @@ export interface BoundaryDeps {
   /** Optional: the current turn's id, recorded on every decision so the ledger joins to the
    * timeline and telemetry. Attribution only — never part of a binding or a policy input. */
   turnId?: () => string | undefined;
+  /** Optional: verifies that a taint source is a file the operator uploaded (see provenance-check). */
+  operatorUpload?: (source: string) => boolean;
 }
 
 /**
@@ -73,7 +75,7 @@ export class PolicyBoundary implements ActionSink {
 
     // 2. Pipeline verdict, then 3. provenance escalation.
     const base = unknown ? ask("classifier", `unknown tool "${action.tool}"`) : evaluate(action, config, hooks);
-    const verdict = escalateForProvenance(base, action);
+    const verdict = escalateForProvenance(base, action, this.#deps.operatorUpload ? { operatorUpload: this.#deps.operatorUpload } : {});
 
     // 4. Act.
     if (verdict.decision === "allow") {

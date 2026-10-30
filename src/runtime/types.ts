@@ -23,6 +23,7 @@ export interface AttachmentRef {
   filename: string;
   kind: string;
   bytes: number;
+  sha256?: string;
   caption?: string;
   /** Sent earlier in the current episode, not with this message. */
   earlier?: boolean;

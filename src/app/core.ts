@@ -31,6 +31,7 @@ import { PlanService, type PlanRunOptions } from "./plan-service.ts";
 import { createAmbientBus, toIncomingEvent } from "./ambient.ts";
 import { DebugLogger, composeObservers, tapRecall, tapWorld, tapAudit } from "./debug.ts";
 import { fitToTokenBudget, estimateTokens } from "../memory/working-set.ts";
+import { operatorUploadCheck, PLACED_ATTACHMENT } from "./uploads.ts";
 import { Telemetry, telemetryObserver, withTurn, currentTurn, newTurnId, InvariantMonitor, reportError } from "../telemetry/index.ts";
 import type { Heartbeats, TurnContext, HeartbeatInfo } from "../telemetry/index.ts";
 import {
@@ -323,7 +324,7 @@ export class Alil {
       ctx.episodeId = episodeId;
       if (lens) ctx.lens = lens.id;
       const sent = (opts.attachments ?? []).filter((a) => PLACED_ATTACHMENT.test(a.path))
-        .map((a): AttachmentRef => ({ path: a.path, filename: a.filename, kind: a.kind, bytes: a.bytes, ...(a.caption ? { caption: a.caption } : {}) }));
+        .map((a): AttachmentRef => ({ path: a.path, filename: a.filename, kind: a.kind, bytes: a.bytes, ...(a.sha256 ? { sha256: a.sha256 } : {}), ...(a.caption ? { caption: a.caption } : {}) }));
       const attachments = episodeAttachments(sent, this.#memory?.timeline.attachmentsIn(episodeId) ?? []);
       const input: BrainInput = {
         sessionId: this.channel,
@@ -763,6 +764,8 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     audit: auditSink,
     lensId: () => lenses.activeId(),
     turnId: () => currentTurn()?.turnId,
+    // A high-risk action tainted ONLY by files the operator uploaded is asked, not denied.
+    ...(memory ? { operatorUpload: operatorUploadCheck({ sandboxRoot, lookup: (p) => memory!.timeline.findAttachment(p) }) } : {}),
   });
 
   const observer = composeObservers(binding.observer, logger, telemetryObserver(telemetry));
@@ -975,9 +978,9 @@ function loadMcpRegistry(path: string, observer?: McpObserver): McpRegistry | nu
   }
 }
 
-/** Path shape the ingestion store produces (`attachments/<day>/<sanitized name>`). Anything else a
- * channel hands in (a forged or stale path) is neither listed nor remembered. */
-const PLACED_ATTACHMENT = /^attachments\/\d{4}-\d{2}-\d{2}\/[a-z0-9][a-z0-9-]*(\.[a-z0-9]+)?$/;
+// PLACED_ATTACHMENT (app/uploads.ts) is the path shape the ingestion store produces; anything else
+// a channel hands in (a forged or stale path) is neither listed nor remembered, nor trusted as an
+// upload by the policy boundary.
 /** At most this many files listed per turn; the newest win. */
 const MAX_LISTED_ATTACHMENTS = 10;
 

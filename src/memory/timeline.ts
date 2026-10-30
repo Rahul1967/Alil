@@ -52,6 +52,7 @@ export class SqliteTimeline implements Timeline {
   #range: Statement;
   #max: Statement;
   #attachments: Statement;
+  #findAttachment: Statement;
 
   constructor(db: DB) {
     this.#ins = db.prepare(
@@ -62,6 +63,9 @@ export class SqliteTimeline implements Timeline {
     this.#since = db.prepare(`SELECT * FROM timeline WHERE seq > ? ORDER BY seq ASC`);
     this.#range = db.prepare(`SELECT * FROM timeline WHERE seq >= ? AND seq <= ? ORDER BY seq ASC`);
     this.#max = db.prepare(`SELECT COALESCE(MAX(seq), 0) AS m FROM timeline`);
+    this.#findAttachment = db.prepare(
+      `SELECT attachments, provenance FROM timeline WHERE attachments LIKE ? ORDER BY seq DESC`,
+    );
     this.#attachments = db.prepare(
       `SELECT attachments FROM timeline WHERE episode_id = ? AND attachments IS NOT NULL ORDER BY seq ASC`,
     );
@@ -99,6 +103,17 @@ export class SqliteTimeline implements Timeline {
 
   lastSeq(): number {
     return (this.#max.get() as { m: number }).m;
+  }
+
+  findAttachment(path: string): (TimelineAttachment & { origin: string }) | null {
+    // Candidate rows by substring, then an exact match on the parsed record (paths are
+    // [a-z0-9./-] only, so the LIKE pattern needs no escaping beyond the JSON quotes).
+    const rows = this.#findAttachment.all(`%${JSON.stringify(path)}%`) as { attachments: string; provenance: string }[];
+    for (const r of rows) {
+      const hit = (JSON.parse(r.attachments) as TimelineAttachment[]).find((a) => a.path === path);
+      if (hit) return { ...hit, origin: (JSON.parse(r.provenance) as Provenance).origin };
+    }
+    return null;
   }
 
   attachmentsIn(episodeId: string): TimelineAttachment[] {

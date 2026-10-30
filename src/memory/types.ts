@@ -35,6 +35,8 @@ export interface TimelineAttachment {
   filename: string;
   kind: string;
   bytes: number;
+  /** SHA-256 at upload (absent on uploads recorded before hashes were kept). */
+  sha256?: string;
   caption?: string;
 }
 
@@ -54,6 +56,8 @@ export interface Timeline {
   lastSeq(): number;
   /** Files sent during an episode, oldest first (one entry per line that carried them). */
   attachmentsIn(episodeId: string): TimelineAttachment[];
+  /** The most recent record of an uploaded path, with the origin of the line that carried it. */
+  findAttachment(path: string): (TimelineAttachment & { origin: string }) | null;
 }
 
 // ─── Episode: a time-bounded slice (housekeeping, not identity) ───
