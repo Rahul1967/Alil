@@ -113,6 +113,20 @@ test("keyword derivation needs enough evidence and is deterministic", () => {
   assert.equal(r.suggest("hello there"), null);
 });
 
+test("derivation counts a lens synonym as its tag, and a plural as its term", () => {
+  const r = new TagRegistry([alpha]);
+  assert.deepEqual(r.derive("my gadget drawer"), ["alpha", "gadgets"], "synonym gadget → declared tag gadgets");
+  assert.deepEqual(r.derive("two widgets and three sprockets"), ["alpha"], "plurals match the keywords");
+  assert.deepEqual(r.derive("widgetry and sprocketing"), [], "still whole words only");
+});
+
+test("the shipped finance lens tags a real-shaped finance summary", () => {
+  const finance = parseLensFile(readFileSync("config/lenses/finance/LENS.md", "utf8"), "finance");
+  const r = new TagRegistry([finance]);
+  const tags = r.derive("Jupiter EMI of ₹21,565 is due Nov 5. Nishanth's loan of ₹4.48L is still undocumented.");
+  assert.deepEqual(tags, ["financial", "loans"]);
+});
+
 // ── lens-aware search ────────────────────────────────────────────────────────
 
 const FOCUS: LensFocus = { id: "alpha", tags: ["alpha"], keywords: ["widget"], weight: 1 };
