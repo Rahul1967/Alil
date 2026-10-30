@@ -11,11 +11,11 @@ import type { ApprovalPort } from "../policy/index.ts";
 import { ToolRegistry, Executor, Sandbox, ReadTracker, RegistryToolCatalog, DEFAULT_TOOLS } from "../execution/index.ts";
 import { dossierMigratePreferences } from "../execution/tools/dossier-migrate-prefs.ts";
 import {
-  openMemory, EpisodeManager, ExtractiveSummarizer, CanonicalKnowledge, seedMemoryInstructions, MemoryRecall,
+  openMemory, EpisodeManager, ExtractiveSummarizer, LlmSummarizer, CanonicalKnowledge, seedMemoryInstructions, MemoryRecall,
 } from "../memory/index.ts";
 import type { MemorySystem, MemoryStore } from "../memory/index.ts";
 import type { ProspectiveStore } from "../memory/index.ts";
-import type { Intention, IncomingEvent } from "../memory/types.ts";
+import type { Intention, IncomingEvent, EpisodeSummarizer } from "../memory/types.ts";
 import { WorldStore } from "../world/index.ts";
 import { DossierStore, planPreferencesMigration } from "../dossier/index.ts";
 import { existsSync, readFileSync } from "node:fs";
@@ -95,6 +95,16 @@ export interface AlilConfig {
   /** Debug trace: log recall, world-state, every tool call/response, policy verdicts, and ambient
    * events to stderr. Channel-agnostic — enabled the same way on every channel. */
   debug?: boolean;
+  /**
+   * How a closed episode is distilled. "llm" asks the model (falling back to extractive on any
+   * failure); "extractive" is offline and deterministic. Default "extractive"; the channels opt in
+   * to "llm". ALIL_SUMMARIZER=extractive forces extractive regardless.
+   */
+  episodeSummarizer?: "llm" | "extractive";
+  /** Model for "llm" distillation. Default ALIL_SUMMARY_MODEL, else `modelId`. */
+  summaryModelId?: string;
+  /** Cadence of the background idle-episode sweep (default 60s). */
+  episodeSweepMs?: number;
 }
 
 export interface RunTurnOptions {
@@ -134,6 +144,9 @@ export class Alil {
   readonly #registry: ProviderRegistry;
   readonly #defaultModel: string;
   readonly #actions: ActionSink;
+  readonly #episodeSweepMs: number;
+  #sweepTimer: ReturnType<typeof setInterval> | null = null;
+  #sweeping = false;
   #prefsMigrationTried = false; // one-time-per-process guard for the canonical→dossier prefs move
 
   constructor(_config: AlilConfig, binding: ChannelBinding, built: BuiltCore) {
@@ -156,6 +169,7 @@ export class Alil {
     this.#lenses = built.lenses;
     this.#registry = built.registry;
     this.#defaultModel = _config.modelId;
+    this.#episodeSweepMs = _config.episodeSweepMs ?? 60_000;
     this.#recoverInterruptedTurn();
   }
 
@@ -404,10 +418,39 @@ export class Alil {
 
   start(): void {
     this.#scheduler?.start();
+    this.#startEpisodeSweep();
   }
   stop(): void {
     this.#scheduler?.stop();
     this.#eventBus.stop();
+    if (this.#sweepTimer) clearInterval(this.#sweepTimer);
+    this.#sweepTimer = null;
+  }
+
+  /**
+   * Close an idle episode in the background, off the turn queue, so distilling (possibly a model
+   * call) never delays a reply and an episode becomes searchable without waiting for the next
+   * message. One pass at start (catches an episode left open across a restart), then on a timer.
+   */
+  #startEpisodeSweep(): void {
+    if (!this.#episodes || this.#sweepTimer) return;
+    void this.sweepEpisodes();
+    this.#sweepTimer = setInterval(() => void this.sweepEpisodes(), this.#episodeSweepMs);
+    this.#sweepTimer.unref?.(); // don't keep the process alive just for the sweep
+  }
+
+  /** One sweep pass (never overlapping). Returns the id of the episode it closed, if any. */
+  async sweepEpisodes(): Promise<string | null> {
+    if (!this.#episodes || this.#sweeping) return null;
+    this.#sweeping = true;
+    try {
+      return (await this.#episodes.sweep(new Date().toISOString()))?.id ?? null;
+    } catch (err) {
+      this.#audit.append("episode.sweep-error", { error: err instanceof Error ? err.message : String(err) });
+      return null;
+    } finally {
+      this.#sweeping = false;
+    }
   }
 }
 
@@ -515,8 +558,10 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
       db: memory.db,
       timeline: memory.timeline,
       store: memory.store,
-      summarizer: new ExtractiveSummarizer(),
-      onMemoryWrite: (e) => auditSink.append("episode.distill", { episodeId: e.episodeId, lines: e.lines }),
+      summarizer: episodeSummarizer(config, registry),
+      onMemoryWrite: (e) => auditSink.append("episode.distill", {
+        episodeId: e.episodeId, lines: e.lines, ...(e.via ? { via: e.via } : {}), ...(e.fallbackReason ? { fallbackReason: e.fallbackReason } : {}),
+      }),
       tagger: () => { const r = lenses.registry(); return (t: string) => r.derive(t); },
     });
   } catch {
@@ -790,6 +835,24 @@ function episodeAttachments(sent: AttachmentRef[], earlier: AttachmentRef[]): At
     prior.push({ ...a, earlier: true });
   }
   return [...sent, ...prior].slice(0, MAX_LISTED_ATTACHMENTS);
+}
+
+/** The episode summarizer the config asks for; "llm" calls the summary model with no tools. */
+function episodeSummarizer(config: AlilConfig, registry: ProviderRegistry): EpisodeSummarizer {
+  const kind = process.env.ALIL_SUMMARIZER === "extractive" ? "extractive" : (config.episodeSummarizer ?? "extractive");
+  if (kind === "extractive") return new ExtractiveSummarizer();
+  const model = config.summaryModelId ?? process.env.ALIL_SUMMARY_MODEL ?? config.modelId;
+  return new LlmSummarizer({
+    complete: async (system, user) => {
+      const { spec, provider } = registry.resolve(model);
+      const res = await provider.invoke(
+        { model, system, messages: [{ role: "user", content: user }], maxOutputTokens: 2_000 },
+        spec,
+        AbortSignal.timeout(120_000),
+      );
+      return res.text ?? "";
+    },
+  });
 }
 
 /** How many of the latest finished turns show their action trail in history. */

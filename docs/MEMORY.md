@@ -141,9 +141,13 @@ just recent ones — a year-old episode competes on relevance; `k` bounds result
   row, `seq`-ordered globally.
 - An **Episode** is a time-bounded slice, cut on an inactivity gap (default 30 min). Episodes
   are housekeeping, not conversations — the model never sees a boundary as a reset.
-- On close, `EpisodeManager` distills the slice (summary + salient facts) and indexes it — a
-  gated, audited **`memory.write`** (behavior-changing). The offline `ExtractiveSummarizer` is
-  the default; an LLM summarizer drops in behind the `EpisodeSummarizer` port.
+- On close, `EpisodeManager` distills the slice (summary + salient facts) and indexes it — an
+  audited memory write (`episode.distill` in the ledger; it does not cross the policy boundary).
+  The channels use `LlmSummarizer`: the transcript, fenced as data, goes to the summary model
+  (`ALIL_SUMMARY_MODEL`, else the chat model) with no tools, and comes back as a summary plus
+  standalone salient facts. Unparseable output gets one retry; any failure falls back to the
+  offline `ExtractiveSummarizer`, and the ledger records `via` and `fallbackReason`.
+  `ALIL_SUMMARIZER=extractive` forces the offline one; it is also the library default (tests).
 
 **Durability & restarts.**
 - The operator's message is appended **when the turn starts**, before the model runs; the reply
@@ -152,12 +156,16 @@ just recent ones — a year-old episode competes on relevance; `k` bounds result
   whose last line is an unanswered user message was cut off mid-turn and is marked as such. A
   crash can lose a reply, never the message.
 - The episode cursor (`agent_state`) is in the DB, so a restart continues the open episode or
-  closes it on the first turn after the gap. The gap runs from the **end** of the last turn, and
+  closes it after the gap. The gap runs from the **end** of the last turn, and
   an episode's `ended_at` is when activity stopped, not when the next turn noticed.
-- Closing is lazy (it happens at the next turn after the gap — there is no timer). On the first
-  turn of a process, any closed episode left without a summary or index entry (a crash between
-  close and distill) is distilled then; indexing replaces an episode's chunk, so recovery is
-  idempotent.
+- Closing runs in the background: each channel process sweeps at startup and every 60 s
+  (`EpisodeManager.sweep`, off the turn queue so a summary never delays a reply). An episode idle
+  past the gap is closed and distilled without waiting for a message, and no new episode opens
+  until the next turn. The next turn still closes an idle episode itself if no sweep got there
+  first. Close/open run in an IMMEDIATE transaction, so channel processes sharing the DB never
+  close the same episode twice. On the first sweep or turn of a process, any closed episode left
+  without a summary or index entry (a crash between close and distill) is distilled; indexing
+  replaces an episode's chunk, so recovery is idempotent.
 
 **Decision — the episode is the indexing unit, not the turn.** A single turn ("set pool max to
 20") lacks the context that makes it meaningful. Indexing the distilled episode avoids
