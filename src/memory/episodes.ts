@@ -5,8 +5,11 @@
  *
  * EpisodeManager.beginTurn() is called once at the start of each turn:
  *   - continues the active episode if the gap since last activity is small, or
- *   - closes the idle episode (summarize → gated/audited memory.write → index) and opens a
+ *   - closes the idle episode (summarize → audited memory write → index) and opens a
  *     fresh one.
+ *
+ * EpisodeManager.sweep() is the background path: the app runs it at startup and on a timer, so an
+ * idle episode closes (and becomes searchable) without waiting for the next message.
  */
 import { randomUUID } from "node:crypto";
 import type { Database as DB, Statement } from "better-sqlite3";
@@ -33,6 +36,7 @@ interface EpisodeRow {
 
 /** Manages the agent_state cursor and the episodes table (the raw open/close mechanics). */
 export class EpisodeStore {
+  readonly #db: DB;
   #getState: Statement;
   #initState: Statement;
   #setState: Statement;
@@ -43,7 +47,8 @@ export class EpisodeStore {
   #unfinished: Statement;
 
   constructor(db: DB) {
-    this.#getState = db.prepare(`SELECT active_episode_id, last_active_at FROM agent_state WHERE id = 1`);
+    this.#db = db;
+    this.#getState =db.prepare(`SELECT active_episode_id, last_active_at FROM agent_state WHERE id = 1`);
     this.#initState = db.prepare(`INSERT OR IGNORE INTO agent_state(id) VALUES (1)`);
     this.#setState = db.prepare(`UPDATE agent_state SET active_episode_id = ?, last_active_at = ? WHERE id = 1`);
     this.#insEpisode = db.prepare(`INSERT INTO episodes(id, start_seq, end_seq, started_at) VALUES (?, ?, NULL, ?)`);
@@ -67,32 +72,48 @@ export class EpisodeStore {
    * any episode that just closed (for the caller to summarize + index).
    */
   tick(nowIso: string, gapMs: number, latestSeq: number): { activeId: string; closed: Episode | null } {
-    const state = this.#getState.get() as StateRow | undefined;
-    const activeId = state?.active_episode_id ?? null;
-    const lastActive = state?.last_active_at ?? null;
+    // IMMEDIATE: the channels run as separate processes over one DB file, so the read of the
+    // cursor and the close/open must be one write transaction or two processes could both close.
+    return this.#db.transaction(() => {
+      const state = this.#getState.get() as StateRow | undefined;
+      const activeId = state?.active_episode_id ?? null;
+      const lastActive = state?.last_active_at ?? null;
 
-    const idle =
-      activeId === null ||
-      lastActive === null ||
-      Date.parse(nowIso) - Date.parse(lastActive) > gapMs;
+      if (activeId !== null && !isIdle(nowIso, lastActive, gapMs)) {
+        this.#setState.run(activeId, nowIso);
+        return { activeId, closed: null };
+      }
 
-    if (!idle) {
-      this.#setState.run(activeId, nowIso);
-      return { activeId: activeId!, closed: null };
-    }
+      const closed = activeId !== null ? this.#close(activeId, lastActive ?? nowIso, latestSeq) : null;
+      const newId = `ep_${randomUUID()}`;
+      this.#insEpisode.run(newId, latestSeq + 1, nowIso);
+      this.#setState.run(newId, nowIso);
+      return { activeId: newId, closed };
+    }).immediate();
+  }
 
-    let closed: Episode | null = null;
-    if (activeId !== null) {
-      // Date the episode by when activity actually stopped, not when the next turn noticed.
-      this.#closeEpisode.run(latestSeq, lastActive ?? nowIso, activeId);
-      const row = this.#getEpisode.get(activeId) as EpisodeRow | undefined;
-      if (row) closed = toEpisode(row);
-    }
+  /**
+   * Close the active episode if it has been idle longer than `gapMs`, WITHOUT opening a new one —
+   * the next turn's tick() opens it. This is what lets an episode close while nobody is talking.
+   * Returns the closed episode (for the caller to distill), or null if nothing was idle.
+   */
+  closeIdle(nowIso: string, gapMs: number, latestSeq: () => number): Episode | null {
+    return this.#db.transaction(() => {
+      const state = this.#getState.get() as StateRow | undefined;
+      const activeId = state?.active_episode_id ?? null;
+      const lastActive = state?.last_active_at ?? null;
+      if (activeId === null || lastActive === null || !isIdle(nowIso, lastActive, gapMs)) return null;
+      const closed = this.#close(activeId, lastActive, latestSeq());
+      this.#setState.run(null, lastActive);
+      return closed;
+    }).immediate();
+  }
 
-    const newId = `ep_${randomUUID()}`;
-    this.#insEpisode.run(newId, latestSeq + 1, nowIso);
-    this.#setState.run(newId, nowIso);
-    return { activeId: newId, closed };
+  // Date the episode by when activity actually stopped, not when it was noticed.
+  #close(id: string, endedAt: string, endSeq: number): Episode | null {
+    this.#closeEpisode.run(endSeq, endedAt, id);
+    const row = this.#getEpisode.get(id) as EpisodeRow | undefined;
+    return row ? toEpisode(row) : null;
   }
 
   /** Mark activity now (end of a turn), so the idle gap runs from when the turn finished. */
@@ -115,7 +136,7 @@ export interface EpisodeManagerDeps {
   /** Optional canonical auto-write — promotes durable facts from a closed episode. */
   promoter?: CanonicalPromoter;
   /** Audit seam — fired when a closed episode is distilled into memory (a behavior-changing write). */
-  onMemoryWrite?: (e: { episodeId: string; summary: string; salientFacts: string[]; lines: number; pinned: string[] }) => void;
+  onMemoryWrite?: (e: { episodeId: string; summary: string; salientFacts: string[]; lines: number; pinned: string[]; via?: string; fallbackReason?: string }) => void;
   /**
    * Keyword tagger (the lens TagRegistry). Applied to the distilled summary + salient facts — the
    * same text retagEpisodes() uses — so an episode's derived tags are always recomputable.
@@ -167,6 +188,22 @@ export class EpisodeManager {
   }
 
   /**
+   * Background pass (no turn needed): distill anything a crash left behind, then close and distill
+   * the active episode if it has gone idle. Without this an episode stays open until the next
+   * message, however long that takes — and an open episode isn't searchable. Returns the episode
+   * this pass closed, if any.
+   */
+  async sweep(nowIso: string): Promise<Episode | null> {
+    if (!this.#recovered) {
+      this.#recovered = true;
+      await this.recover().catch(() => 0);
+    }
+    const closed = this.#episodes.closeIdle(nowIso, this.#gapMs, () => this.#timeline.lastSeq());
+    if (closed && closed.endSeq !== null) await this.#finalize(closed);
+    return closed;
+  }
+
+  /**
    * Distill every closed episode a crash left unsummarized or unindexed. Idempotent (indexing
    * replaces an episode's chunk). Returns how many were recovered.
    */
@@ -186,15 +223,19 @@ export class EpisodeManager {
       await this.#store.index({ ...closed, summary: "" }, []);
       return;
     }
-    const { summary, salientFacts } = await this.#summarizer.summarize(lines);
+    const { summary, salientFacts, via, fallbackReason } = await this.#summarizer.summarize(lines);
     const lenses = [...new Set(lines.map((l) => l.lens).filter((l): l is string => !!l))];
     const tags = this.#tagger ? [...new Set(this.#tagger()([summary, ...salientFacts].join("\n")))].sort() : [];
     // Gated/audited memory.write: distilling an episode changes future behavior.
     await this.#store.index({ ...closed, summary, salientFacts, tags, lenses }, lines);
     // Canonical auto-write: promote durable, trusted facts from this episode.
     const pinned = this.#promoter ? (await this.#promoter.promoteFromLines(lines)).map((f) => f.key) : [];
-    this.#onMemoryWrite?.({ episodeId: closed.id, summary, salientFacts, lines: lines.length, pinned });
+    this.#onMemoryWrite?.({ episodeId: closed.id, summary, salientFacts, lines: lines.length, pinned, ...(via ? { via } : {}), ...(fallbackReason ? { fallbackReason } : {}) });
   }
+}
+
+function isIdle(nowIso: string, lastActive: string | null, gapMs: number): boolean {
+  return lastActive === null || Date.parse(nowIso) - Date.parse(lastActive) > gapMs;
 }
 
 function toEpisode(r: EpisodeRow): Episode {

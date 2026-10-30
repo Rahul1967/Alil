@@ -111,7 +111,7 @@ const binding: ChannelBinding = {
     }
   },
 };
-const alil = createAlil({ modelId, debug: debugEnabled() }, binding);
+const alil = createAlil({ modelId, debug: debugEnabled(), episodeSummarizer: "llm" }, binding);
 
 // getUpdates offset persisted in the memory DB so a restart never drops/replays messages.
 function loadOffset(): number {

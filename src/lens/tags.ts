@@ -16,10 +16,16 @@ function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function wordRe(term: string): RegExp {
-  // Hyphens and spaces in a multiword term match either form ("lit review" ≈ "lit-review").
-  const body = term.split(/[\s-]+/).filter(Boolean).map(escapeRe).join("[\\s-]+");
-  return new RegExp(`(^|[^a-z0-9])${body}($|[^a-z0-9])`, "i");
+function termBody(term: string): string {
+  // Hyphens and spaces in a multiword term match either form ("lit review" ≈ "lit-review"), and a
+  // plural counts as the term ("EMIs" ≈ "emi", "dividends" ≈ "dividend").
+  return `${term.split(/[\s-]+/).filter(Boolean).map(escapeRe).join("[\\s-]+")}(?:e?s)?`;
+}
+
+/** Whole-word match of any of `terms`. */
+function wordRe(...terms: string[]): RegExp {
+  const bodies = terms.filter((t) => t.trim()).map(termBody);
+  return new RegExp(`(^|[^a-z0-9])(?:${bodies.join("|")})($|[^a-z0-9])`, "i");
 }
 
 export class TagRegistry {
@@ -39,8 +45,9 @@ export class TagRegistry {
       for (const t of lens.tags) this.#vocabulary.add(this.normalize(t));
       this.#lenses.push({
         lens,
-        keywords: lens.keywords.filter((k) => k.trim()).map(wordRe),
-        tags: lens.tags.map(wordRe),
+        keywords: lens.keywords.filter((k) => k.trim()).map((k) => wordRe(k)),
+        // A declared tag is named by itself or by any of this lens's synonyms for it ("loan" → loans).
+        tags: lens.tags.map((t) => wordRe(t, ...Object.entries(lens.synonyms).filter(([, to]) => baseNormalize(to) === baseNormalize(t)).map(([from]) => from))),
       });
     }
   }

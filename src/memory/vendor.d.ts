@@ -17,12 +17,22 @@ declare module "better-sqlite3" {
     iterate(...params: BindParam[]): IterableIterator<unknown>;
   }
 
+  /** A wrapped transaction; the variants pick BEGIN DEFERRED / IMMEDIATE / EXCLUSIVE. */
+  interface Transaction<A extends unknown[], R> {
+    (...args: A): R;
+    deferred(...args: A): R;
+    immediate(...args: A): R;
+    exclusive(...args: A): R;
+  }
+
   interface BetterSqlite3Database {
     prepare(source: string): Statement;
     exec(source: string): BetterSqlite3Database;
     pragma(source: string, options?: { simple?: boolean }): unknown;
     loadExtension(file: string, entrypoint?: string): void;
-    transaction<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R;
+    transaction<A extends unknown[], R>(fn: (...args: A) => R): Transaction<A, R>;
+    /** Online backup to `destination` — a consistent copy even while other connections write. */
+    backup(destination: string): Promise<unknown>;
     close(): void;
     readonly open: boolean;
     readonly name: string;

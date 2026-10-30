@@ -350,5 +350,9 @@ export interface NewIntention {
 
 // ─── EpisodeSummarizer: distills a closed episode (Phase 5). ───
 export interface EpisodeSummarizer {
-  summarize(lines: TimelineLine[]): Promise<{ summary: string; salientFacts: string[] }>;
+  /**
+   * `via` names the method that actually produced the result; when a summarizer had to fall back,
+   * `fallbackReason` says why — both go to the audit so a degraded summary is never silent.
+   */
+  summarize(lines: TimelineLine[]): Promise<{ summary: string; salientFacts: string[]; via?: string; fallbackReason?: string }>;
 }

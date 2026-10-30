@@ -70,7 +70,7 @@ const binding: ChannelBinding = {
   },
 };
 
-const alil = createAlil({ modelId, debug }, binding);
+const alil = createAlil({ modelId, debug, episodeSummarizer: "llm" }, binding);
 alil.start();
 console.log(`Alil terminal channel · model: ${modelId} · memory: ${alil.memoryOn ? "on" : "off"} · lens: ${alil.lenses.activeId() ?? "none"}${debug ? " · debug: on" : ""}`);
 
