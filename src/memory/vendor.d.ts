@@ -31,6 +31,8 @@ declare module "better-sqlite3" {
     pragma(source: string, options?: { simple?: boolean }): unknown;
     loadExtension(file: string, entrypoint?: string): void;
     transaction<A extends unknown[], R>(fn: (...args: A) => R): Transaction<A, R>;
+    /** Online backup to `destination` — a consistent copy even while other connections write. */
+    backup(destination: string): Promise<unknown>;
     close(): void;
     readonly open: boolean;
     readonly name: string;

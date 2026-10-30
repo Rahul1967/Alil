@@ -148,6 +148,9 @@ just recent ones — a year-old episode competes on relevance; `k` bounds result
   standalone salient facts. Unparseable output gets one retry; any failure falls back to the
   offline `ExtractiveSummarizer`, and the ledger records `via` and `fallbackReason`.
   `ALIL_SUMMARIZER=extractive` forces the offline one; it is also the library default (tests).
+  Episodes closed under the extractive summarizer can be re-distilled with
+  `scripts/episode-redistill.ts` (preview by default; `--apply` backs up `memory.db` first, skips
+  any episode already done, keeps the old summary when the model fails, and re-tags every episode).
 
 **Durability & restarts.**
 - The operator's message is appended **when the turn starts**, before the model runs; the reply

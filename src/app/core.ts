@@ -838,7 +838,7 @@ function episodeAttachments(sent: AttachmentRef[], earlier: AttachmentRef[]): At
 }
 
 /** The episode summarizer the config asks for; "llm" calls the summary model with no tools. */
-function episodeSummarizer(config: AlilConfig, registry: ProviderRegistry): EpisodeSummarizer {
+export function episodeSummarizer(config: AlilConfig, registry: ProviderRegistry): EpisodeSummarizer {
   const kind = process.env.ALIL_SUMMARIZER === "extractive" ? "extractive" : (config.episodeSummarizer ?? "extractive");
   if (kind === "extractive") return new ExtractiveSummarizer();
   const model = config.summaryModelId ?? process.env.ALIL_SUMMARY_MODEL ?? config.modelId;
