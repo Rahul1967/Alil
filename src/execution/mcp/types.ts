@@ -191,3 +191,26 @@ export function classifyMcpTool(def: McpToolDef, minEffect?: Effect): { effect: 
   const destructive = def.destructiveHint === true;
   return { effect: "write", risk: destructive ? "high" : "medium", reversible: false };
 }
+
+/** Telemetry hooks for the registry — all optional; absent ⇒ silent. */
+export interface McpObserver {
+  /** One per logical mcp call (all its retry attempts together). */
+  onCall?(e: McpCallEvent): void;
+  /** A (re)connect to a server — handshake + initialize. */
+  onConnect?(e: { server: string; durationMs: number; ok: boolean; error?: string }): void;
+  onCircuit?(e: { server: string; from: string; to: string; failures: number }): void;
+  /** A fresh tools/list from a server (first connect, or after list_changed / refresh). */
+  onToolsListed?(server: string, tools: McpToolDef[]): void;
+}
+
+export interface McpCallEvent {
+  server: string;
+  tool: string;
+  /** Transport attempts made (0 when refused by an open circuit). */
+  attempts: number;
+  durationMs: number;
+  /** `tool_error` = the server answered isError:true (a valid response, not a transport failure). */
+  outcome: "ok" | "tool_error" | "error" | "refused";
+  resultChars?: number;
+  error?: string;
+}

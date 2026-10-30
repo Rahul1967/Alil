@@ -14,6 +14,7 @@
 import { randomUUID } from "node:crypto";
 import type { Database as DB, Statement } from "better-sqlite3";
 import type { Episode, EpisodeSummarizer, MemoryStore, Tagger, Timeline } from "./types.ts";
+import { reportError } from "../telemetry/index.ts";
 import type { CanonicalPromoter } from "./promoter.ts";
 
 /** Default inactivity gap that closes an episode (30 min). */
@@ -136,7 +137,7 @@ export interface EpisodeManagerDeps {
   /** Optional canonical auto-write — promotes durable facts from a closed episode. */
   promoter?: CanonicalPromoter;
   /** Audit seam — fired when a closed episode is distilled into memory (a behavior-changing write). */
-  onMemoryWrite?: (e: { episodeId: string; summary: string; salientFacts: string[]; lines: number; pinned: string[]; via?: string; fallbackReason?: string }) => void;
+  onMemoryWrite?: (e: { episodeId: string; summary: string; salientFacts: string[]; lines: number; pinned: string[]; durationMs?: number; via?: string; fallbackReason?: string }) => void;
   /**
    * Keyword tagger (the lens TagRegistry). Applied to the distilled summary + salient facts — the
    * same text retagEpisodes() uses — so an episode's derived tags are always recomputable.
@@ -172,7 +173,7 @@ export class EpisodeManager {
     // First turn of this process: finish any episode a previous process closed but never distilled.
     if (!this.#recovered) {
       this.#recovered = true;
-      await this.recover().catch(() => 0);
+      await this.recover().catch((err) => { reportError("episodes.recover", err); return 0; });
     }
     const latestSeq = this.#timeline.lastSeq();
     const { activeId, closed } = this.#episodes.tick(nowIso, this.#gapMs, latestSeq);
@@ -196,7 +197,7 @@ export class EpisodeManager {
   async sweep(nowIso: string): Promise<Episode | null> {
     if (!this.#recovered) {
       this.#recovered = true;
-      await this.recover().catch(() => 0);
+      await this.recover().catch((err) => { reportError("episodes.recover", err); return 0; });
     }
     const closed = this.#episodes.closeIdle(nowIso, this.#gapMs, () => this.#timeline.lastSeq());
     if (closed && closed.endSeq !== null) await this.#finalize(closed);
@@ -223,14 +224,18 @@ export class EpisodeManager {
       await this.#store.index({ ...closed, summary: "" }, []);
       return;
     }
+    const started = Date.now();
     const { summary, salientFacts, via, fallbackReason } = await this.#summarizer.summarize(lines);
     const lenses = [...new Set(lines.map((l) => l.lens).filter((l): l is string => !!l))];
     const tags = this.#tagger ? [...new Set(this.#tagger()([summary, ...salientFacts].join("\n")))].sort() : [];
-    // Gated/audited memory.write: distilling an episode changes future behavior.
+    // Audited, not gated: distilling changes what future turns recall, so it is recorded in the
+    // ledger (`episode.distill`), but it does not cross the policy boundary — an approval prompt
+    // on every idle episode would be noise. The summary model gets no tools.
     await this.#store.index({ ...closed, summary, salientFacts, tags, lenses }, lines);
-    // Canonical auto-write: promote durable, trusted facts from this episode.
+    // Canonical auto-write: promote durable, trusted facts from this episode. Optional — the app
+    // core does not wire a promoter today (see MEMORY.md §5), so `pinned` is empty in production.
     const pinned = this.#promoter ? (await this.#promoter.promoteFromLines(lines)).map((f) => f.key) : [];
-    this.#onMemoryWrite?.({ episodeId: closed.id, summary, salientFacts, lines: lines.length, pinned, ...(via ? { via } : {}), ...(fallbackReason ? { fallbackReason } : {}) });
+    this.#onMemoryWrite?.({ episodeId: closed.id, summary, salientFacts, lines: lines.length, pinned, durationMs: Date.now() - started, ...(via ? { via } : {}), ...(fallbackReason ? { fallbackReason } : {}) });
   }
 }
 

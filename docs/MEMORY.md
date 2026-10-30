@@ -142,12 +142,15 @@ just recent ones — a year-old episode competes on relevance; `k` bounds result
 - An **Episode** is a time-bounded slice, cut on an inactivity gap (default 30 min). Episodes
   are housekeeping, not conversations — the model never sees a boundary as a reset.
 - On close, `EpisodeManager` distills the slice (summary + salient facts) and indexes it — an
-  audited memory write (`episode.distill` in the ledger; it does not cross the policy boundary).
+  audited (not gated) memory write (`episode.distill` in the ledger; it does not cross the policy boundary).
   The channels use `LlmSummarizer`: the transcript, fenced as data, goes to the summary model
   (`ALIL_SUMMARY_MODEL`, else the chat model) with no tools, and comes back as a summary plus
   standalone salient facts. Unparseable output gets one retry; any failure falls back to the
   offline `ExtractiveSummarizer`, and the ledger records `via` and `fallbackReason`.
   `ALIL_SUMMARIZER=extractive` forces the offline one; it is also the library default (tests).
+- **Known gap:** `EpisodeManager` accepts a `CanonicalPromoter` that would auto-pin durable,
+  untainted facts on close, but `createAlil` does not pass one, so nothing is auto-promoted today;
+  canonical facts change only through the HITL-gated `memory.write`.
   Episodes closed under the extractive summarizer can be re-distilled with
   `scripts/episode-redistill.ts` (preview by default; `--apply` backs up `memory.db` first, skips
   any episode already done, keeps the old summary when the model fails, and re-tags every episode).

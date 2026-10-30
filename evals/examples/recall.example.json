@@ -1,0 +1,11 @@
+{
+ "name": "example",
+ "about": "Format example with made-up ids. Copy to workspace/evals/recall.json and label against your own episodes (see `npm run eval:recall`).",
+ "cases": [
+  { "id": "car", "query": "what car do I drive", "category": "single", "expect": ["ep_00000000-car"] },
+  { "id": "loan", "query": "my personal loan EMI across the months", "category": "multi-session", "expect": ["ep_00000000-a", "ep_00000000-b"] },
+  { "id": "due-5th", "query": "what was due on the 5th", "category": "temporal", "expect": ["ep_00000000-c"] },
+  { "id": "trip", "query": "final trip dates", "category": "superseded", "expect": ["ep_00000000-newest"], "note": "older episodes had tentative dates" },
+  { "id": "dog", "query": "what's my dog's name", "category": "unanswerable", "expect": [] }
+ ]
+}

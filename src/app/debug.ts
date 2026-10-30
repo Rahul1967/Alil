@@ -136,13 +136,22 @@ export class DebugLogger implements BrainObserver {
 }
 
 /** Combine two observers (channel trace + debug) — each optional method fires on both. */
-export function composeObservers(a: BrainObserver | undefined, b: BrainObserver): BrainObserver {
-  if (!a) return b;
+export function composeObservers(...observers: Array<BrainObserver | undefined | null>): BrainObserver {
+  const list = observers.filter((o): o is BrainObserver => !!o);
+  if (list.length === 1) return list[0]!;
+  // Each hook fans out to every observer; one observer throwing must not starve the rest (nor
+  // break the turn), so calls are isolated.
+  const each = <K extends keyof BrainObserver>(k: K) => (e: Parameters<NonNullable<BrainObserver[K]>>[0]) => {
+    for (const o of list) {
+      try { (o[k] as ((x: typeof e) => void) | undefined)?.call(o, e); } catch { /* isolated */ }
+    }
+  };
   return {
-    onModelTurn: (e) => { a.onModelTurn?.(e); b.onModelTurn?.(e); },
-    onToolCall: (e) => { a.onToolCall?.(e); b.onToolCall?.(e); },
-    onToolResult: (e) => { a.onToolResult?.(e); b.onToolResult?.(e); },
-    onHalt: (e) => { a.onHalt?.(e); b.onHalt?.(e); },
+    onModelCall: each("onModelCall"),
+    onModelTurn: each("onModelTurn"),
+    onToolCall: each("onToolCall"),
+    onToolResult: each("onToolResult"),
+    onHalt: each("onHalt"),
   };
 }
 

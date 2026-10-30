@@ -47,6 +47,7 @@ function migrate(db: DB): void {
   addColumn(db, "intention", "lens", "TEXT");
   addColumn(db, "timeline", "lens", "TEXT");
   addColumn(db, "timeline", "attachments", "TEXT");
+  addColumn(db, "timeline", "turn_id", "TEXT");
   addColumn(db, "episodes", "tags", "TEXT NOT NULL DEFAULT '[]'");
   addColumn(db, "episodes", "lenses", "TEXT NOT NULL DEFAULT '[]'");
   addColumn(db, "canonical", "tags", "TEXT NOT NULL DEFAULT '[]'");

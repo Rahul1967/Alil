@@ -19,6 +19,9 @@ import type {
   LensFocus, MemorySearchOptions, ProcedureStatus, Tagger,
 } from "./types.ts";
 
+/** Which rankers a tier search fuses. */
+export type RetrievalMode = "hybrid" | "lexical" | "vector";
+
 /** RRF constant — dampens the weight of any single ranker's top positions. */
 const RRF_K = 60;
 
@@ -180,6 +183,7 @@ export class SqliteMemoryStore implements MemoryStore {
   #setEpisodeTags: Statement;
   #chunksOfKind: Statement;
   #knn: Statement;
+  readonly #retrieval: RetrievalMode;
   #fts: Statement;
   #knnKind: Statement;
   #ftsKind: Statement;
@@ -190,9 +194,15 @@ export class SqliteMemoryStore implements MemoryStore {
   #procOutcome: Statement;
   #listProc: Statement;
 
-  constructor(db: DB, embedder: Embedder) {
+  /**
+   * `retrieval` picks the rankers fused for tier searches: both (default), FTS5 only, or vectors
+   * only. The non-default modes exist to measure what each ranker contributes (`npm run eval:recall`)
+   * — e.g. whether the offline hashing vectors add anything over BM25 on real history.
+   */
+  constructor(db: DB, embedder: Embedder, opts: { retrieval?: RetrievalMode } = {}) {
     this.#db = db;
     this.#embedder = embedder;
+    this.#retrieval = opts.retrieval ?? "hybrid";
     this.#insVec = db.prepare(`INSERT INTO recall_vec(embedding) VALUES (?)`);
     this.#insChunk = db.prepare(
       `INSERT INTO recall_chunk(rowid, kind, ref, text, provenance, source) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -388,9 +398,11 @@ export class SqliteMemoryStore implements MemoryStore {
    * rowid → fused score.
    */
   async #rankKind(kind: ChunkKind, query: string, n: number): Promise<Map<number, number>> {
-    const [qvec] = await this.#embedder.embed([query]);
+    const useVec = this.#retrieval !== "lexical";
+    const useFts = this.#retrieval !== "vector";
+    const [qvec] = useVec ? await this.#embedder.embed([query]) : [];
     const vecRows = qvec ? (this.#knnKind.all(toBlob(qvec), kind, n) as DistRow[]) : [];
-    const match = ftsQuery(query);
+    const match = useFts ? ftsQuery(query) : null;
     const ftsRows = match ? (this.#ftsKind.all(match, kind, n) as RankRow[]) : [];
     const fused = new Map<number, number>();
     vecRows.forEach((row, i) => fused.set(row.rowid, (fused.get(row.rowid) ?? 0) + 1 / (RRF_K + i)));

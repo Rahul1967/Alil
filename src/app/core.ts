@@ -21,7 +21,7 @@ import { DossierStore, planPreferencesMigration } from "../dossier/index.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { McpRegistry } from "../execution/mcp/registry.ts";
 import { sdkTransportFactory } from "../execution/mcp/sdk-transport.ts";
-import type { McpServerConfig } from "../execution/mcp/types.ts";
+import type { McpServerConfig, McpObserver } from "../execution/mcp/types.ts";
 import { IngestionStore } from "../ingestion/index.ts";
 import type { Attachment } from "../ingestion/index.ts";
 import { AuditLedger, Scheduler } from "../gateway/index.ts";
@@ -30,6 +30,13 @@ import { TurnQueue } from "../gateway/index.ts";
 import { PlanService, type PlanRunOptions } from "./plan-service.ts";
 import { createAmbientBus, toIncomingEvent } from "./ambient.ts";
 import { DebugLogger, composeObservers, tapRecall, tapWorld, tapAudit } from "./debug.ts";
+import { fitToTokenBudget, estimateTokens } from "../memory/working-set.ts";
+import { Telemetry, telemetryObserver, withTurn, currentTurn, newTurnId, InvariantMonitor, reportError } from "../telemetry/index.ts";
+import type { Heartbeats, TurnContext, HeartbeatInfo } from "../telemetry/index.ts";
+import {
+  buildTelemetry, install as installGlobalTelemetry, tapRecallTelemetry, tapAuditTelemetry, mcpTelemetry,
+  kvHeartbeatStore, newHeartbeats, coreInvariants, buildMonitor, alertText,
+} from "./observability.ts";
 import type { PlanResult } from "../runtime/plan-types.ts";
 import type { TriggerRule } from "../gateway/ingest/types.ts";
 import type { RateLimiter } from "../gateway/ingest/rate-limiter.ts";
@@ -51,7 +58,7 @@ export interface ChannelBinding {
   /** How this channel asks the operator to approve a gated action. */
   approvals: ApprovalPort;
   /** Push a proactive message (a fired reminder or an ambient wake's reply) to the user. */
-  notify?: (text: string, meta: { source: "scheduled" | "ambient"; label?: string }) => Promise<void>;
+  notify?: (text: string, meta: { source: "scheduled" | "ambient" | "alert"; label?: string }) => Promise<void>;
   /** Deliver a workspace file to the user, if the channel supports it (enables send_file). */
   sendFile?: (path: string, caption?: string) => Promise<{ ok: boolean; detail?: string }>;
   /** Per-turn trace, if the channel shows one. */
@@ -105,6 +112,11 @@ export interface AlilConfig {
   summaryModelId?: string;
   /** Cadence of the background idle-episode sweep (default 60s). */
   episodeSweepMs?: number;
+  /** Token budget for prior conversation in each turn's context (default 16k, ≤ 80 lines). */
+  historyTokens?: number;
+  /** Telemetry emitter (tests inject one); `false` disables. Default: per-process JSONL under
+   * `<stateDir>/logs/` (see app/observability.ts; ALIL_TELEMETRY=0 also disables). */
+  telemetry?: Telemetry | false;
 }
 
 export interface RunTurnOptions {
@@ -145,6 +157,10 @@ export class Alil {
   readonly #defaultModel: string;
   readonly #actions: ActionSink;
   readonly #episodeSweepMs: number;
+  readonly #historyTokens: number;
+  readonly #telemetry: Telemetry;
+  readonly #heartbeats: Heartbeats;
+  #monitor: InvariantMonitor | null = null;
   #sweepTimer: ReturnType<typeof setInterval> | null = null;
   #sweeping = false;
   #prefsMigrationTried = false; // one-time-per-process guard for the canonical→dossier prefs move
@@ -170,6 +186,9 @@ export class Alil {
     this.#registry = built.registry;
     this.#defaultModel = _config.modelId;
     this.#episodeSweepMs = _config.episodeSweepMs ?? 60_000;
+    this.#historyTokens = _config.historyTokens ?? DEFAULT_HISTORY_TOKENS;
+    this.#telemetry = built.telemetry;
+    this.#heartbeats = built.heartbeats;
     this.#recoverInterruptedTurn();
   }
 
@@ -273,11 +292,19 @@ export class Alil {
 
   /** Run one turn on the shared queue: assemble context, think, record to timeline + audit. */
   async runTurn(text: string, provenance: Provenance, opts: RunTurnOptions = {}): Promise<BrainTurn> {
+    // One id for the whole turn: every telemetry event, ledger record and timeline line it writes
+    // carries it, so a turn can be followed across all three. Never part of an approval binding.
+    const ctx: TurnContext = { turnId: newTurnId(), channel: this.channel, ...(opts.label ? { label: opts.label } : {}) };
+    const enqueuedAt = Date.now();
+    return withTurn(ctx, () => this.#runTurn(ctx, enqueuedAt, text, provenance, opts));
+  }
+
+  async #runTurn(ctx: TurnContext, enqueuedAt: number, text: string, provenance: Provenance, opts: RunTurnOptions): Promise<BrainTurn> {
     // First operator turn on this process: propose the one-time preferences migration through the
     // boundary (parks for approval like any write). Guarded so a decline doesn't re-propose forever.
     if (!this.#prefsMigrationTried && this.#memory && (provenance.origin === "operator" || provenance.origin === "user_channel")) {
       this.#prefsMigrationTried = true;
-      await this.migratePreferences().catch(() => {});
+      await this.migratePreferences().catch((err) => this.#telemetry.error("prefs.migrate", err));
     }
     // An inbound operator message is itself an event: fire any matching event-intentions so a
     // reminder gated to "when we chat on Oct 5" can trigger. Fire-and-forget — the delivered
@@ -285,12 +312,16 @@ export class Alil {
     if (this.#scheduler && (provenance.origin === "operator" || provenance.origin === "user_channel")) {
       void this.#scheduler
         .fireEvent({ channel: this.channel, text, ...(provenance.sender ? { from: provenance.sender } : {}), provenance })
-        .catch(() => {});
+        .catch((err) => this.#telemetry.error("scheduler.fireEvent", err));
     }
-    return this.#queue.submit((queueSignal): Promise<BrainTurn> => this.#lenses.withTurnLens(opts.lens, async (): Promise<BrainTurn> => {
-      const at = new Date().toISOString();
+    // The queue may start this callback from another turn's async chain; re-enter our context.
+    return this.#queue.submit((queueSignal): Promise<BrainTurn> => withTurn(ctx, () => this.#lenses.withTurnLens(opts.lens, async (): Promise<BrainTurn> => {
+      const startedAt = Date.now();
+      const at = new Date(startedAt).toISOString();
       const lens = this.#lenses.active();
       const episodeId = this.#episodes ? await this.#episodes.beginTurn(at) : "ep";
+      ctx.episodeId = episodeId;
+      if (lens) ctx.lens = lens.id;
       const sent = (opts.attachments ?? []).filter((a) => PLACED_ATTACHMENT.test(a.path))
         .map((a): AttachmentRef => ({ path: a.path, filename: a.filename, kind: a.kind, bytes: a.bytes, ...(a.caption ? { caption: a.caption } : {}) }));
       const attachments = episodeAttachments(sent, this.#memory?.timeline.attachmentsIn(episodeId) ?? []);
@@ -302,11 +333,15 @@ export class Alil {
       };
       this.#logger?.turnStart(this.channel, opts.label ?? "turn", text, provenance);
       const lensField = lens ? { lens: lens.id } : {};
+      this.#telemetry.emit("turn.start", {
+        label: opts.label ?? "turn", origin: provenance.origin, queueWaitMs: startedAt - enqueuedAt,
+        historyLines: input.history.length, attachments: sent.length, ...lensField,
+      }, { text });
       // The operator's message is durable BEFORE the model runs (history was read above, so it isn't
       // duplicated into this turn's context). A crash, error, or cancel can lose the reply — never
       // the message. Every user line gets exactly one answering line (reply or harness note), which
       // is what lets a restart detect a turn that was cut off (#recoverInterruptedTurn).
-      this.#memory?.timeline.append({ at, channel: this.channel, provenance, episodeId, role: "user", text, ...lensField, ...(sent.length > 0 ? { attachments: sent } : {}) });
+      this.#memory?.timeline.append({ at, channel: this.channel, provenance, episodeId, role: "user", text, turnId: ctx.turnId, ...lensField, ...(sent.length > 0 ? { attachments: sent } : {}) });
       const signal = anySignal(queueSignal, opts.signal);
       const modelId = this.#modelFor(lens);
       let turn: BrainTurn;
@@ -314,7 +349,9 @@ export class Alil {
         turn = await this.#brain.run(input, { ...(signal ? { signal } : {}), ...(modelId !== this.#defaultModel ? { modelId } : {}) });
       } catch (err) {
         this.#recordReply(episodeId, lensField, undefined, `crashed: ${err instanceof Error ? err.message : String(err)}`);
-        this.#audit.append("turn", { channel: this.channel, episodeId, stopReason: "crash", ...(opts.label ? { label: opts.label } : {}), ...lensField });
+        const durationMs = Date.now() - startedAt;
+        this.#telemetry.emit("turn.end", { stopReason: "crash", durationMs, model: modelId }, { error: err instanceof Error ? err.message : String(err) });
+        this.#audit.append("turn", { channel: this.channel, episodeId, turnId: ctx.turnId, stopReason: "crash", durationMs, ...(opts.label ? { label: opts.label } : {}), ...lensField });
         throw err;
       }
       this.#logger?.turnEnd(turn);
@@ -324,12 +361,21 @@ export class Alil {
         : turn.stopReason === "guard_halt" ? `halted: ${turn.haltReason ?? "guard"}`
         : turn.haltReason ?? turn.stopReason;
       this.#recordReply(episodeId, lensField, turn.assistantText, interruption, actionTrail(turn));
+      const durationMs = Date.now() - startedAt;
+      const u = turn.usage;
+      this.#telemetry.emit("turn.end", {
+        stopReason: turn.stopReason, durationMs, iterations: turn.iterations, toolCalls: turn.results.length,
+        model: modelId, replied: !!turn.assistantText?.trim(), ...(u ? { usage: u } : {}),
+        ...(turn.haltReason ? { haltKind: haltKind(turn) } : {}),
+      }, { reply: turn.assistantText ?? "", ...(turn.haltReason ? { haltReason: turn.haltReason } : {}) });
       this.#audit.append("turn", {
-        channel: this.channel, episodeId, iterations: turn.iterations, stopReason: turn.stopReason,
+        channel: this.channel, episodeId, turnId: ctx.turnId, iterations: turn.iterations, stopReason: turn.stopReason, durationMs,
+        ...(u ? { tokens: u.inputTokens + u.outputTokens + u.cacheReadTokens + u.cacheWriteTokens, costUsd: Math.round(u.costUsd * 1e6) / 1e6 } : {}),
+        toolCalls: turn.results.length,
         ...(opts.label ? { label: opts.label } : {}), ...lensField, ...(modelId !== this.#defaultModel ? { model: modelId } : {}),
       });
       return turn;
-    }), opts.preempt ? { preempt: true } : {});
+    })), opts.preempt ? { preempt: true } : {});
   }
 
   /**
@@ -346,10 +392,11 @@ export class Alil {
       // A finished turn's trail is kept beside the reply (not in it), for loadHistory to show the
       // next few turns what was actually done; an interrupted turn already carries it in its note.
       const kept = interruption === null && trail ? { toolCalls: { trail } } : {};
+      const turnId = currentTurn()?.turnId;
       this.#memory.timeline.append({
         at: new Date().toISOString(), channel: this.channel,
         provenance: note ? { origin: "system" } : { origin: "model" },
-        episodeId, role: "assistant", text, ...lensField, ...kept,
+        episodeId, role: "assistant", text, ...lensField, ...kept, ...(turnId ? { turnId } : {}),
       });
     }
     this.#episodes?.endTurn(new Date().toISOString());
@@ -402,12 +449,18 @@ export class Alil {
   /** Prior turns as brain history (shared shape across channels). */
   loadHistory(): TranscriptLine[] {
     if (!this.#memory) return [];
-    const lines = this.#memory.timeline.workingSet(40);
+    // Bounded by tokens, not rows: 40 pasted documents and 40 one-word replies are very different
+    // contexts. A row ceiling stays as a backstop.
+    const lines = fitToTokenBudget(this.#memory.timeline.workingSet(HISTORY_MAX_LINES), {
+      maxTokens: this.#historyTokens,
+      estimate: (l) => estimateTokens(l.text ?? "") + (trailOf(l)?.length ?? 0) / 4,
+    }).lines;
     // Only the most recent trails ride along: enough to remember what was just done, without
     // every past turn's tool list crowding the context.
     const withTrail = new Set(lines.filter((l) => l.role === "assistant" && trailOf(l) !== null).slice(-RECENT_TRAILS).map((l) => l.seq));
     return lines.flatMap((l): TranscriptLine[] => {
-      if (l.role === "user" && l.text !== undefined) return [{ t: "user", at: l.at, channel: l.channel, provenanceId: l.provenance.origin, text: l.text }];
+      // Say where each prior message came from: one conversation spans Telegram, browser and CLI.
+      if (l.role === "user" && l.text !== undefined) return [{ t: "user", at: l.at, channel: l.channel, provenanceId: l.provenance.origin, text: `[via ${l.channel}] ${l.text}` }];
       if (l.role === "assistant" && l.text !== undefined) {
         const trail = withTrail.has(l.seq) ? trailOf(l) : null;
         return [{ t: "model", at: l.at, text: trail ? `${l.text}\n\n[harness record — actions taken in that turn]\n${trail}` : l.text }];
@@ -419,12 +472,68 @@ export class Alil {
   start(): void {
     this.#scheduler?.start();
     this.#startEpisodeSweep();
+    this.#startMonitor();
   }
   stop(): void {
     this.#scheduler?.stop();
     this.#eventBus.stop();
     if (this.#sweepTimer) clearInterval(this.#sweepTimer);
     this.#sweepTimer = null;
+    this.#monitor?.stop();
+    this.#monitor = null;
+  }
+
+  /** The telemetry emitter (for channel adapters to record their own events). */
+  get telemetry(): Telemetry {
+    return this.#telemetry;
+  }
+
+  /** Record that a long-running loop owned by the channel (e.g. the Telegram poller) is alive. */
+  heartbeat(name: string): void {
+    this.#heartbeats.beat(name);
+  }
+
+  /**
+   * Readiness, not liveness: whether each part Alil depends on is actually working. `ok` is false
+   * when any check fails; each check says why. Heartbeats include other processes' (shared through
+   * memory.db), so the browser can see whether the Telegram poller is alive.
+   */
+  async health(): Promise<HealthReport> {
+    const monitor = this.#ensureMonitor();
+    const failing = new Set(await monitor.checkNow());
+    const beats = this.#heartbeats.snapshot().map((b) => ({ ...b, stale: b.ageMs > HEARTBEAT_STALE_MS }));
+    const checks: HealthReport["checks"] = {
+      memory: { ok: !failing.has("memory.on"), ...(this.#memory ? {} : { detail: "memory.db unavailable" }) },
+      ledger: { ok: !failing.has("ledger.verify"), ...(failing.has("ledger.verify") ? { detail: "hash chain does not verify — run `npm run audit`" } : {}) },
+      heartbeats: { ok: !beats.some((b) => b.stale && b.process === this.channel), beats },
+      queue: { ok: true, busy: this.#queue.busy, depth: this.#queue.depth },
+      mcp: { ok: true, servers: this.#mcp?.status() ?? [] },
+      telemetry: { ok: this.#telemetry.dropped === 0, dropped: this.#telemetry.dropped },
+    };
+    return {
+      ok: Object.values(checks).every((c) => c.ok),
+      process: this.channel, pid: process.pid, uptimeS: Math.round(process.uptime()),
+      failing: [...failing],
+      checks,
+    };
+  }
+
+  #ensureMonitor(): InvariantMonitor {
+    if (this.#monitor) return this.#monitor;
+    const invariants = coreInvariants({
+      ledger: this.#ledger,
+      memoryOn: this.#memory !== null,
+      heartbeats: this.#heartbeats,
+      staleMs: HEARTBEAT_STALE_MS,
+    });
+    this.#monitor = buildMonitor(this.#telemetry, invariants, async (a) => {
+      await this.#binding.notify?.(alertText(a), { source: "alert", label: a.id });
+    });
+    return this.#monitor;
+  }
+
+  #startMonitor(): void {
+    this.#ensureMonitor().start(60_000);
   }
 
   /**
@@ -447,14 +556,47 @@ export class Alil {
       return (await this.#episodes.sweep(new Date().toISOString()))?.id ?? null;
     } catch (err) {
       this.#audit.append("episode.sweep-error", { error: err instanceof Error ? err.message : String(err) });
+      this.#telemetry.error("episodes.sweep", err);
       return null;
     } finally {
       this.#sweeping = false;
+      this.#heartbeats.beat("episodes.sweep");
     }
   }
 }
 
 interface AuditSinkLike { append(evt: string, fields?: Record<string, unknown>): unknown }
+
+/** A loop that hasn't beaten for this long is reported stale (scheduler 30 s, poller ≤ 65 s). */
+const HEARTBEAT_STALE_MS = 5 * 60_000;
+
+export interface HealthCheck { ok: boolean; detail?: string; [k: string]: unknown }
+
+export interface HealthReport {
+  ok: boolean;
+  process: string;
+  pid: number;
+  uptimeS: number;
+  /** Invariant ids failing right now. */
+  failing: string[];
+  checks: {
+    memory: HealthCheck;
+    ledger: HealthCheck;
+    heartbeats: HealthCheck & { beats: Array<HeartbeatInfo & { stale: boolean }> };
+    queue: HealthCheck & { busy: boolean; depth: number };
+    mcp: HealthCheck & { servers: unknown[] };
+    telemetry: HealthCheck & { dropped: number };
+  };
+}
+
+/** Which guard/halt class a non-complete turn ended in (a bounded enum for telemetry). */
+function haltKind(turn: BrainTurn): string {
+  if (turn.stopReason === "aborted") return "aborted";
+  if (turn.stopReason === "error") return /context window/.test(turn.haltReason ?? "") ? "context_overflow" : /malformed/.test(turn.haltReason ?? "") ? "malformed" : "provider_error";
+  const r = turn.haltReason ?? "";
+  for (const k of ["iteration cap", "timeout", "token budget", "cost budget", "stall", "error budget"]) if (r.startsWith(k)) return k.replace(/ /g, "_");
+  return "guard";
+}
 
 interface BuiltCore {
   brain: Brain;
@@ -473,6 +615,8 @@ interface BuiltCore {
   mcp: McpRegistry | null;
   lenses: LensService;
   registry: ProviderRegistry;
+  telemetry: Telemetry;
+  heartbeats: Heartbeats;
 }
 
 /**
@@ -490,10 +634,15 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
   const sandboxRoot = config.sandboxRoot ?? process.env.ALIL_SANDBOX_ROOT ?? "workspace";
   const stateDir = config.stateDir ?? process.env.ALIL_STATE_DIR ?? "workspace";
   const audit = new AuditLedger(config.auditPath ?? `${stateDir}/logs/audit.jsonl`);
+  // Telemetry (how things went: timings, sizes, outcomes) — per-process JSONL beside the ledger,
+  // never inside it. Installed process-wide so deep components can report swallowed errors.
+  const telemetry = buildTelemetry({ process: binding.channel, stateDir, ...(config.telemetry !== undefined ? { telemetry: config.telemetry } : {}) });
+  installGlobalTelemetry(telemetry);
+  telemetry.emit("process.start", { model: config.modelId });
   // Debug: one logger, wired below as the observer + recall/world/audit taps, so every channel
   // gets the same background trace from `--debug`.
   const logger = config.debug ? new DebugLogger() : null;
-  const auditSink = logger ? tapAudit(audit, logger) : audit;
+  const auditSink = tapAuditTelemetry(logger ? tapAudit(audit, logger) : audit, telemetry);
   const world = new WorldStore({
     path: config.worldPath ?? `${stateDir}/.alil/world.json`,
     markdownPath: config.worldMarkdownPath ?? `${stateDir}/WORLD.md`,
@@ -559,19 +708,27 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
       timeline: memory.timeline,
       store: memory.store,
       summarizer: episodeSummarizer(config, registry),
-      onMemoryWrite: (e) => auditSink.append("episode.distill", {
-        episodeId: e.episodeId, lines: e.lines, ...(e.via ? { via: e.via } : {}), ...(e.fallbackReason ? { fallbackReason: e.fallbackReason } : {}),
-      }),
+      onMemoryWrite: (e) => {
+        auditSink.append("episode.distill", {
+          episodeId: e.episodeId, lines: e.lines, ...(e.via ? { via: e.via } : {}), ...(e.fallbackReason ? { fallbackReason: e.fallbackReason } : {}),
+        });
+        telemetry.emit("episode.distill", {
+          episodeId: e.episodeId, lines: e.lines, summaryChars: e.summary.length, facts: e.salientFacts.length, pinned: e.pinned.length,
+          ...(e.durationMs !== undefined ? { durationMs: e.durationMs } : {}), ...(e.via ? { via: e.via } : {}),
+        }, { summary: e.summary, ...(e.fallbackReason ? { fallbackReason: e.fallbackReason } : {}) });
+      },
       tagger: () => { const r = lenses.registry(); return (t: string) => r.derive(t); },
     });
-  } catch {
+  } catch (err) {
     // Native module / DB unavailable — run without persistence rather than crash.
+    telemetry.error("memory.open", err);
   }
+  const heartbeats = newHeartbeats(binding.channel, memory ? kvHeartbeatStore(memory.db) : undefined);
 
   // On-demand MCP layer: load server configs (if any) and build a lazily-connecting registry. The
   // mcp.* meta-tools are always advertised (3 stable, cheap entries), but individual MCP tool
   // schemas are NEVER injected into context — the model discovers them via mcp.search/inspect.
-  const mcpRegistry = loadMcpRegistry(config.mcpConfigPath ?? "config/mcp.json");
+  const mcpRegistry = loadMcpRegistry(config.mcpConfigPath ?? "config/mcp.json", mcpTelemetry(telemetry, `${stateDir}/.alil/mcp-pins.json`));
 
   // Executor registry = the advertised tools PLUS the operator-only migration tool (not in the
   // model-facing catalog, so the model never sees it; reachable only via alil.migratePreferences()).
@@ -605,11 +762,12 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     workspaceRoot: sandboxRoot,
     audit: auditSink,
     lensId: () => lenses.activeId(),
+    turnId: () => currentTurn()?.turnId,
   });
 
-  const observer = logger ? composeObservers(binding.observer, logger) : binding.observer;
+  const observer = composeObservers(binding.observer, logger, telemetryObserver(telemetry));
   const ports: BrainPorts = {
-    memory: logger ? tapRecall(memoryPort, logger) : memoryPort,
+    memory: tapRecallTelemetry(logger ? tapRecall(memoryPort, logger) : memoryPort, telemetry),
     skills: { eligible: async () => [] },
     tools: new RegistryToolCatalog(DEFAULT_TOOLS),
     prompt: new PromptAssembler(new FilePersonaSource(config.personaPath ?? `${stateDir}/SOUL.md`), {
@@ -621,7 +779,7 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     world: logger ? tapWorld(world, logger) : world,
     profile: { preamble: () => { const l = lensFor("dossier"); return dossier.operatorPreamble(l ? { title: l.title, tags: l.tags } : null); } },
     context: { blocks: (input) => lensContextBlocks(memory, lenses, input) },
-    ...(observer ? { observer } : {}),
+    observer,
   };
   const brain = new Brain({ modelId: config.modelId, guards: config.guards ?? guardsFromEnv(), ...(config.providerRetry ? { retry: config.providerRetry } : {}) }, registry, ports);
 
@@ -654,6 +812,7 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
           const turn = await alil.runTurn(`${banner}${intention.action}`, provenance, { label: "intention", lens: intention.lens });
           await binding.notify?.(turn.assistantText ?? "(no text)", { source: "scheduled", label: intention.title });
         },
+        onTick: () => heartbeats.beat("scheduler.tick"),
       })
     : null;
 
@@ -673,7 +832,7 @@ export function createAlil(config: AlilConfig, binding: ChannelBinding): Alil {
     },
   });
 
-  alil = new Alil(config, binding, { brain, actions: boundary, planService, ledger: audit, auditSink, logger, memory, episodes, world, dossier, ingestion, scheduler, eventBus, mcp: mcpRegistry, lenses, registry });
+  alil = new Alil(config, binding, { brain, actions: boundary, planService, ledger: audit, auditSink, logger, memory, episodes, world, dossier, ingestion, scheduler, eventBus, mcp: mcpRegistry, lenses, registry, telemetry, heartbeats });
   return alil;
 }
 
@@ -803,14 +962,15 @@ function anySignal(a?: AbortSignal, b?: AbortSignal): AbortSignal | undefined {
  * uses mcp.search/inspect/call, so a missing binary never blocks startup — it surfaces as a call
  * failure the model can report. A malformed config is ignored rather than crashing the app.
  */
-function loadMcpRegistry(path: string): McpRegistry | null {
+function loadMcpRegistry(path: string, observer?: McpObserver): McpRegistry | null {
   try {
     if (!existsSync(path)) return null;
     const parsed = JSON.parse(readFileSync(path, "utf8")) as { servers?: McpServerConfig[] };
     const servers = (parsed.servers ?? []).filter((s) => s && typeof s.name === "string" && s.name.length > 0);
     if (servers.length === 0) return null;
-    return new McpRegistry({ configs: servers, transportFactory: sdkTransportFactory });
-  } catch {
+    return new McpRegistry({ configs: servers, transportFactory: sdkTransportFactory, ...(observer ? { observer } : {}) });
+  } catch (err) {
+    reportError("mcp.config", err, { path });
     return null; // malformed config or read error ⇒ MCP off, never a startup crash
   }
 }
@@ -857,6 +1017,8 @@ export function episodeSummarizer(config: AlilConfig, registry: ProviderRegistry
 
 /** How many of the latest finished turns show their action trail in history. */
 const RECENT_TRAILS = 3;
+const HISTORY_MAX_LINES = 80;
+const DEFAULT_HISTORY_TOKENS = 16_000;
 
 function trailOf(l: { toolCalls?: unknown }): string | null {
   const t = (l.toolCalls as { trail?: unknown } | undefined)?.trail;

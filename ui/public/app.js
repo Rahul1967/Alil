@@ -223,7 +223,7 @@ async function health() {
     const r = await fetch("/api/health");
     const j = await r.json();
     dot.classList.toggle("on", !!j.ok);
-    status.textContent = `${j.model} · memory ${j.memory}`;
+    status.textContent = `${j.model} · memory ${j.memory}${j.failing && j.failing.length ? ` · ⚠ ${j.failing.join(", ")}` : ""}`;
   } catch {
     status.textContent = "server unreachable";
   }

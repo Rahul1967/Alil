@@ -10,6 +10,7 @@
  * was scheduled).
  */
 import { Cron } from "croner";
+import { reportError } from "../telemetry/index.ts";
 import type { ProspectiveStore } from "../memory/prospective.ts";
 import type { Intention, IncomingEvent } from "../memory/types.ts";
 
@@ -25,6 +26,8 @@ export interface SchedulerDeps {
   intervalMs?: number;
   /** A 'firing' row older than this is presumed crashed and reclaimed (default 5 min). */
   staleMs?: number;
+  /** Called at the end of every tick (a heartbeat: a hung or dead scheduler stops calling it). */
+  onTick?: () => void;
 }
 
 function defaultCronNext(expr: string, after: number): number | null {
@@ -42,6 +45,7 @@ export class Scheduler {
   readonly #cronNext: (expr: string, after: number) => number | null;
   readonly #intervalMs: number;
   readonly #staleMs: number;
+  readonly #onTick: (() => void) | undefined;
   #timer: ReturnType<typeof setInterval> | null = null;
   #ticking = false;
 
@@ -52,6 +56,7 @@ export class Scheduler {
     this.#cronNext = deps.cronNext ?? defaultCronNext;
     this.#intervalMs = deps.intervalMs ?? 30_000;
     this.#staleMs = deps.staleMs ?? 5 * 60_000;
+    this.#onTick = deps.onTick;
   }
 
   /** Begin polling. Runs one immediate tick so anything already due (catch-up) fires at once. */
@@ -78,8 +83,11 @@ export class Scheduler {
       for (const intention of this.#store.due(now)) {
         await this.#fire(intention);
       }
+    } catch (err) {
+      reportError("scheduler.tick", err);
     } finally {
       this.#ticking = false;
+      try { this.#onTick?.(); } catch { /* heartbeat is best effort */ }
     }
   }
 
@@ -96,8 +104,9 @@ export class Scheduler {
     if (!this.#store.claim(intention.id, now)) return; // lost the race / already handled
     try {
       await this.#deliver(intention, event);
-    } catch {
+    } catch (err) {
       // Delivery failed: leave the row 'firing'; recoverStale re-arms it on a later tick.
+      reportError("scheduler.deliver", err, { intentionId: intention.id, trigger: intention.trigger });
       return;
     }
     // Settle: re-arm a recurring cron intention, else it's a one-shot.

@@ -33,11 +33,11 @@ const approvals: ApprovalPort = {
     try {
       ans = (await rl.question("    [y] once  [g] grant 10×/30m  [n] deny › ")).trim().toLowerCase();
     } catch {
-      return { approved: false, reason: "no input" };
+      return { approved: false, outcome: "unreachable", reason: "no input" };
     }
     if (ans === "y") return { approved: true };
     if (ans === "g") return { approved: true, scope: { tool: a.tool, maxUses: 10, ttlMs: 30 * 60_000, task: "repl-session" } };
-    return { approved: false, reason: "operator declined" };
+    return { approved: false, outcome: "declined", reason: "operator declined" };
   },
 };
 
@@ -65,7 +65,7 @@ const binding: ChannelBinding = {
   // In debug mode the richer debug trace replaces this display observer, so we don't print twice.
   ...(debug ? {} : { observer }),
   notify: async (text, meta) => {
-    const tag = meta.source === "scheduled" ? `⏰ ${meta.label ?? ""}` : `🔔 (ambient · ${meta.label ?? ""})`;
+    const tag = meta.source === "scheduled" ? `⏰ ${meta.label ?? ""}` : meta.source === "alert" ? "[Alil health]" : `🔔 (ambient · ${meta.label ?? ""})`;
     stdout.write(`\n${tag} › ${text}\n\nyou › `);
   },
 };

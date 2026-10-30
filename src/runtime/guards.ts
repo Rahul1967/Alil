@@ -1,6 +1,8 @@
 import type { GuardLimits, Clock } from "./types.ts";
 import { systemClock } from "./types.ts";
-import type { ModelSpec } from "../providers/types.ts";
+import type { ModelSpec, ModelUsage } from "../providers/types.ts";
+import { costOf } from "../providers/types.ts";
+import type { TurnUsage } from "./types.ts";
 import type { ToolResult } from "../core/types.ts";
 
 export interface GuardCheck {
@@ -22,6 +24,7 @@ export class Guards {
   #iterations = 0;
   #tokens = 0;
   #costUsd = 0;
+  readonly #usage: TurnUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0, modelCalls: 0 };
   #failingRounds = 0;
   readonly #recentSignatures: string[] = [];
 
@@ -33,6 +36,11 @@ export class Guards {
 
   get iterations(): number {
     return this.#iterations;
+  }
+
+  /** Running totals for the turn — tokens by kind, cost, number of model calls recorded. */
+  get usage(): TurnUsage {
+    return { ...this.#usage };
   }
 
   /** Call once at the top of each loop iteration. Increments the iteration counter. */
@@ -73,14 +81,19 @@ export class Guards {
   }
 
   /** Record usage after a model call so token/cost guards can trip next iteration. */
-  recordUsage(
-    usage: { inputTokens: number; outputTokens: number },
-    spec: ModelSpec,
-  ): void {
-    this.#tokens += usage.inputTokens + usage.outputTokens;
-    this.#costUsd +=
-      (usage.inputTokens / 1_000_000) * spec.pricing.inputPerMTok +
-      (usage.outputTokens / 1_000_000) * spec.pricing.outputPerMTok;
+  recordUsage(usage: ModelUsage, spec: ModelSpec): void {
+    // Cache reads count toward the token budget too: they still occupy the context window.
+    const cache = (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0);
+    this.#tokens += usage.inputTokens + usage.outputTokens + cache;
+    const cost = costOf(usage, spec.pricing);
+    this.#costUsd += cost;
+    const u = this.#usage;
+    u.inputTokens += usage.inputTokens;
+    u.outputTokens += usage.outputTokens;
+    u.cacheReadTokens += usage.cacheReadTokens ?? 0;
+    u.cacheWriteTokens += usage.cacheWriteTokens ?? 0;
+    u.costUsd += cost;
+    u.modelCalls += 1;
   }
 
   /**

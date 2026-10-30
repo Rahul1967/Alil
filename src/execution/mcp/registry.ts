@@ -1,7 +1,9 @@
 import type {
   McpTransport, McpServerConfig, McpToolDef, McpCallResult, McpReliability, McpSearchHit,
-  McpBatchStep, McpBatchResult, McpBatchStepResult,
+  McpBatchStep, McpBatchResult, McpBatchStepResult, McpObserver,
 } from "./types.ts";
+import { CircuitBreaker } from "../../reliability/index.ts";
+import { reportError } from "../../telemetry/index.ts";
 import { DEFAULT_MCP_RELIABILITY, classifyMcpTool, parsePinned } from "./types.ts";
 import { createHash } from "node:crypto";
 import { guardUrlArgs, type HostCheck } from "./url-guard.ts";
@@ -10,11 +12,6 @@ import type { Effect, Risk } from "../../core/types.ts";
 /** Factory that builds a transport for a server config — the SDK adapter in prod, a mock in tests.
  * `onListChanged` lets a server's tools/list_changed notification invalidate the cached schemas. */
 export type TransportFactory = (config: McpServerConfig, onListChanged?: () => void) => McpTransport;
-
-interface CircuitState {
-  failures: number;
-  openedAt: number | null; // ms epoch when the circuit opened, or null if closed
-}
 
 /**
  * McpRegistry — the on-demand MCP layer. It holds server configs and lazily connects, lists, and
@@ -27,11 +24,12 @@ export class McpRegistry {
   readonly #configs = new Map<string, McpServerConfig>();
   readonly #transports = new Map<string, McpTransport>();
   readonly #toolCache = new Map<string, McpToolDef[]>(); // server → its tools (memoized)
-  readonly #circuits = new Map<string, CircuitState>();
+  readonly #circuits = new Map<string, CircuitBreaker>();
   readonly #makeTransport: TransportFactory;
   readonly #rel: McpReliability;
   readonly #now: () => number;
   readonly #hostCheck: HostCheck | undefined;
+  readonly #observer: McpObserver | undefined;
 
   constructor(opts: {
     configs: McpServerConfig[];
@@ -40,12 +38,15 @@ export class McpRegistry {
     now?: () => number;
     /** Public-address check for `guardUrls` servers (default: web.fetch's DNS-resolving guard). */
     hostCheck?: HostCheck;
+    /** Telemetry: per-call timing/outcome, connects, circuit transitions. */
+    observer?: McpObserver;
   }) {
     for (const c of opts.configs) this.#configs.set(c.name, c);
     this.#makeTransport = opts.transportFactory;
     this.#rel = { ...DEFAULT_MCP_RELIABILITY, ...(opts.reliability ?? {}) };
     this.#now = opts.now ?? (() => Date.now());
     this.#hostCheck = opts.hostCheck;
+    this.#observer = opts.observer;
   }
 
   /** Configured server names (whether or not connected yet). */
@@ -64,7 +65,7 @@ export class McpRegistry {
       transport: cfg.transport,
       enabled: this.#enabled(cfg.name),
       connected: this.#transports.get(cfg.name)?.connected() ?? false,
-      circuitOpen: this.#circuits.get(cfg.name)?.openedAt != null,
+      circuitOpen: (this.#circuits.get(cfg.name)?.state ?? "closed") !== "closed",
       toolCount: this.#toolCache.get(cfg.name)?.length ?? 0,
     }));
   }
@@ -100,6 +101,7 @@ export class McpRegistry {
     const t = await this.#connect(server);
     const tools = await t.listTools();
     this.#toolCache.set(server, tools);
+    try { this.#observer?.onToolsListed?.(server, tools); } catch { /* observer must not break listing */ }
     return tools;
   }
 
@@ -116,8 +118,8 @@ export class McpRegistry {
   async search(query: string, limit = 8, opts: { boostServers?: string[] } = {}): Promise<McpSearchHit[]> {
     // Ensure every ENABLED, reachable server is listed at least once (skip disabled + open-circuit).
     for (const server of this.#configs.keys()) {
-      if (!this.#enabled(server) || this.#circuitOpen(server)) continue;
-      try { await this.ensureTools(server); } catch { /* a dead server shouldn't sink the search */ }
+      if (!this.#enabled(server) || this.#breaker(server).refusing) continue;
+      try { await this.ensureTools(server); } catch (err) { reportError("mcp.search.list", err, { server }); /* a dead server shouldn't sink the search */ }
     }
     // Only rank tools from currently-enabled servers (a server disabled after caching is excluded).
     const terms = tokenize(query);
@@ -182,7 +184,8 @@ export class McpRegistry {
    */
   async call(server: string, name: string, args: Record<string, unknown>, idempotencyKey?: string): Promise<McpCallResult> {
     if (!this.#enabled(server)) throw new Error(`mcp: server "${server}" is disabled — not calling`);
-    if (this.#circuitOpen(server)) {
+    if (this.#breaker(server).refusing) {
+      this.#observer?.onCall?.({ server, tool: name, attempts: 0, durationMs: 0, outcome: "refused" });
       throw new Error(`mcp: server "${server}" circuit is open (recent repeated failures) — not calling; retry later`);
     }
     const cfg = this.#configs.get(server);
@@ -197,21 +200,35 @@ export class McpRegistry {
     // key is derived from server+name+args so the SAME call reuses the SAME key across attempts.
     const key = retryable ? undefined : (idempotencyKey ?? idempotencyKeyFor(server, name, args));
 
+    // The breaker is consulted once per LOGICAL call: all of its retries together are one success
+    // or one failure. After the cool-down this acquire is the single half-open probe.
+    const breaker = this.#breaker(server);
+    if (!breaker.tryAcquire()) {
+      this.#observer?.onCall?.({ server, tool: name, attempts: 0, durationMs: 0, outcome: "refused" });
+      throw new Error(`mcp: server "${server}" circuit is open (recent repeated failures) — not calling; retry later`);
+    }
+    const started = this.#now();
     let lastErr: unknown;
     const attempts = retryable ? this.#rel.maxRetries + 1 : 1;
     for (let attempt = 0; attempt < attempts; attempt++) {
       try {
         const t = await this.#connect(server);
         const res = await t.callTool(name, args, timeoutMs, key);
-        this.#recordSuccess(server);
+        breaker.success();
+        this.#observer?.onCall?.({
+          server, tool: name, attempts: attempt + 1, durationMs: this.#now() - started,
+          outcome: res.isError ? "tool_error" : "ok", resultChars: res.text.length,
+        });
         return res; // includes isError:true when the TOOL failed — a valid, non-retried outcome
       } catch (err) {
         lastErr = err;
-        this.#recordFailure(server); // transport/timeout failure — counts toward the circuit
         if (attempt < attempts - 1) await sleep(backoffWithJitter(this.#rel.backoffBaseMs, attempt));
       }
     }
-    throw new Error(`mcp: call to ${server}/${name} failed after ${attempts} attempt(s): ${(lastErr as Error)?.message ?? String(lastErr)}`);
+    breaker.failure(); // transport/timeout failure on every attempt — one failed call
+    const message = (lastErr as Error)?.message ?? String(lastErr);
+    this.#observer?.onCall?.({ server, tool: name, attempts, durationMs: this.#now() - started, outcome: "error", error: message.slice(0, 300) });
+    throw new Error(`mcp: call to ${server}/${name} failed after ${attempts} attempt(s): ${message}`);
   }
 
   /** Drop the cached schemas for a server (or all), forcing a fresh tools/list on next use. Called
@@ -263,32 +280,30 @@ export class McpRegistry {
     const cfg = this.#configs.get(server);
     if (!cfg) throw new Error(`mcp: unknown server "${server}"`);
     t = t ?? this.#makeTransport(cfg, () => this.#toolCache.delete(server)); // list_changed ⇒ drop cache
-    await t.connect();
+    const started = this.#now();
+    try {
+      await t.connect();
+    } catch (err) {
+      this.#observer?.onConnect?.({ server, durationMs: this.#now() - started, ok: false, error: ((err as Error)?.message ?? String(err)).slice(0, 300) });
+      throw err;
+    }
+    this.#observer?.onConnect?.({ server, durationMs: this.#now() - started, ok: true });
     this.#transports.set(server, t);
     return t;
   }
 
-  #circuitOpen(server: string): boolean {
-    const c = this.#circuits.get(server);
-    if (!c || c.openedAt === null) return false;
-    if (this.#now() - c.openedAt >= this.#rel.circuitResetMs) {
-      // Half-open: allow one trial by closing; a fresh failure will re-open it.
-      c.openedAt = null;
-      c.failures = 0;
-      return false;
+  #breaker(server: string): CircuitBreaker {
+    let b = this.#circuits.get(server);
+    if (!b) {
+      b = new CircuitBreaker({
+        threshold: this.#rel.circuitThreshold,
+        resetMs: this.#rel.circuitResetMs,
+        now: this.#now,
+        onTransition: (t) => this.#observer?.onCircuit?.({ server, from: t.from, to: t.to, failures: t.failures }),
+      });
+      this.#circuits.set(server, b);
     }
-    return true;
-  }
-
-  #recordFailure(server: string): void {
-    const c = this.#circuits.get(server) ?? { failures: 0, openedAt: null };
-    c.failures += 1;
-    if (c.failures >= this.#rel.circuitThreshold) c.openedAt = this.#now();
-    this.#circuits.set(server, c);
-  }
-
-  #recordSuccess(server: string): void {
-    this.#circuits.set(server, { failures: 0, openedAt: null });
+    return b;
   }
 }
 

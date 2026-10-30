@@ -137,6 +137,15 @@ ordering encodes the safety philosophy: hard blocks first, human judgment last.
 **Verdict precedence** when multiple sources answer: `deny` > `defer` > `ask` > `allow`. Strictest
 wins — a single `deny` blocks the action regardless of every other signal.
 
+### Who decided (approval attribution)
+
+The ledger names the actor that actually ended an approval. An approval port reports a
+non-approval with an `outcome`: `declined` (a human said no → `resolution: declined, by:
+operator`), `timeout` (nobody answered → `resolution: timeout, by: harness`) or `unreachable`
+(the channel could not be reached → `resolution: no-channel, by: harness`). A port that gives no
+outcome is recorded as `by: unknown` — the record never claims a human acted when none did. Every
+resolved approval also records `approvalWaitMs`.
+
 ### Approval binding (TOCTOU defense)
 
 A grant is bound to a canonical execution context — working directory, exact arguments, environment
@@ -440,8 +449,11 @@ provider prompt-caching isn't invalidated. Design properties:
   `tools/list`; a missing binary surfaces as a call failure, never a startup crash.
 - **Effect-aware reliability.** Per-call timeout (with cancellation), retry with backoff+jitter for
   **read-only** tools only (a write is never auto-retried — no duplicated side effects), and a
-  per-server circuit breaker that fails fast when a server is down. MCP's `isError:true` is a
-  normal response surfaced as a recoverable observation, not a transport error.
+  per-server circuit breaker that fails fast when a server is down. The breaker
+  (`src/reliability/circuit-breaker.ts`, reusable) counts **logical calls**, not retry attempts —
+  a call that fails all its retries is one failure — and has a real half-open state: after the
+  cool-down exactly one probe goes through; its failure re-opens at once, its success closes. MCP's
+  `isError:true` is a normal response surfaced as a recoverable observation, not a transport error.
 - **Conservative classification.** A tool is `read`/low only if it declares `readOnlyHint`;
   everything else is a `write` (destructive → high). Server `minEffect` can only raise caution.
 - **Transport-isolated.** The MCP SDK lives behind one `McpTransport` adapter (stdio,
@@ -759,6 +771,80 @@ drop an active overlay. Supporting changes (all built):
 - Security-sensitive slices (tighten-only loader, lens switching under taint, fresh-approval
   semantics) get adversarial tests before the code.
 
+## 10c · Observability, reliability and evaluation
+
+Alil records *how things went* separately from *what was decided*. The audit ledger (§04) is the
+hash-chained record of decisions; telemetry is the timing/size/outcome record of everything else.
+Telemetry is never written into the ledger — the ledger's cross-process lock and fsync would stall
+the event loop, and per-attempt noise does not belong in a forensic chain.
+
+**One turn id joins everything.** `runTurn` mints `turn_id` (`t_<base36 ms>_<hex>`) and runs the
+turn inside an `AsyncLocalStorage` context (`src/telemetry/context.ts`). Every telemetry event
+emitted anywhere below it — loop, boundary, MCP registry, recall — carries the id without the
+component knowing about turns; the boundary stamps it on every `policy` record, the core on the
+`turn` record and on both timeline lines (`timeline.turn_id`). It is attribution only: it is never
+part of an approval binding or an idempotency key (adversarial test in
+`test/telemetry-integration.test.ts`).
+
+**Telemetry** (`src/telemetry/`, reusable): a versioned envelope (`v`, `ts`, `kind`, `process`,
+`pid`, `turnId`, `channel`, `episodeId`) over sinks that never throw (`JsonlFileSink` with size
+rotation, `MemorySink`, `FanoutSink`). One file per process — `<state>/logs/telemetry-<process>-
+<pid>.jsonl` — so the Telegram bot and the UI server never contend. Content (message text, tool
+args, replies, error bodies) is dropped unless `ALIL_TELEMETRY_CONTENT=1`; `ALIL_TELEMETRY=0` turns
+it off; files older than `ALIL_TELEMETRY_RETAIN_DAYS` (30) are pruned at start.
+
+| Kind | Recorded |
+|---|---|
+| `turn.start` / `turn.end` | queue wait, history size, iterations, duration, tokens by kind (incl. cache), cost, stop reason, halt kind |
+| `model.call` | one per provider **attempt**: duration, Bedrock `latencyMs`, request id, tokens, raw stop reason, error class, retryable |
+| `tool.call` | tool, outcome, run time, approval wait, result size, tainted |
+| `mcp.call` / `mcp.connect` / `mcp.circuit` / `mcp.tools_changed` | per logical call: attempts, duration, outcome; handshake time; breaker transitions; tool-definition drift |
+| `recall`, `episode.distill` | duration, hits by source; summary size, facts, summarizer used, duration |
+| `audit` | the ledger's decisions mirrored without args or reasons (for the monitor) |
+| `error` | every handled-and-swallowed failure (`reportError(where, err)`), so none is silent |
+| `alert` | invariant firing / resolved |
+
+`npm run metrics [-- --since 7d]` summarises all processes' files (turn latency, where the time
+went — model / tools / waiting for the operator — tokens, cache hit ratio, cost, per-tool and per-
+MCP-server outcomes, errors, alerts, slowest turns); `npm run metrics -- turn <id>` prints one
+turn's timeline.
+
+**Invariants, not percentiles.** At one operator's volume a p95 rests on a handful of samples, so
+alerting is on facts that must hold (`InvariantMonitor`, `src/app/observability.ts`): the ledger
+verifies; memory is on; this process's background loops (scheduler, Telegram poller, episode
+sweep) keep beating; an approved action never changes before it runs; approval requests reach the
+operator; an MCP server's tool definitions don't change silently (trust-on-first-use pins,
+`src/execution/mcp/pins.ts`); a due reminder is delivered. An alert goes to the operator through
+the channel (`notify` with `source: "alert"`), once, then again only after 6 h while still failing,
+plus a `resolved` message. `GET /api/health` is readiness, not liveness: memory, ledger chain,
+heartbeats (shared through `memory.db`, so the browser sees the Telegram poller), queue, MCP,
+telemetry drops — 503 when anything fails.
+
+**Reliability fixes this rests on.** Bedrock retries in one layer only (the SDK's own retries are
+off, `maxAttempts: 1`; the loop's backoff stays), so a throttled call is ≤ 3 attempts, not 9.
+Providers keep the raw stop reason: a refusal / content filter / guardrail is reported as such and
+not nudged, malformed output is retried and never executed, and a context overflow halts with a
+clear reason instead of passing as an empty "end". Telegram 429 retries count as attempts and their
+total wait is capped. The MCP breaker counts logical calls and has a real half-open probe (§08d).
+
+**Cost and context.** Prompt caching marks the system prompt, the tool block and the conversation
+prefix as cache points (Bedrock `cachePoint`, Anthropic `cache_control`), so iterations 2+ of a turn
+re-read that prefix at the cache rate; a model that rejects cache points is retried without them
+and remembered. Cost includes cache reads/writes. History is bounded by a token budget (16k, ≤ 80
+lines) instead of 40 rows, and each prior line says which channel it came from.
+
+**Evaluation** (`src/evals/`, run on change — not on every commit):
+- `npm run eval:recall` — a must-recall set labelled by episode id (private, under
+  `workspace/evals/recall.json`), scored deterministically (recall@k, MRR, hit@k, nDCG@k) on a copy
+  of `memory.db`, three ways: hybrid, FTS5 only, vectors only; `--summaries extractive` adds a run
+  with offline summaries. First run (2026-10-31, 28 scored cases, k=5): **FTS5 only hit@5 0.93 /
+  MRR 0.71 vs hybrid 0.75 / 0.50 vs hashing vectors only 0.57 / 0.43**; LLM summaries beat
+  extractive (hybrid hit@5 0.75 vs 0.61). The offline hashing vectors subtract from BM25 on real
+  history; `ALIL_RETRIEVAL=lexical` (or `openMemory({ retrieval })`) selects FTS-only ranking.
+- `npm run eval:tasks` — golden tasks drawn from real failures (`evals/tasks.json`), each run in a
+  throwaway sandbox through the real harness and model, graded on end state and trajectory, reported
+  as pass^1 and pass^k (all k tries succeed — reliability, not luck).
+
 ## 11 · Implementation status & code map
 
 **As of 2026-09-01.** This section is the single as-built view; update it when a slice lands.
@@ -769,6 +855,9 @@ Legend: ✅ built · 🟡 partial · ⬜ planned.
 | Core loop + single policy boundary (six-stage pipeline) | ✅ | `src/runtime/loop.ts`, `src/policy/` (`boundary.ts`, `engine.ts`, `rules.ts`, `classifier.ts`, `provenance-check.ts`, `verdict.ts`, `hooks/`) |
 | Sandbox jail (lexical + realpath/symlink) | ✅ | `src/execution/sandbox.ts` |
 | Append-only, hash-chained audit ledger | ✅ | `src/gateway/audit-ledger.ts` |
+| Telemetry, turn ids, heartbeats, invariant alerts, readiness health (§10c) | ✅ | `src/telemetry/`, `src/app/observability.ts`, `scripts/metrics.ts` |
+| Reusable circuit breaker (closed/open/half-open) | ✅ | `src/reliability/circuit-breaker.ts` |
+| Offline evals: must-recall (recall@k/MRR/nDCG) and golden tasks (pass^k) | ✅ | `src/evals/`, `scripts/eval-recall.ts`, `scripts/eval-tasks.ts`, `evals/` |
 | HITL: approval binding + independent recompute | ✅ | `src/policy/approval/binding.ts` |
 | HITL: task-scoped expiring grants; deferred approvals | ✅ | `src/policy/approval/grants.ts` |
 | Memory tiers (canonical/episodic/procedural), recall, forget | ✅ | `src/memory/` (see [MEMORY.md](MEMORY.md) §12) |

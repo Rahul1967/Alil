@@ -33,21 +33,24 @@ export class AnthropicProvider implements Provider {
       throw new ProviderError("ANTHROPIC_API_KEY is not set", false);
     }
 
+    // Cache breakpoints (3 of the 4 allowed): tools, system, and the last message block.
+    const cache = inv.cache === true && spec.capabilities.promptCache === true;
+    const ephemeral = cache ? { cache_control: { type: "ephemeral" } } : {};
+    const messages = toAnthropicMessages(inv, spec.capabilities.vision);
+    if (cache) markLastBlock(messages);
+    const tools = (inv.tools ?? []).map((t, i, all) => ({
+      name: sanitizeToolName(t.name),
+      description: t.description,
+      input_schema: t.parameters,
+      ...(i === all.length - 1 ? ephemeral : {}),
+    }));
     const body = {
       model: inv.model,
       max_tokens: inv.maxOutputTokens ?? spec.maxOutputTokens,
-      ...(inv.system ? { system: inv.system } : {}),
+      ...(inv.system ? { system: cache ? [{ type: "text", text: inv.system, ...ephemeral }] : inv.system } : {}),
       ...(inv.temperature !== undefined ? { temperature: inv.temperature } : {}),
-      messages: toAnthropicMessages(inv, spec.capabilities.vision),
-      ...(inv.tools && inv.tools.length > 0
-        ? {
-            tools: inv.tools.map((t) => ({
-              name: sanitizeToolName(t.name),
-              description: t.description,
-              input_schema: t.parameters,
-            })),
-          }
-        : {}),
+      messages,
+      ...(tools.length > 0 ? { tools } : {}),
       // TODO(streaming): set stream:true and consume SSE once the loop supports partials.
     };
 
@@ -88,7 +91,8 @@ export class AnthropicProvider implements Provider {
     }
 
     const json = (await res.json()) as AnthropicResponse;
-    return mapResponse(json, buildNameMap(inv.tools));
+    const requestId = res.headers?.get?.("request-id"); // tolerate minimal fetch stubs
+    return { ...mapResponse(json, buildNameMap(inv.tools)), ...(requestId ? { requestId } : {}) };
   }
 }
 
@@ -136,6 +140,16 @@ function toAnthropicMessages(inv: ModelInvocation, vision: boolean): AnthropicMs
   });
 }
 
+/** Put a cache breakpoint on the final content block of the last message (string → block). */
+function markLastBlock(messages: AnthropicMsg[]): void {
+  const last = messages.at(-1);
+  if (!last) return;
+  if (typeof last.content === "string") last.content = [{ type: "text", text: last.content }];
+  const blocks = last.content as Array<Record<string, unknown>>;
+  const end = blocks.at(-1);
+  if (end) end["cache_control"] = { type: "ephemeral" };
+}
+
 // ─── response mapping ───
 interface AnthropicResponse {
   content?: Array<
@@ -143,7 +157,7 @@ interface AnthropicResponse {
     | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
   >;
   stop_reason?: string;
-  usage?: { input_tokens?: number; output_tokens?: number };
+  usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
 }
 
 function mapResponse(json: AnthropicResponse, names: Map<string, string>): ModelResponse {
@@ -162,18 +176,22 @@ function mapResponse(json: AnthropicResponse, names: Map<string, string>): Model
     ...(text !== undefined ? { text } : {}),
     toolCalls,
     stopReason: mapStop(json.stop_reason, toolCalls.length > 0),
+    ...(json.stop_reason ? { rawStopReason: json.stop_reason } : {}),
     usage: {
       inputTokens: json.usage?.input_tokens ?? 0,
       outputTokens: json.usage?.output_tokens ?? 0,
+      ...(json.usage?.cache_read_input_tokens !== undefined ? { cacheReadTokens: json.usage.cache_read_input_tokens } : {}),
+      ...(json.usage?.cache_creation_input_tokens !== undefined ? { cacheWriteTokens: json.usage.cache_creation_input_tokens } : {}),
     },
   };
 }
 
 function mapStop(reason: string | undefined, hasTools: boolean): StopReason {
+  if (reason === "refusal") return "refusal";
+  if (reason === "model_context_window_exceeded") return "context_overflow";
   if (reason === "tool_use" || hasTools) return "tool_use";
   if (reason === "max_tokens") return "max_tokens";
-  if (reason === "end_turn" || reason === "stop_sequence") return "end";
-  return "end";
+  return "end"; // end_turn, stop_sequence, pause_turn (no server tools are used)
 }
 
 async function safeText(res: Response): Promise<string> {

@@ -9,6 +9,8 @@
  * button press — used for HITL approve/reject). Plain sendMessage + sendDocument cover replies and
  * files; the 2026 rich-message features can layer on later.
  */
+import { reportError } from "../telemetry/index.ts";
+
 export interface TelegramUser {
   id: number;
   is_bot?: boolean;
@@ -100,6 +102,22 @@ export interface TelegramClientOptions {
   token: string;
   apiBase?: string;
   fetchImpl?: typeof fetch;
+  /** Most total time one call may spend waiting out 429 `retry_after`s. Default 60 s. */
+  maxRateLimitWaitMs?: number;
+  /** Injectable for tests. */
+  sleepImpl?: (ms: number) => Promise<void>;
+}
+
+/** A call that gave up after Telegram kept rate-limiting it past the wait cap. */
+export class TelegramRateLimitError extends Error {
+  readonly method: string;
+  readonly waitedMs: number;
+  constructor(method: string, waitedMs: number, retryAfterS: number) {
+    super(`telegram ${method} rate-limited: gave up after waiting ${Math.round(waitedMs / 1000)}s (next retry_after ${retryAfterS}s)`);
+    this.name = "TelegramRateLimitError";
+    this.method = method;
+    this.waitedMs = waitedMs;
+  }
 }
 
 interface ApiResponse<T> {
@@ -113,6 +131,8 @@ export class TelegramClient {
   readonly #base: string;
   readonly #fileBase: string;
   readonly #fetch: typeof fetch;
+  readonly #maxRateLimitWaitMs: number;
+  readonly #sleep: (ms: number) => Promise<void>;
 
   constructor(opts: TelegramClientOptions) {
     if (!opts.token) throw new Error("TelegramClient requires a bot token");
@@ -121,11 +141,14 @@ export class TelegramClient {
     // Downloads use a distinct path: <base>/file/bot<token>/<file_path>.
     this.#fileBase = `${base}/file/bot${opts.token}`;
     this.#fetch = opts.fetchImpl ?? fetch;
+    this.#maxRateLimitWaitMs = opts.maxRateLimitWaitMs ?? 60_000;
+    this.#sleep = opts.sleepImpl ?? sleep;
   }
 
   /** POST a JSON Bot API method. Retries on 429 (retry_after) and on transient network errors
-   * (the connection to api.telegram.org can be slow/flaky) with exponential backoff. */
-  async call<T>(method: string, body: Record<string, unknown>, signal?: AbortSignal, attempt = 1): Promise<T> {
+   * (the connection to api.telegram.org can be slow/flaky) with exponential backoff. Every retry
+   * counts toward MAX_ATTEMPTS, and 429 waits are capped in total, so a call always ends. */
+  async call<T>(method: string, body: Record<string, unknown>, signal?: AbortSignal, attempt = 1, waitedMs = 0): Promise<T> {
     const MAX_ATTEMPTS = 4;
     let res: Response;
     try {
@@ -138,16 +161,20 @@ export class TelegramClient {
     } catch (e) {
       // Network failure (ETIMEDOUT / fetch failed): retry unless aborted or out of attempts.
       if (isTransientNetworkError(e) && attempt < MAX_ATTEMPTS && !signal?.aborted) {
-        await sleep(Math.min(1000 * 2 ** (attempt - 1), 8000));
-        return this.call<T>(method, body, signal, attempt + 1);
+        await this.#sleep(Math.min(1000 * 2 ** (attempt - 1), 8000));
+        return this.call<T>(method, body, signal, attempt + 1, waitedMs);
       }
       throw e;
     }
     const json = (await res.json()) as ApiResponse<T>;
     if (!json.ok) {
       if (res.status === 429 && json.parameters?.retry_after) {
-        await sleep(json.parameters.retry_after * 1000);
-        return this.call<T>(method, body, signal, attempt);
+        const waitMs = json.parameters.retry_after * 1000;
+        if (attempt >= MAX_ATTEMPTS || waitedMs + waitMs > this.#maxRateLimitWaitMs || signal?.aborted) {
+          throw new TelegramRateLimitError(method, waitedMs, json.parameters.retry_after);
+        }
+        await this.#sleep(waitMs);
+        return this.call<T>(method, body, signal, attempt + 1, waitedMs + waitMs);
       }
       throw new Error(`telegram ${method} failed: ${json.description ?? res.status}`);
     }
@@ -249,6 +276,8 @@ export interface TelegramLoopDeps {
   saveOffset: (offset: number) => void;
   signal?: AbortSignal;
   pollTimeout?: number; // seconds, default 50
+  /** Called after every successful long-poll (a heartbeat: a wedged poller stops calling it). */
+  onPoll?: () => void;
 }
 
 /**
@@ -270,8 +299,10 @@ export async function runTelegramLoop(deps: TelegramLoopDeps): Promise<void> {
     try {
       updates = await deps.client.getUpdates(offset, timeout, pollSignal);
       backoff = 1000;
-    } catch {
+      try { deps.onPoll?.(); } catch { /* heartbeat is best effort */ }
+    } catch (err) {
       if (deps.signal?.aborted) break;
+      reportError("telegram.poll", err, { backoffMs: backoff });
       await sleep(backoff);
       backoff = Math.min(backoff * 2, 30_000);
       continue;
@@ -289,7 +320,7 @@ export async function runTelegramLoop(deps: TelegramLoopDeps): Promise<void> {
       } else if (msg && (msg.text || msg.document || msg.photo || msg.caption)) {
         if (msg.from?.id === deps.authorizedUserId) {
           // Fire-and-forget so the poller keeps running (a turn may await an approval tap).
-          void Promise.resolve(deps.onMessage(msg)).catch((e) => console.error("[tg] turn error:", e));
+          void Promise.resolve(deps.onMessage(msg)).catch((e) => { reportError("telegram.dispatch", e); console.error("[tg] turn error:", e); });
         } else {
           console.error(`[tg] ignored message from unauthorized user ${msg.from?.id}`);
         }

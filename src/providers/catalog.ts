@@ -13,7 +13,7 @@ export const CATALOG: readonly ModelSpec[] = [
     contextWindow: 200_000,
     maxOutputTokens: 64_000,
     pricing: { inputPerMTok: 10, outputPerMTok: 50 },
-    capabilities: { tools: true, streaming: true, vision: true },
+    capabilities: { tools: true, streaming: true, vision: true, promptCache: true },
   },
   {
     id: "claude-opus-4-8",
@@ -22,7 +22,7 @@ export const CATALOG: readonly ModelSpec[] = [
     contextWindow: 200_000,
     maxOutputTokens: 32_000,
     pricing: { inputPerMTok: 5, outputPerMTok: 25 },
-    capabilities: { tools: true, streaming: true, vision: true },
+    capabilities: { tools: true, streaming: true, vision: true, promptCache: true },
   },
   {
     id: "claude-haiku-4-5-20251001",
@@ -31,7 +31,7 @@ export const CATALOG: readonly ModelSpec[] = [
     contextWindow: 200_000,
     maxOutputTokens: 32_000,
     pricing: { inputPerMTok: 1, outputPerMTok: 5 },
-    capabilities: { tools: true, streaming: true, vision: false },
+    capabilities: { tools: true, streaming: true, vision: false, promptCache: true },
   },
 
   // ─── Bedrock (Converse API, IAM auth) ───
@@ -43,7 +43,7 @@ export const CATALOG: readonly ModelSpec[] = [
     contextWindow: 200_000,
     maxOutputTokens: 8_192,
     pricing: { inputPerMTok: 2, outputPerMTok: 10 },
-    capabilities: { tools: true, streaming: true, vision: true },
+    capabilities: { tools: true, streaming: true, vision: true, promptCache: true },
   },
 ];
 

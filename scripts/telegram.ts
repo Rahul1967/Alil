@@ -52,13 +52,13 @@ async function askOperator(text: string): Promise<ApprovalDecision> {
   try {
     prompt = await client.sendMessage(allowedUserId, text, { replyMarkup });
   } catch {
-    return { approved: false, reason: "couldn't reach Telegram to ask for approval" };
+    return { approved: false, outcome: "unreachable", reason: "couldn't reach Telegram to ask for approval" };
   }
   return await new Promise<ApprovalDecision>((resolve) => {
     const timer = setTimeout(() => {
       if (pendingApprovals.delete(tok)) {
         void client.editMessageText(allowedUserId, prompt.message_id, `${text}\n\n⏳ timed out — rejected`);
-        resolve({ approved: false, reason: "approval timed out" });
+        resolve({ approved: false, outcome: "timeout", reason: "approval timed out" });
       }
     }, APPROVAL_TIMEOUT_MS);
     pendingApprovals.set(tok, (decision) => {
@@ -87,7 +87,7 @@ async function onCallback(cbq: TelegramCallbackQuery): Promise<void> {
   const resolver = tok ? pendingApprovals.get(tok) : undefined;
   if (resolver && tok) {
     pendingApprovals.delete(tok);
-    resolver({ approved: kind === "a", ...(kind === "a" ? {} : { reason: "rejected via Telegram" }) });
+    resolver({ approved: kind === "a", ...(kind === "a" ? {} : { outcome: "declined" as const, reason: "rejected via Telegram" }) });
     await client.answerCallbackQuery(cbq.id, kind === "a" ? "Approved ✅" : "Rejected ❌");
   } else {
     await client.answerCallbackQuery(cbq.id, "This approval expired — send the request again.");
@@ -99,6 +99,7 @@ const binding: ChannelBinding = {
   channel: CHANNEL,
   approvals,
   notify: async (text, meta) => {
+    if (meta.source === "alert") return void (await client.sendMessage(allowedUserId, `[Alil health] ${text}`));
     const tag = meta.source === "scheduled" ? `⏰ ${meta.label ?? ""}` : `🔔 (${meta.label ?? ""})`;
     await client.sendMessage(allowedUserId, `${tag}\n\n${text}`);
   },
@@ -208,6 +209,6 @@ async function verifyToken(): Promise<void> {
 
 await verifyToken();
 alil.start();
-await runTelegramLoop({ client, authorizedUserId: allowedUserId, onMessage, onCallback, loadOffset, saveOffset, signal: controller.signal });
+await runTelegramLoop({ client, authorizedUserId: allowedUserId, onMessage, onCallback, loadOffset, saveOffset, signal: controller.signal, onPoll: () => alil.heartbeat("telegram.poll") });
 alil.stop();
 console.log("stopped.");

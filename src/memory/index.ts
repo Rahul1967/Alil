@@ -3,6 +3,7 @@
  * `openMemory()` is the deployable seam: one call wires the portable SQLite file, the
  * embedder, the timeline, the store, and the brain-facing recall port.
  */
+import type { RetrievalMode } from "./store.ts";
 import { openMemoryDb } from "./db.ts";
 import { SqliteTimeline } from "./timeline.ts";
 import { SqliteMemoryStore } from "./store.ts";
@@ -31,6 +32,8 @@ export interface OpenMemoryOptions {
   embedder?: Embedder;
   /** Recall tier sizes. */
   recall?: { k?: number; episodes?: number };
+  /** Rankers fused by tier searches (default hybrid; ALIL_RETRIEVAL overrides). For evaluation. */
+  retrieval?: RetrievalMode;
 }
 
 export function openMemory(opts: OpenMemoryOptions = {}): MemorySystem {
@@ -42,7 +45,9 @@ export function openMemory(opts: OpenMemoryOptions = {}): MemorySystem {
   const path = opts.path ?? process.env.ALIL_DB ?? "workspace/memory.db";
   const db = openMemoryDb(path, dim);
   const timeline = new SqliteTimeline(db);
-  const store = new SqliteMemoryStore(db, embedder);
+  const envMode = process.env.ALIL_RETRIEVAL;
+  const retrieval = opts.retrieval ?? (envMode === "lexical" || envMode === "vector" || envMode === "hybrid" ? envMode : "hybrid");
+  const store = new SqliteMemoryStore(db, embedder, { retrieval });
   const prospective = new ProspectiveStore(db);
   const recall = new MemoryRecall(store, opts.recall);
   return { db, timeline, store, prospective, recall, close: () => db.close() };
@@ -51,6 +56,7 @@ export function openMemory(opts: OpenMemoryOptions = {}): MemorySystem {
 export { openMemoryDb } from "./db.ts";
 export { SqliteTimeline } from "./timeline.ts";
 export { SqliteMemoryStore } from "./store.ts";
+export type { RetrievalMode } from "./store.ts";
 export { ProspectiveStore } from "./prospective.ts";
 export { HashingEmbedder, BedrockTitanEmbedder } from "./embedder.ts";
 export { MemoryRecall } from "./recall-port.ts";

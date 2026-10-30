@@ -6,7 +6,7 @@ import type {
   SkillRef,
   TranscriptLine,
 } from "../core/types.ts";
-import type { ToolSpec } from "../providers/types.ts";
+import type { ToolSpec, StopReason, ModelUsage } from "../providers/types.ts";
 
 // ─── Brain I/O ───
 export interface BrainInput {
@@ -47,6 +47,17 @@ export interface BrainTurn {
   stopReason: BrainStopReason;
   haltReason?: string; // set when stopReason === "guard_halt" or "error"
   iterations: number;
+  /** Totals across every model call this turn (including retried attempts that returned). */
+  usage?: TurnUsage;
+}
+
+export interface TurnUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: number;
+  modelCalls: number;
 }
 
 export interface BrainConfig {
@@ -56,6 +67,8 @@ export interface BrainConfig {
   /** Retries for RETRYABLE provider errors (throttling, 5xx, network), exponential backoff with
    * jitter. Default { maxRetries: 2, baseDelayMs: 500 }. Non-retryable errors fail at once. */
   retry?: ProviderRetry;
+  /** Prompt caching for models that support it. Default on. */
+  promptCache?: boolean;
 }
 
 export interface ProviderRetry {
@@ -146,10 +159,49 @@ export interface ToolCatalogPort {
  * trace; the audit ledger will consume the same events.
  */
 export interface BrainObserver {
-  onModelTurn?(e: { iteration: number; text?: string; toolCalls: number }): void;
-  onToolCall?(e: { tool: string; args: Record<string, unknown> }): void;
-  onToolResult?(e: { tool: string; outcome: ToolResult["outcome"]; summary: string; data?: unknown }): void;
+  /** One per provider ATTEMPT (a retried call reports each try), success or failure. */
+  onModelCall?(e: ModelCallEvent): void;
+  onModelTurn?(e: { iteration: number; text?: string; toolCalls: number; stopReason?: StopReason }): void;
+  onToolCall?(e: { tool: string; args: Record<string, unknown>; callId?: string }): void;
+  onToolResult?(e: ToolResultEvent): void;
   onHalt?(e: { reason: string; kind: "guard" | "error" | "aborted" }): void;
+}
+
+/** A single provider attempt, as timed by the loop. */
+export interface ModelCallEvent {
+  iteration: number;
+  /** 1-based attempt number within this iteration's retry loop. */
+  attempt: number;
+  model: string;
+  /** Wall-clock time of the attempt, measured by the loop. */
+  durationMs: number;
+  outcome: "ok" | "error";
+  stopReason?: StopReason;
+  rawStopReason?: string;
+  usage?: ModelUsage;
+  toolCalls?: number;
+  /** Provider-reported server latency, when given. */
+  latencyMs?: number;
+  requestId?: string;
+  errorName?: string;
+  status?: number;
+  retryable?: boolean;
+  /** Error message (bounded). */
+  error?: string;
+}
+
+export interface ToolResultEvent {
+  tool: string;
+  outcome: ToolResult["outcome"];
+  summary: string;
+  data?: unknown;
+  callId?: string;
+  /** Wall-clock from submit to result: policy + any approval wait + execution. */
+  durationMs?: number;
+  /** Time spent waiting on the operator, included in durationMs. */
+  approvalWaitMs?: number;
+  /** The action carried taint from earlier untrusted content. */
+  tainted?: boolean;
 }
 
 /** A monotonic clock, injectable so guard tests are deterministic. */

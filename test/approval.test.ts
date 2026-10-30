@@ -41,7 +41,7 @@ class FakeClock implements Clock {
 }
 
 const autoApprove: ApprovalPort = { async request() { return { approved: true }; } };
-const autoDeny: ApprovalPort = { async request() { return { approved: false, reason: "no" }; } };
+const autoDeny: ApprovalPort = { async request() { return { approved: false, outcome: "declined", reason: "no" }; } };
 
 // ─── GrantStore ───
 test("grant matches, consumes, expires", () => {

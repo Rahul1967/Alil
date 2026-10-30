@@ -47,7 +47,7 @@ function askInPage(q: Omit<PendingApproval, "resolve">): Promise<ApprovalDecisio
       clearTimeout(timer);
       resolve(d);
     };
-    const timer = setTimeout(() => done({ approved: false, reason: "no response in the browser (timed out)" }), APPROVAL_TIMEOUT_MS);
+    const timer = setTimeout(() => done({ approved: false, outcome: "timeout", reason: "no response in the browser (timed out)" }), APPROVAL_TIMEOUT_MS);
     pendingApprovals.set(q.id, { ...q, resolve: done });
   });
 }
@@ -150,8 +150,14 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://localhost:${PORT}`);
   const json = (code: number, body: unknown) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
 
+  // Readiness, not just "the listener is up": memory, ledger chain, background-loop heartbeats
+  // (including the Telegram process's), queue, MCP. 503 when anything is broken, so a probe can tell.
   if (req.method === "GET" && url.pathname === "/api/health") {
-    return json(200, { ok: true, model: modelId, memory: alil.memoryOn ? "on" : "off", lens: alil.lenses.activeId() });
+    const health = await alil.health();
+    return json(health.ok ? 200 : 503, {
+      ok: health.ok, model: modelId, memory: alil.memoryOn ? "on" : "off", lens: alil.lenses.activeId(),
+      failing: health.failing, pendingApprovals: pendingApprovals.size, checks: health.checks,
+    });
   }
 
   // ── Lenses: list + switch. Switching is an operator action (this page), never a tool. ──
@@ -356,7 +362,7 @@ const server = createServer(async (req, res) => {
       const body = JSON.parse((await readBody(req)) || "{}") as { id?: string; approved?: boolean };
       const pending = body.id ? pendingApprovals.get(body.id) : undefined;
       if (!pending) return json(404, { error: "no such pending approval (it may have expired)" });
-      pending.resolve(body.approved ? { approved: true } : { approved: false, reason: "declined in the browser" });
+      pending.resolve(body.approved ? { approved: true } : { approved: false, outcome: "declined", reason: "declined in the browser" });
       return json(200, { ok: true });
     } catch (e) {
       return json(500, { error: (e as Error).message });

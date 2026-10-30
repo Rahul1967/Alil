@@ -21,6 +21,16 @@ import { ProviderError } from "./types.ts";
 import { sanitizeToolName, buildNameMap, canonicalName } from "./tool-names.ts";
 
 /**
+ * Client settings. `maxAttempts: 1` turns off the SDK's own retries: the agent loop already retries
+ * retryable errors with backoff, and two layers multiply (3 SDK × 3 loop = 9 attempts per call).
+ * Credentials are intentionally omitted: the SDK default chain resolves
+ * AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN from env.
+ */
+export function bedrockClientConfig(): { region: string; maxAttempts: number } {
+  return { region: process.env.AWS_REGION ?? "us-east-1", maxAttempts: 1 };
+}
+
+/**
  * AWS Bedrock provider — uses the unified Converse API via @aws-sdk/client-bedrock-runtime.
  * Auth is IAM (access key + secret): the SDK's default credential provider chain reads
  * AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (+ AWS_SESSION_TOKEN if present) and signs
@@ -31,13 +41,7 @@ export class BedrockProvider implements Provider {
   readonly #client: BedrockRuntimeClient;
 
   constructor(client?: BedrockRuntimeClient) {
-    this.#client =
-      client ??
-      new BedrockRuntimeClient({
-        region: process.env.AWS_REGION ?? "us-east-1",
-        // Credentials intentionally omitted: the SDK default chain resolves
-        // AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN from env.
-      });
+    this.#client = client ?? new BedrockRuntimeClient(bedrockClientConfig());
   }
 
   supports(modelId: string): boolean {
@@ -45,17 +49,42 @@ export class BedrockProvider implements Provider {
     return modelId.length > 0;
   }
 
+  /** Models that rejected cache points once — sent without them from then on (this process). */
+  readonly #noCache = new Set<string>();
+
   async invoke(inv: ModelInvocation, spec: ModelSpec, signal?: AbortSignal): Promise<ModelResponse> {
+    const cache = inv.cache === true && spec.capabilities.promptCache === true && !this.#noCache.has(inv.model);
+    try {
+      return await this.#send(inv, spec, cache, signal);
+    } catch (err) {
+      // Caching is an optimisation: if Bedrock refuses the cache points for this model, retry
+      // once without them and stop sending them, rather than failing the operator's turn.
+      if (cache && isCacheRejection(err)) {
+        this.#noCache.add(inv.model);
+        return this.#send(inv, spec, false, signal);
+      }
+      throw err;
+    }
+  }
+
+  async #send(inv: ModelInvocation, spec: ModelSpec, cache: boolean, signal?: AbortSignal): Promise<ModelResponse> {
+    // Cache points: system, tools, and the end of the conversation so far. Each loop iteration
+    // re-sends the whole prefix, so the next call reads it from cache (Bedrock ignores a point
+    // below the model's minimum cacheable length, so short prompts are unaffected).
+    const point = { cachePoint: { type: "default" as const } };
+    const messages = toBedrockMessages(inv, spec.capabilities.vision);
+    const last = messages.at(-1);
+    if (cache && last?.content) last.content.push(point);
     const command = new ConverseCommand({
       modelId: inv.model,
-      messages: toBedrockMessages(inv, spec.capabilities.vision),
-      ...(inv.system ? { system: [{ text: inv.system }] } : {}),
+      messages,
+      ...(inv.system ? { system: [{ text: inv.system }, ...(cache ? [point] : [])] } : {}),
       inferenceConfig: {
         maxTokens: inv.maxOutputTokens ?? spec.maxOutputTokens,
         ...(inv.temperature !== undefined ? { temperature: inv.temperature } : {}),
       },
       ...(inv.tools && inv.tools.length > 0
-        ? { toolConfig: { tools: toBedrockTools(inv) } }
+        ? { toolConfig: { tools: [...toBedrockTools(inv), ...(cache ? [point] : [])] } }
         : {}),
     });
 
@@ -67,6 +96,11 @@ export class BedrockProvider implements Provider {
     }
     return mapResponse(out, buildNameMap(inv.tools));
   }
+}
+
+/** A ValidationException that names caching — the model/region doesn't take cache points. */
+function isCacheRejection(err: unknown): boolean {
+  return err instanceof ProviderError && err.errorName === "ValidationException" && /cach/i.test(err.message);
 }
 
 // ─── request mapping ───
@@ -155,17 +189,26 @@ function mapResponse(out: ConverseCommandOutput, names: Map<string, string>): Mo
     ...(text !== undefined ? { text } : {}),
     toolCalls,
     stopReason: mapStop(out.stopReason, toolCalls.length > 0),
+    ...(out.stopReason ? { rawStopReason: out.stopReason } : {}),
     usage: {
       inputTokens: out.usage?.inputTokens ?? 0,
       outputTokens: out.usage?.outputTokens ?? 0,
+      ...(out.usage?.cacheReadInputTokens !== undefined ? { cacheReadTokens: out.usage.cacheReadInputTokens } : {}),
+      ...(out.usage?.cacheWriteInputTokens !== undefined ? { cacheWriteTokens: out.usage.cacheWriteInputTokens } : {}),
     },
+    ...(out.metrics?.latencyMs !== undefined ? { latencyMs: out.metrics.latencyMs } : {}),
+    ...(out.$metadata?.requestId ? { requestId: out.$metadata.requestId } : {}),
   };
 }
 
 function mapStop(reason: string | undefined, hasTools: boolean): StopReason {
+  // Failure modes first: a malformed tool use still carries (bogus) tool blocks.
+  if (reason === "malformed_model_output" || reason === "malformed_tool_use") return "malformed";
+  if (reason === "model_context_window_exceeded") return "context_overflow";
+  if (reason === "content_filtered" || reason === "guardrail_intervened") return "refusal";
   if (reason === "tool_use" || hasTools) return "tool_use";
   if (reason === "max_tokens") return "max_tokens";
-  return "end"; // end_turn, stop_sequence, content_filtered, guardrail_intervened
+  return "end"; // end_turn, stop_sequence
 }
 
 function classifyError(err: unknown): ProviderError {
@@ -174,7 +217,7 @@ function classifyError(err: unknown): ProviderError {
   const name = e.name ?? "";
   // Abort is caller-initiated cancellation — terminal for the turn, never retried.
   if (name === "AbortError" || name === "TimeoutError") {
-    return new ProviderError("bedrock request aborted", false, status);
+    return new ProviderError("bedrock request aborted", false, status, name);
   }
   const retryable =
     name === "ThrottlingException" ||
@@ -182,5 +225,5 @@ function classifyError(err: unknown): ProviderError {
     name === "ServiceUnavailableException" ||
     name === "InternalServerException" ||
     (status !== undefined && (status === 408 || status === 429 || status >= 500));
-  return new ProviderError(`bedrock ${name || "error"}: ${e.message ?? String(err)}`, retryable, status);
+  return new ProviderError(`bedrock ${name || "error"}: ${e.message ?? String(err)}`, retryable, status, name || undefined);
 }

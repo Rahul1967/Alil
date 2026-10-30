@@ -14,11 +14,16 @@ export interface ModelSpec {
   pricing: {
     inputPerMTok: number; // USD per 1M input tokens
     outputPerMTok: number; // USD per 1M output tokens
+    /** Prompt-cache rates; absent ⇒ Anthropic's defaults (read 0.1×, write 1.25× input). */
+    cacheReadPerMTok?: number;
+    cacheWritePerMTok?: number;
   };
   capabilities: {
     tools: boolean;
     streaming: boolean;
     vision: boolean;
+    /** Accepts prompt-cache breakpoints (Bedrock cachePoint / Anthropic cache_control). */
+    promptCache?: boolean;
   };
 }
 
@@ -85,6 +90,9 @@ export interface ModelInvocation {
   tools?: ToolSpec[];
   maxOutputTokens?: number;
   temperature?: number;
+  /** Mark the system prompt, tools and conversation prefix as cache points, when the model
+   * supports it. The loop sets this; a single-shot call (e.g. a summary) can leave it off. */
+  cache?: boolean;
 }
 
 export interface ModelToolCall {
@@ -93,24 +101,47 @@ export interface ModelToolCall {
   args: Record<string, unknown>;
 }
 
-export type StopReason = "end" | "tool_use" | "max_tokens" | "error";
+/**
+ * Why the model stopped, normalised across providers. Anything that is not a normal answer keeps
+ * its own value so it can't pass as "end": `refusal` (model refusal, content filter, guardrail),
+ * `context_overflow` (the request no longer fits), `malformed` (unparseable output or tool use).
+ * The provider's own wording is kept alongside in `ModelResponse.rawStopReason`.
+ */
+export type StopReason = "end" | "tool_use" | "max_tokens" | "error" | "refusal" | "context_overflow" | "malformed";
+
+export interface ModelUsage {
+  inputTokens: number;
+  outputTokens: number;
+  /** Prompt-cache tokens read / written this call (absent when the provider reports none). */
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+}
 
 export interface ModelResponse {
   text?: string;
   toolCalls: ModelToolCall[];
   stopReason: StopReason;
-  usage: { inputTokens: number; outputTokens: number };
+  /** The provider's stop reason verbatim (e.g. "guardrail_intervened"), for telemetry. */
+  rawStopReason?: string;
+  usage: ModelUsage;
+  /** Server-side latency the provider reported (Bedrock `metrics.latencyMs`). */
+  latencyMs?: number;
+  /** Provider request id, for correlating with provider-side logs. */
+  requestId?: string;
 }
 
 /** Raised by providers; `retryable` feeds the retry/backoff layer (BEST_PRACTICES §8). */
 export class ProviderError extends Error {
   readonly retryable: boolean;
   readonly status?: number;
-  constructor(message: string, retryable: boolean, status?: number) {
+  /** The provider's error class (e.g. "ThrottlingException"), for telemetry. */
+  readonly errorName?: string;
+  constructor(message: string, retryable: boolean, status?: number, errorName?: string) {
     super(message);
     this.name = "ProviderError";
     this.retryable = retryable;
     this.status = status;
+    if (errorName) this.errorName = errorName;
   }
 }
 
@@ -123,4 +154,16 @@ export interface Provider {
    * the turn rather than backing off and retrying.
    */
   invoke(inv: ModelInvocation, spec: ModelSpec, signal?: AbortSignal): Promise<ModelResponse>;
+}
+
+/** USD cost of one call's usage at a model's pricing, cache tokens included. */
+export function costOf(usage: ModelUsage, pricing: ModelSpec["pricing"]): number {
+  const read = pricing.cacheReadPerMTok ?? pricing.inputPerMTok * 0.1;
+  const write = pricing.cacheWritePerMTok ?? pricing.inputPerMTok * 1.25;
+  return (
+    usage.inputTokens * pricing.inputPerMTok +
+    usage.outputTokens * pricing.outputPerMTok +
+    (usage.cacheReadTokens ?? 0) * read +
+    (usage.cacheWriteTokens ?? 0) * write
+  ) / 1_000_000;
 }

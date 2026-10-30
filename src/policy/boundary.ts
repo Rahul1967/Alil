@@ -41,6 +41,9 @@ export interface BoundaryDeps {
   workspaceRoot?: string;
   /** Optional: the active lens id, recorded on every decision (attribution — never a policy input). */
   lensId?: () => string | null;
+  /** Optional: the current turn's id, recorded on every decision so the ledger joins to the
+   * timeline and telemetry. Attribution only — never part of a binding or a policy input. */
+  turnId?: () => string | undefined;
 }
 
 /**
@@ -129,7 +132,6 @@ export class PolicyBoundary implements ActionSink {
     const binding = captureBinding(action, this.#deps.workspaceRoot);
     let approvalDecision;
     const waitStart = Date.now();
-    const waited = (r: ToolResult): ToolResult => ({ ...r, approvalWaitMs: Date.now() - waitStart });
     try {
       approvalDecision = await approvals.request({
         id: `apr_${this.#nonce}_${++this.#seq}`,
@@ -141,14 +143,20 @@ export class PolicyBoundary implements ActionSink {
       });
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
-      this.#record(action, decision, decidedBy, reason, "denied:approval-error", { error: detail });
-      return waited(denied(action.id, `approval error (fail-closed): ${detail}`));
+      const approvalWaitMs = Date.now() - waitStart;
+      this.#record(action, decision, decidedBy, reason, "denied:approval-error", { by: "harness", error: detail, approvalWaitMs });
+      return { ...denied(action.id, `approval error (fail-closed): ${detail}`), approvalWaitMs };
     }
     const approvalWaitMs = Date.now() - waitStart;
 
     if (!approvalDecision.approved) {
-      this.#record(action, decision, decidedBy, reason, "declined", { by: "operator" });
-      return { ...denied(action.id, `declined by operator${approvalDecision.reason ? `: ${approvalDecision.reason}` : ""}`), approvalWaitMs };
+      const { resolution, by, summary } = notApproved(approvalDecision);
+      this.#record(action, decision, decidedBy, reason, resolution, {
+        by,
+        approvalWaitMs,
+        ...(approvalDecision.reason ? { detail: approvalDecision.reason.slice(0, 200) } : {}),
+      });
+      return { ...denied(action.id, summary), approvalWaitMs };
     }
 
     // Don't mint a standing grant for non-grantable actions (execute / high-risk) — it would
@@ -157,11 +165,13 @@ export class PolicyBoundary implements ActionSink {
 
     // TOCTOU: the action must not have drifted since approval.
     if (!verifyBinding(binding, action, this.#deps.workspaceRoot)) {
-      this.#record(action, decision, decidedBy, reason, "denied:binding-mismatch");
+      this.#record(action, decision, decidedBy, reason, "denied:binding-mismatch", { by: "operator", approvalWaitMs });
       return { ...denied(action.id, "action changed after approval (binding mismatch)"), approvalWaitMs };
     }
 
     this.#record(action, decision, decidedBy, reason, "approved", {
+      by: "operator",
+      approvalWaitMs,
       ...(approvalDecision.scope && grants && grantable ? { grantMinted: true } : {}),
     });
     return { ...(await this.#execute(action)), approvalWaitMs };
@@ -185,6 +195,7 @@ export class PolicyBoundary implements ActionSink {
       argsPreview: JSON.stringify(action.args).slice(0, 200),
       actionId: action.id,
       ...(this.#deps.lensId?.() ? { lens: this.#deps.lensId() } : {}),
+      ...(this.#deps.turnId?.() ? { turnId: this.#deps.turnId() } : {}),
       ...extra,
     });
   }
@@ -198,4 +209,19 @@ export class PolicyBoundary implements ActionSink {
 
 function denied(actionId: string, summary: string): ToolResult {
   return { actionId, outcome: "denied", summary };
+}
+
+/**
+ * Map a non-approval to its ledger resolution and actor. Only an explicit `declined` names the
+ * operator; a timeout or unreachable channel is the harness failing closed, and a port that says
+ * nothing is `unknown` — the record must never claim a human acted when none did.
+ */
+function notApproved(d: { outcome?: string; reason?: string }): { resolution: string; by: string; summary: string } {
+  const why = d.reason ? `: ${d.reason}` : "";
+  switch (d.outcome) {
+    case "timeout": return { resolution: "timeout", by: "harness", summary: `approval timed out — not run${why}` };
+    case "unreachable": return { resolution: "no-channel", by: "harness", summary: `approval channel unreachable — not run${why}` };
+    case "declined": return { resolution: "declined", by: "operator", summary: `declined by operator${why}` };
+    default: return { resolution: "declined", by: "unknown", summary: `not approved${why}` };
+  }
 }

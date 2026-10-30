@@ -85,6 +85,7 @@ export class Brain {
         stopReason: "aborted",
         haltReason: "aborted by caller",
         iterations: guards.iterations,
+        usage: guards.usage,
       };
     };
 
@@ -132,6 +133,7 @@ export class Brain {
           stopReason: "guard_halt",
           haltReason: gate.reason,
           iterations: guards.iterations,
+          usage: guards.usage,
         };
       }
 
@@ -141,6 +143,7 @@ export class Brain {
         messages,
         ...(tools.length > 0 ? { tools } : {}),
         ...(this.#config.temperature !== undefined ? { temperature: this.#config.temperature } : {}),
+        cache: this.#config.promptCache !== false,
       };
 
       let response;
@@ -148,10 +151,18 @@ export class Brain {
       let attempt = 0;
       let failure: string | null = null;
       for (;;) {
+        const t0 = this.#clock.now();
+        const iteration = guards.iterations;
         try {
           response = await provider.invoke(invocation, spec, signal);
-          break;
         } catch (err) {
+          observer?.onModelCall?.({
+            iteration, attempt: attempt + 1, model: modelId, durationMs: this.#clock.now() - t0, outcome: "error",
+            error: (err instanceof Error ? err.message : String(err)).slice(0, 300),
+            ...(err instanceof ProviderError
+              ? { retryable: err.retryable, ...(err.errorName ? { errorName: err.errorName } : {}), ...(err.status !== undefined ? { status: err.status } : {}) }
+              : {}),
+          });
           // A caller abort surfaces here as a (non-retryable) provider error; report it as an
           // aborted turn, not a provider failure.
           if (signal?.aborted) return aborted();
@@ -167,6 +178,33 @@ export class Brain {
           failure = attempt > 0 ? `${msg} (after ${attempt + 1} attempts)` : msg;
           break;
         }
+        observer?.onModelCall?.({
+          iteration, attempt: attempt + 1, model: modelId, durationMs: this.#clock.now() - t0, outcome: "ok",
+          stopReason: response.stopReason, usage: response.usage, toolCalls: response.toolCalls.length,
+          ...(response.rawStopReason ? { rawStopReason: response.rawStopReason } : {}),
+          ...(response.latencyMs !== undefined ? { latencyMs: response.latencyMs } : {}),
+          ...(response.requestId ? { requestId: response.requestId } : {}),
+        });
+        // Malformed output (unparseable text or tool use) is the model's transient failure: its
+        // tool calls can't be trusted, so it is never executed — retry within the same budget.
+        if (response.stopReason === "malformed") {
+          guards.recordUsage(response.usage, spec);
+          const raw = response.rawStopReason ?? "malformed";
+          response = undefined;
+          if (attempt < retry.maxRetries) {
+            const delay = retry.baseDelayMs * 2 ** attempt;
+            attempt++;
+            if (!(await sleepUnlessAborted(delay, signal))) return aborted();
+            continue;
+          }
+          failure = `model returned malformed output (${raw}) after ${attempt + 1} attempts`;
+        }
+        break;
+      }
+      if (failure === null && response?.stopReason === "context_overflow") {
+        guards.recordUsage(response.usage, spec);
+        failure = `context window exceeded (${response.rawStopReason ?? "context_overflow"}) — the conversation is too long for one call`;
+        response = undefined;
       }
       if (failure !== null || response === undefined) {
         const msg = failure ?? "no response";
@@ -178,6 +216,7 @@ export class Brain {
           stopReason: "error",
           haltReason: `provider error: ${msg}`,
           iterations: guards.iterations,
+          usage: guards.usage,
         };
       }
 
@@ -188,10 +227,15 @@ export class Brain {
       // for the actual reply; otherwise the operator gets "(no reply)", or mid-turn narration
       // passed off as the answer. Converse rejects an empty assistant message, so a placeholder
       // stands in for it.
+      // A refusal (model refusal, content filter, guardrail) is the answer: nudging it to "answer
+      // anyway" would fight the model's own safety call. A silent one still says why.
+      if (response.stopReason === "refusal" && !response.text?.trim()) {
+        response = { ...response, text: `(The model declined to answer: ${response.rawStopReason ?? "refusal"}.)` };
+      }
       const silent = response.toolCalls.length === 0 && !response.text?.trim();
       if (silent && !nudged) {
         nudged = true;
-        observer?.onModelTurn?.({ iteration: guards.iterations, toolCalls: 0 });
+        observer?.onModelTurn?.({ iteration: guards.iterations, toolCalls: 0, stopReason: response.stopReason });
         messages.push({ role: "assistant", content: "(no reply)" });
         messages.push({ role: "user", content: EMPTY_REPLY_NUDGE });
         continue;
@@ -206,6 +250,7 @@ export class Brain {
         iteration: guards.iterations,
         ...(response.text !== undefined ? { text: response.text } : {}),
         toolCalls: response.toolCalls.length,
+        stopReason: response.stopReason,
       });
 
       // Append the assistant turn (text and/or tool calls) to the conversation.
@@ -223,6 +268,7 @@ export class Brain {
           results,
           stopReason: "complete",
           iterations: guards.iterations,
+          usage: guards.usage,
         };
       }
 
@@ -238,12 +284,19 @@ export class Brain {
       for (const call of response.toolCalls) {
         const proposed: ProposedAction = { action: toActionContract(call, roundTaint) };
         proposedActions.push(proposed);
-        observer?.onToolCall?.({ tool: call.tool, args: call.args });
+        observer?.onToolCall?.({ tool: call.tool, args: call.args, callId: call.id });
+        const t0 = this.#clock.now();
         const result = await this.#ports.actions.submit(proposed);
+        const durationMs = this.#clock.now() - t0;
         if (result.approvalWaitMs) guards.excludeWait(result.approvalWaitMs);
         results.push(result);
         roundResults.push(result);
-        observer?.onToolResult?.({ tool: call.tool, outcome: result.outcome, summary: result.summary, ...(result.data !== undefined ? { data: result.data } : {}) });
+        observer?.onToolResult?.({
+          tool: call.tool, outcome: result.outcome, summary: result.summary, callId: call.id, durationMs,
+          ...(result.approvalWaitMs !== undefined ? { approvalWaitMs: result.approvalWaitMs } : {}),
+          ...(roundTaint ? { tainted: true } : {}),
+          ...(result.data !== undefined ? { data: result.data } : {}),
+        });
         toolResults.push({
           toolCallId: call.id,
           content: toolResultContent(result),

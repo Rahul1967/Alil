@@ -42,11 +42,19 @@ export interface ApprovalRequest {
   advice?: string;
 }
 
+/**
+ * Why a request was not approved. `declined` is a human answer; the rest are the harness failing
+ * closed with nobody having answered. The ledger attributes each to the right actor.
+ */
+export type ApprovalOutcome = "declined" | "timeout" | "unreachable";
+
 export interface ApprovalDecision {
   approved: boolean;
   /** If present, mint a standing grant covering future matching actions. */
   scope?: GrantScope;
   reason?: string;
+  /** On a non-approval: who/what ended it. Absent ⇒ recorded as `by: "unknown"`, never as the operator. */
+  outcome?: ApprovalOutcome;
 }
 
 /** The seam: the boundary requests approval; an implementation decides how to ask. */

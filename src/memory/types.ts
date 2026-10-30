@@ -25,6 +25,8 @@ export interface TimelineLine {
   lens?: string;
   /** Files the operator sent with this (user) line, as placed by the ingestion store. */
   attachments?: TimelineAttachment[];
+  /** The turn that wrote this line — joins it to the ledger and telemetry. */
+  turnId?: string;
 }
 
 /** A file reference carried on a timeline line; the bytes live on disk under attachments/. */
