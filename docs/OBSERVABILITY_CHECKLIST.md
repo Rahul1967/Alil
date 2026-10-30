@@ -16,7 +16,7 @@ Tick a box only when its **Done when** line is true. Built on branch `feat/obser
 
 - [ ] **0a Seal the ledger.** Stop `npm run telegram` and the UI server → `npm run audit -- seal "fork: telegram + ui wrote with cached heads (Sep 1–Oct 24); lines 1–61 predate the chain"` → `npm run audit` → restart both.
   - Done when: `npm run audit` reports ok with a sealed prefix; both processes running on current `master`.
-- [ ] **0b Research files.** Decide: commit `reports/` + `research_notes/`, or add them to `.gitignore`.
+- [x] **0b Research files.** Summarised into DESIGN §10d; `reports/` and `research_notes/` are to be deleted (never committed).
 - [ ] **0c Uploaded-file taint.** Decide: shell on operator-uploaded files stays **deny**, or becomes **ask**.
 
 ---

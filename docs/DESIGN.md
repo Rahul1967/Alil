@@ -843,7 +843,62 @@ lines) instead of 40 rows, and each prior line says which channel it came from.
   history; `ALIL_RETRIEVAL=lexical` (or `openMemory({ retrieval })`) selects FTS-only ranking.
 - `npm run eval:tasks` — golden tasks drawn from real failures (`evals/tasks.json`), each run in a
   throwaway sandbox through the real harness and model, graded on end state and trajectory, reported
-  as pass^1 and pass^k (all k tries succeed — reliability, not luck).
+  as pass^1 and pass^k (all k tries succeed — reliability, not luck). First baseline (2026-10-31,
+  Sonnet 5 on Bedrock, 8 tasks × 3 trials, ≈ $1.6): **pass^1 0.88, pass^3 0.75**. Six tasks pass
+  every trial; two don't: `large-csv-replies` (1/3 — on a 138k-char CSV the reply neither gives the
+  correct total nor says the read was partial) and `no-made-up-file` (2/3 — one reply didn't say the
+  file was missing). Those two are the regression targets.
+
+### 10d · Research basis (2026-10-30)
+
+The design above came from a research pass on metrics and observability for high-stakes agent
+systems, then a counter-review that checked it against the code. The report and notes were not
+kept; what mattered is recorded here.
+
+**Sourced findings used**
+- *OpenTelemetry GenAI conventions* moved to `open-telemetry/semantic-conventions-genai`; every
+  document is **Development** status with no tagged release, and main breaks the v1.37-era names
+  (`gen_ai.client.token.usage` split by direction; `gen_ai.client.inference.duration`;
+  `cache_creation` → `cache_write`; `gen_ai.system` → `gen_ai.provider.name`, `aws.bedrock` for
+  Bedrock). Message content is opt-in and flagged as likely PII. ⇒ Alil owns its own event schema
+  and maps names only if a backend is ever added.
+- *OTel sampling* advises against sampling at "tens of traces per second or lower" ⇒ record 100%,
+  bound payload size instead.
+- *Bedrock* returns `metrics.latencyMs`, cache read/write tokens and nine stop reasons (including
+  `model_context_window_exceeded`, `malformed_*`, `guardrail_intervened`) in the Converse response;
+  quota reserves input + `max_tokens` up front; invocation logging is off by default and, when on,
+  stores full bodies (a regulated store of its own).
+- *AWS Builders' Library*: retries multiply across layers — retry at one layer only.
+- *Google SRE workbook*: burn-rate alerting (14.4× / 6× / 1×) breaks down at low traffic (at ~10
+  requests/h one failure is a large burn) ⇒ invariants and heartbeats instead of percentiles.
+- *τ-bench*: pass^k (all k trials succeed) drops far below pass@1 (gpt-4o retail 61% → <25% at
+  k=8) ⇒ pass^k is the reliability number for an assistant you rely on.
+- *Anthropic on agent evals*: grade the end state first; start with 20–50 tasks from real failures;
+  one isolated judge per rubric, calibrated on human labels. *Zheng et al.*: LLM judges show
+  position and verbosity bias ⇒ deterministic graders first.
+- *MCP spec 2025-11-25*: protocol errors vs `isError` tool errors are distinct; timeouts on every
+  request; tool annotations are untrusted. *Invariant Labs*: tool poisoning and rug pulls ⇒ tool-
+  definition pins with an alert on change.
+- *Retrieval*: approximate search must be measured against exact search; `vec0` is exact. *LongMemEval*
+  categories (single fact, multi-session, temporal, knowledge update, abstention) shape the
+  must-recall set.
+- *Compliance* (not legal advice): PCI DSS 10 (per-event fields, 12-month retention), HIPAA
+  documentation retention (6 years), EU AI Act Art. 12/26 logging — all bind regulated entities or
+  high-risk systems, and the EU AI Act and India's DPDP Act exclude purely personal use. Deferred
+  until Alil runs for someone else.
+
+**Counter-review corrections (verified against the code)**
+- The first report framed Alil as a regulated healthcare/finance system; it is a single-operator
+  assistant, so compliance retention, AgentDojo suites, burn-rate alerts and a Langfuse backend are
+  deferred (see the triggers in `docs/OBSERVABILITY_CHECKLIST.md`).
+- It called vector retrieval "future" (hybrid `vec0` + BM25 has shipped since `3e6b460`), gated
+  subagents that exist, measured a prompt cache that was off, alerted on guardrails never
+  configured, and proposed a `busy_timeout` that better-sqlite3 already defaults to 5 s.
+- It missed: caching off, the operator wrongly named on approval timeouts, the 40-row working set,
+  and the distillation doc/code gap. All four are fixed above.
+- What held: data dropped at the provider, no join key, retry amplification, breaker counting, the
+  unbounded Telegram 429 loop, the static health check, silent catch blocks, and keeping telemetry
+  out of the ledger.
 
 ## 11 · Implementation status & code map
 
